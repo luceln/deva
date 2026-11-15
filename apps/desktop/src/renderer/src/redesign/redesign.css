@@ -1484,6 +1484,123 @@ body.cf-resizing-y * {
   flex-wrap: wrap;
 }
 
+/* ── 模型失效批量替换对话框（复用 Modal + .modal__title / .modal__actions / .btn / Select） ── */
+.cf-swap__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--danger);
+}
+.cf-swap__hint {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.cf-swap__section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cf-swap__label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.cf-swap__count {
+  color: var(--fg-subtle);
+  font-size: 11px;
+  font-weight: 400;
+}
+.cf-swap__note {
+  margin: 0;
+  color: var(--fg-subtle);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.cf-swap__empty {
+  margin: 4px 0;
+  color: var(--fg-subtle);
+  font-size: 12px;
+}
+.cf-swap__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(32vh, 240px);
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cf-swap__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+.cf-swap__row.is-kept {
+  opacity: 0.62;
+}
+.cf-swap__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 失效原因分类：nokey 用警示色（去填密钥即可），其余用危险色（得换模型）。 */
+.cf-swap__kind {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--danger);
+  font-size: 11.5px;
+}
+.cf-swap__kind.is-nokey {
+  color: var(--warning);
+}
+.cf-swap__kind.is-ok {
+  color: var(--success);
+}
+.cf-swap__keep {
+  flex: none;
+  color: var(--fg-subtle);
+  font-size: 11px;
+}
+.cf-swap__link {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.cf-swap__link:hover {
+  text-decoration: underline;
+}
+.cf-swap__toggle {
+  align-self: flex-start;
+}
+.cf-swap__result {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+}
+.cf-swap__actions {
+  flex-wrap: wrap;
+}
+
 /* git 失败 toast 正文：原样呈现命令输出（保留换行、自动折行、等宽），便于读出真实原因。
    最多 5 行，超出部分裁掉并以 … 收尾，不出滚动条（line-clamp 依赖 -webkit-box，Chromium 原生支持）。 */
 .cf-giterr {

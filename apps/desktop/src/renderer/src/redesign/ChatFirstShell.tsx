@@ -32,6 +32,7 @@ import { type RailTab, IconRail, Rail, QuickStart, RosterEmpty } from './Rail'
 import { TasksPane, TaskFormModal } from './TasksPane'
 import { LiveConversation } from './Conversation'
 import { type SlashCommand, type ComposerPrefill, restoreToComposer } from './Composer'
+import { registerModelSettingsOpener } from './modelSettingsBus'
 import { type EditorState, ProfileView, PersonaEditor } from './ProfileView'
 import { type SettingsInit, Settings } from './SettingsPane'
 
@@ -216,6 +217,14 @@ export function ChatFirstShell(): React.JSX.Element {
     setSettingsInit(init)
     setSettingsOpen(true)
   }
+  // 输入框里的模型失效对话框需要「去填密钥」直达设置 › 模型：登记一个打开入口（见 modelSettingsBus），
+  // 免得为这一个按钮把回调从外壳逐层传到 Composer。卸载时撤掉，避免指向已卸载组件的 setState。
+  useEffect(() => {
+    registerModelSettingsOpener(() => openSettings({ section: 'models' }))
+    return () => registerModelSettingsOpener(null)
+    // openSettings 只读两个 setState（引用恒定），无需进依赖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   /** 非空时打开角色编辑器（Part G）。 */
   const [editor, setEditor] = useState<EditorState | null>(null)
   /**

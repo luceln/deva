@@ -65,6 +65,7 @@ import {
 } from '../components/humation'
 import { samePath, DEFAULT_PERSONA_ID, fill, AvatarStack, Avatar } from './shell-common'
 import { GitWidget, WorkspaceMenu } from './GitWidget'
+import { ModelSwapDialog } from './ModelSwapDialog'
 import { leadingQuote, withQuote, quotePlain } from './ConvMessage'
 
 /**
@@ -983,16 +984,22 @@ export const Composer = memo(function Composer({
  * 切换时做两件事：① 写当前对话覆盖层并立即落库到会话属性（setSessionModel，切了不发重启也不丢），
  * 故同角色的多个对话可各用不同模型；② 把这次选择记为「最近使用模型」（setActiveModel）——本应用不设
  * 显式「默认模型」，最近一次在此切换的模型即充当**新对话未选时的默认**（见 store/models.tsx activeModelId）。
- * 显示的是**本对话生效模型**：本对话已选则显示所选；未选 / 所选模型已被删除 → 回落最近使用模型
- * activeModel 显示（与主进程 resolveModelRef 的兜底一致，删除的偏好模型自动回归最近使用）。
+ * 显示的是**本对话生效模型**：本对话已选则显示所选；未选 → 回落最近使用模型 activeModel 显示
+ * （与主进程 resolveModelRef 的兜底一致）。
+ *
+ * **失效标红**：解析不到（模型被删 / 服务商被禁用 / 缺密钥 / 引用本身坏了）不再静默回落——胶囊标红、
+ * 文案换成「模型不可用」、右侧挂本对话受影响的会话数，点它直接打开批量替换对话框（用户此刻唯一的意图
+ * 就是修它，再弹普通模型菜单只会让人再点一层）。是否失效一处都不在这里算：结论来自主进程的 scan
+ * （store 的 brokenModels），渲染层自己按 providers 推一遍必然与主进程漂移。
  * 菜单向上弹出（.model-pick__menu 的 bottom:calc(100%+8px)），锚在输入区工具条恰在屏内。
  */
 function ModelPicker(): React.JSX.Element {
   const { t } = useI18n()
   const { activeModel, providers, setActiveModel } = useModels()
-  const { currentBinding } = useChatState()
+  const { currentBinding, currentSessionId, brokenModels, sessions } = useChatState()
   const { setSessionModel } = useChatActions()
   const [open, setOpen] = useState(false)
+  const [swapOpen, setSwapOpen] = useState(false)
   // 只列对话模型（purpose==='llm'）：决策模型（如 Jev）不生成文本，绝不可被选为对话模型。
   const groups = providers
     .filter((p) => p.enabled && (p.purpose ?? 'llm') === 'llm')
@@ -1020,6 +1027,61 @@ function ModelPicker(): React.JSX.Element {
       }
     return null
   }, [currentBinding.model, providers, activeModel])
+
+  // 本会话的模型是否已失效：只认主进程 scan 的结论（store 的 brokenModels），不在渲染层按 providers 复算。
+  // 悬空的引用可能没人登记在本会话上（缓存里没有本会话的 sessionId 时也不标红），此时宁可保持原样——
+  // 拿不到结论就标红，会把用户赶去换一个本来好好的模型。
+  // 看成员会话时用它的主对话（批量替换的范围是「主对话 + 成员」，与主进程 scan 的口径一致）。
+  // 成员会话的归属由主对话的 members 名单反查——成员会话本身不进 sessions，与 ChatFirstShell 的 memberOf 同法。
+  const mainId = useMemo(
+    () => sessions.find((s) => s.members?.some((m) => m.sessionId === currentSessionId))?.id ?? currentSessionId,
+    [sessions, currentSessionId]
+  )
+  const brokenHere = useMemo(
+    () => (brokenModels[mainId] ?? []).filter((b) => b.sessionId === currentSessionId),
+    [brokenModels, mainId, currentSessionId]
+  )
+  const broken = brokenHere.length > 0
+  // 本对话的失效原因全都只是「缺密钥」时，胶囊用警示色而非危险色：填上密钥就好，不该被读成「得换模型」。
+  // 只要有一处是真坏（被删 / 被禁用 / 引用非法），就按严重处理（危险色）。
+  const onlyNoKey = brokenHere.length > 0 && (brokenModels[mainId] ?? []).every((b) => b.kind === 'nokey')
+  // 受影响的会话数（本对话 + 名下成员）：红色胶囊右侧的徽标，告诉用户这不是一处的问题。
+  const brokenCount = (brokenModels[mainId] ?? []).length
+  // 本次要换掉的引用：优先本会话自己指向的那个（覆盖层 / 已落库值），对不上再退回扫描结果里的第一条。
+  const swapFromRef =
+    currentBinding.model && brokenHere.some((b) => b.ref === currentBinding.model)
+      ? currentBinding.model
+      : (brokenHere[0]?.ref ?? '')
+
+  // 失效胶囊：不弹模型菜单，直接打开批量替换对话框——用户此刻要处理的就是它，再弹普通菜单只会多一层。
+  // 只有缺密钥时文案改成「缺少密钥」并保留可选的换模型入口（对话框里主操作是「去填密钥」）。
+  if (broken) {
+    return (
+      <div className="model-pick">
+        <button
+          className={`chip is-broken${onlyNoKey ? ' is-nokey' : ''}`}
+          type="button"
+          title={t('cf.modelSwap.brokenHint').replace('{n}', String(brokenCount))}
+          onClick={() => setSwapOpen(true)}
+        >
+          <span className="chip__label">
+            {onlyNoKey ? t('cf.modelSwap.noKey') : t('cf.modelSwap.broken')}
+          </span>
+          {/* 徽标恒显示：一个会话也不受影响时不会走到这里，有红标就说明至少一处，数字让用户知道范围。 */}
+          <span className="chip__badge">{brokenCount}</span>
+        </button>
+        {swapOpen && (
+          <ModelSwapDialog
+            // 换掉的正是本会话指向的那个失效引用；同一对话里别的失效引用换完会重新亮红标。
+            mainId={mainId}
+            fromRef={swapFromRef}
+            onClose={() => setSwapOpen(false)}
+          />
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="model-pick">
       <button

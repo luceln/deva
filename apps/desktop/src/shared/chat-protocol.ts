@@ -198,6 +198,63 @@ export interface ChatSetArchivedRequest {
   archived: boolean
 }
 
+// ── 模型可用性 / 批量替换（见 services/model-availability.ts、model-swap.ts）──
+
+/**
+ * 一个模型引用失效的原因，四类分开是为了让界面能给出不同的出路：
+ * - malformed：引用本身不合 `providerId:modelId` 格式（旧数据 / 手改配置）；
+ * - missing：配置里找不到该服务商，或该服务商下找不到该模型（含模型被删）；
+ * - disabled：服务商或模型存在但被停用（`enabled === false`）；
+ * - nokey：服务商与模型都在、也都启用，只是没配 API 密钥——**应引导去填密钥，不该逼用户换模型**。
+ */
+export type AvailabilityKind = 'malformed' | 'missing' | 'disabled' | 'nokey'
+
+/**
+ * 一个模型引用能不能用的判定结果（主进程 model-availability.ts 唯一产出，渲染层只消费，不复算）。
+ * ok 为真时 kind 缺省；为假时 kind 必有。detail 只写技术定位（provider / model id），给排查与日志用，
+ * 面向用户的文案由渲染层按 kind 出（要跟界面语言走）。
+ */
+export interface AvailabilityResult {
+  ok: boolean
+  kind?: AvailabilityKind
+  detail?: string
+}
+
+/**
+ * 一个「模型引用已失效」的会话。name 由主进程填好（成员名，主对话则是对话标题），渲染层不再按 id 查一遍——
+ * 免得出现两套取名字规则。ref 是它当前存的引用原文（给替换流程做精确匹配用）。
+ */
+export interface BrokenRef {
+  sessionId: string
+  name: string
+  ref: string
+  kind: AvailabilityKind
+}
+
+/**
+ * 一次批量替换的结果：changed = 真被改成目标模型的会话；skipped = 引用与 fromRef 不同而原样保留的
+ * （用户单独给它们指定过别的模型，属于正常保留，界面上可展开看是哪些）。
+ */
+export interface ModelSwapResult {
+  changed: BrokenRef[]
+  skipped: BrokenRef[]
+}
+
+/** 扫本对话里模型引用已失效的会话（主对话 + 未移除成员）。只读。见 chat:model-swap-scan。 */
+export interface ChatModelSwapScanRequest {
+  mainId: string
+}
+
+/**
+ * 把本对话里所有引用 fromRef 的会话改成 toRef。引用不同的原样跳过；目标不可用则整批拒绝、一个都不改。
+ * 见 chat:model-swap-apply。
+ */
+export interface ChatModelSwapApplyRequest {
+  mainId: string
+  fromRef: string
+  toRef: string
+}
+
 /**
  * chat:resolve-autotask 的返回：create 成功带已建任务 id；dismiss 成功；失败带稳定错误码（渲染层本地化）。
  * 错误码含 createTask 的全部码 + 编排层的 no-session / no-input。

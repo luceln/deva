@@ -24,6 +24,8 @@ import type {
 import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
 import { useModels, findActive, hasUsableModel } from './models'
+import * as modelSwapBridge from './modelSwap'
+import type { BrokenRef, ModelSwapResult } from './modelSwap'
 import { useWorkspace } from './workspace'
 import { formatTokens } from '../../../shared/context'
 import { normalizeAgentDraft, normalizeAutotaskDraft, type AgentDraft, type AutotaskDraft } from '../../../shared/drafts'
@@ -413,6 +415,26 @@ interface ChatContextValue {
   /** 设置**当前对话**的思考等级（只改当前对话，立即落库；不动全局「最近使用」，那由调用方另记）。 */
   setSessionEffort: (level: EffortLevel) => void
   /**
+   * 本对话（主对话 + 名下成员会话）里引用已失效的会话，按「主对话 id」缓存：键是主对话 sessionId，
+   * 值是 scan 回来的失效清单。ModelPicker 据此标红、替换对话框据此列清单——**渲染层不自己判可用性**，
+   * 判定只在主进程一份（model-availability.ts）。
+   */
+  brokenModels: Record<string, BrokenRef[]>
+  /**
+   * 扫一遍某对话的模型失效情况并写进 brokenModels（幂等、可重复调）。切到某对话时调一次即可，
+   * 不要在渲染里调。返回本次结果（拿不到时为空数组）。
+   */
+  scanModelSwapState: (mainId: string) => Promise<BrokenRef[]>
+  /**
+   * 把某对话里引用 fromRef 的会话批量换成 toRef：调主进程写盘，随后刷新会话列表并清掉该对话的失效缓存
+   * （替换成功与否都以主进程的结论为准，缓存宁可空着下次再扫）。
+   */
+  applyModelSwap: (
+    mainId: string,
+    fromRef: string,
+    toRef: string
+  ) => Promise<ModelSwapResult | { error: string }>
+  /**
    * 各会话正等用户处理的交互卡（键=sessionId，见 PendingCard）：主对话据此在末尾为成员显示「在等你回答」的胶囊与卡片。
    * 卡片答复 / 在别处收敛 / 该会话本轮结束即移除。
    */
@@ -514,6 +536,8 @@ const ACTION_KEYS: Record<ChatActionKey, true> = {
   mountFocus: true,
   setSessionModel: true,
   setSessionEffort: true,
+  scanModelSwapState: true,
+  applyModelSwap: true,
   respondAsk: true,
   respondPlan: true,
   respondMount: true,
@@ -1049,6 +1073,8 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
   // 主进程交来的全部会话，含成员会话（带 parentId，见 SessionMeta.parentId）。成员会话不进左侧列表，
   // 对外只给 sessions（不含成员会话）；打开成员对话时它的模型 / 思考等级 / 文件夹从这里读。
   const [allSessions, setSessions] = useState<SessionMeta[]>([])
+  const allSessionsRef = useRef(allSessions)
+  allSessionsRef.current = allSessions
   const sessions = useMemo(() => allSessions.filter((s) => !s.parentId), [allSessions])
   // 初始会话清单是否已载入完成。首次 listSessions resolve 后置 true 并恒保持；
   // 渲染层据此区分「加载中」与「确认无对话」，避免启动瞬间闪现空态。
@@ -1189,6 +1215,12 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     setTodoStates(map)
   }, [])
 
+  // 各主对话的模型失效清单（键=主对话 sessionId）：切到某对话时扫一次写进来（见 scanModelSwapState）。
+  // 只存主进程的判定结果，渲染层不复算；替换成功后清空该对话的条目。
+  const [brokenModels, setBrokenModels] = useState<Record<string, BrokenRef[]>>({})
+  const brokenModelsRef = useRef(brokenModels)
+  brokenModelsRef.current = brokenModels
+
   // 各会话待送达的插入消息（键=sessionId）：只由主进程的 inserts 事件更新（插入 / 送达 / 撤回 / 回合结束都会推）。
   const [insertStates, setInsertStates] = useState<Map<string, string[]>>(() => new Map())
   const setInsertState = useCallback((sid: string, pending: string[]): void => {
@@ -1265,6 +1297,62 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     if (projectPathRef.current !== path) return // 项目已切换，丢弃过期结果
     setSessions(list)
   }, [])
+
+  // 扫某对话的模型失效情况并写入缓存（见 ChatContextValue.scanModelSwapState）。
+  // 引用恒定（空依赖）：切会话的 effect 只依赖它，会话清单变化时不会被拖着重扫一遍。
+  // 扫描是一次只读 IPC，允许重复调：失效原因随时可能变（模型被删、服务商被禁用、密钥被清），
+  // 调用方在「换了对话」「模型配置变了」「替换完」三处重新扫，缓存始终是最近一次的结论。
+  const scanModelSwapState = useCallback(async (mainId: string): Promise<BrokenRef[]> => {
+    if (!mainId) return []
+    const list = await modelSwapBridge.scanModelSwap(mainId)
+    const map = new Map(Object.entries(brokenModelsRef.current))
+    if (list.length) map.set(mainId, list)
+    else map.delete(mainId)
+    const next = Object.fromEntries(map)
+    brokenModelsRef.current = next
+    setBrokenModels(next)
+    return list
+  }, [])
+
+  // 批量替换（见 ChatContextValue.applyModelSwap）：写盘 → 刷新会话清单 → 清掉该对话的失效缓存。
+  // 缓存直接清空而不是就地改：主进程才知道最终改了几个（引用相等的才改），界面重扫一次即可得到真相，
+  // 比在渲染层推演「谁应该变了」更不容易出错。
+  const applyModelSwap = useCallback(
+    async (mainId: string, fromRef: string, toRef: string): Promise<ModelSwapResult | { error: string }> => {
+      const res = await modelSwapBridge.applyModelSwap(mainId, fromRef, toRef)
+      if (!('error' in res)) {
+        // 覆盖层里残留的旧模型引用要一并撤掉：替换是主进程直接改会话属性，覆盖层若还压着旧值，
+        // 选择器会继续显示那个失效模型（直到下次落库才撤）。
+        if (res.changed.length) {
+          const stale = new Set(res.changed.map((b) => b.sessionId))
+          const map = new Map(bindingsRef.current)
+          let touched = false
+          for (const sid of stale) {
+            const cur = map.get(sid)
+            if (cur && cur.model !== undefined) {
+              const { model: _old, ...rest } = cur
+              map.set(sid, rest)
+              touched = true
+            }
+          }
+          if (touched) {
+            bindingsRef.current = map
+            setBindings(map)
+          }
+        }
+        const rest = { ...brokenModelsRef.current }
+        delete rest[mainId]
+        brokenModelsRef.current = rest
+        setBrokenModels(rest)
+      }
+      await refreshSessions()
+      // 清掉的是「这一批」的结论：若该对话里还有别的失效引用（另一批），重扫一次让红标继续亮着——
+      // 否则用户替换完一批就再也看不到剩下的坏了哪些，又得回各自会话里点。
+      if (!('error' in res)) await scanModelSwapState(mainId)
+      return res
+    },
+    [refreshSessions, scanModelSwapState]
+  )
 
   // 起一个全新的空会话：切换当前会话（新 id 无活动态 → 视图自然空）。
   // 对话优先外壳可传 personaId（绑定身份）/ focusRoot（聚焦工作区）/ model（**快照**角色偏好模型）→ 存进
@@ -1661,6 +1749,25 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       .catch(() => undefined)
   }, [currentSessionId, setTodoState])
 
+  // 切到某对话时扫一次模型失效（见 scanModelSwapState）：只读 IPC，别放在渲染里调。
+  // 触发条件只有两处，都对应「失效结论可能变了」：① 换了对话；② 模型配置变了（删模型 / 禁用服务商都会
+  // 让引用悬空，providers 随之换新引用）。**不依赖会话清单**——它每回合结束都刷新，跟着扫会变成每轮都打
+  // 一次 IPC；替换成功那条路径另在 applyModelSwap 里显式重扫。
+  // providers 只作为「配置变了」的触发器出现在依赖里（effect 内不读它），故用 eslint 关掉该行的空依赖告警。
+  // 看成员会话时扫它所属的主对话：批量替换的范围就是「主对话 + 它的成员」，与主进程 scan 的口径一致。
+  useEffect(() => {
+    const sid = currentSessionId
+    if (!sid) return
+    // 成员会话不进 sessions，得从主对话的成员名单反查（同 ChatFirstShell 的 memberOf）。
+    const all = allSessionsRef.current
+    const mainId =
+      all.find((s) => s.id === sid)?.parentId ?? all.find((s) => s.members?.some((m) => m.sessionId === sid))?.id ?? sid
+    // 惰性未建档的新会话（列表里还没有）扫了也是空，跳过省一次 IPC。
+    if (!all.some((s) => s.id === mainId)) return
+    void scanModelSwapState(mainId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSessionId, providers, scanModelSwapState])
+
   // 回合之外新建的对话（手机上 /new，还没发消息）：没有 turn_start 可借，主进程单独通知刷新列表。
   useEffect(() => window.deva.chat.onSessionsChanged(() => void refreshSessions()), [refreshSessions])
 
@@ -1804,8 +1911,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     }
   }, [currentSessionId, allSessions, bindings])
 
-  const value = useMemo<ChatContextValue>(() => {
-    // 返回是否真的发出：false = 未发出（空输入 / 本会话正忙 / 未选模型 / IPC 失败），调用方据此把草稿放回。
+  const value = useMemo<ChatContextValue>(() => {    // 返回是否真的发出：false = 未发出（空输入 / 本会话正忙 / 未选模型 / IPC 失败），调用方据此把草稿放回。
     // 未发出的原因一律走 toast、不进对话流——这些提示主进程不落盘，做成气泡重启即消失，前后不一致。
     const send = async (text: string, attachments?: SendAttachment[]): Promise<boolean> => {
       const sid = sessionIdRef.current
@@ -2332,6 +2438,9 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       mountFocus,
       setSessionModel,
       setSessionEffort,
+      brokenModels,
+      scanModelSwapState,
+      applyModelSwap,
       pendingCards,
       respondAsk,
       respondPlan,
@@ -2367,6 +2476,9 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     activeModel,
     activeEffort,
     providers,
+    brokenModels,
+    scanModelSwapState,
+    applyModelSwap,
     t,
     toast,
     startFresh,
@@ -2391,6 +2503,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       sessionStates: value.sessionStates,
       currentBinding: value.currentBinding,
       draftSession: value.draftSession,
+      brokenModels: value.brokenModels,
       pendingCards: value.pendingCards,
       todos: value.todos,
       pendingInserts: value.pendingInserts,
@@ -2403,6 +2516,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       value.sessionStates,
       value.currentBinding,
       value.draftSession,
+      value.brokenModels,
       value.pendingCards,
       value.todos,
       value.pendingInserts,

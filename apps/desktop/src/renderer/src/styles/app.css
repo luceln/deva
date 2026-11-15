@@ -2862,9 +2862,43 @@ button.tl__line:hover {
   background: var(--bg-active);
   color: var(--fg);
 }
+/* 模型失效的贴片：标红 + 淡红底，一眼看出「这里坏了」。与 .chip 同尺寸，不撑动工具条。 */
+.chip.is-broken {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+.chip.is-broken:hover {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+}
+/* 失效原因只是「缺密钥」时改用警示色：填上密钥就好，不该被读成「模型坏了」。 */
+.chip.is-broken.is-nokey {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 32%, transparent);
+}
+.chip.is-broken.is-nokey:hover {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+}
 .chip:disabled {
   opacity: 0.5;
   pointer-events: none;
+}
+/* 贴片尾部的小计数（本对话有几个会话受同一个失效模型影响）。 */
+.chip__badge {
+  flex-shrink: 0;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  color: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 /* 贴片内需要截断的文本（如过长的模型名）：单行 + 省略号，避免撑破工具条换行。 */
 .chip__label {

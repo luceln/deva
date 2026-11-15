@@ -14,6 +14,8 @@ import type {
   ChatSetModelRequest,
   ChatSetEffortRequest,
   ChatSetFocusRequest,
+  ChatModelSwapApplyRequest,
+  ChatModelSwapScanRequest,
   ChatRenameSessionRequest,
   AttachmentChip,
   HandoffInfo,
@@ -30,7 +32,9 @@ import type {
   MountResponse,
   ResolveAutotaskResult,
   ChatStreamEvent,
-  MemberProgressGroup
+  MemberProgressGroup,
+  BrokenRef,
+  ModelSwapResult
 } from '../shared/chat-protocol'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
@@ -44,6 +48,8 @@ export type {
   ChatSetModelRequest,
   ChatSetEffortRequest,
   ChatSetFocusRequest,
+  ChatModelSwapApplyRequest,
+  ChatModelSwapScanRequest,
   ChatRenameSessionRequest,
   AttachmentChip,
   HandoffInfo,
@@ -60,7 +66,9 @@ export type {
   MountResponse,
   ResolveAutotaskResult,
   ChatStreamEvent,
-  MemberProgressGroup
+  MemberProgressGroup,
+  BrokenRef,
+  ModelSwapResult
 }
 
 /** 目录项（单层）。 */
@@ -788,6 +796,18 @@ const api = {
     /** 切换本对话模型并立即落库（不等下一次发送）。 */
     setModel: (req: ChatSetModelRequest): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('chat:set-model', req),
+    /**
+     * 模型引用体检：本对话（主对话 + 未移除成员）里引用已失效的会话清单。只读。
+     * 判定只在主进程做（可用性规则唯一一份），渲染层只消费结果、不复算。
+     */
+    scanModelSwap: (req: ChatModelSwapScanRequest): Promise<BrokenRef[]> =>
+      ipcRenderer.invoke('chat:model-swap-scan', req),
+    /**
+     * 批量替换：把本对话里所有引用 fromRef 的会话改成 toRef（引用不同的原样跳过）。
+     * 目标模型不可用时整批拒绝、回 { error }（文案已在主进程按界面语言出好）。
+     */
+    applyModelSwap: (req: ChatModelSwapApplyRequest): Promise<ModelSwapResult | { error: string }> =>
+      ipcRenderer.invoke('chat:model-swap-apply', req),
     /** 切换本对话思考等级并立即落库（不等下一次发送）。 */
     setEffort: (req: ChatSetEffortRequest): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:set-effort', req),

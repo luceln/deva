@@ -35,6 +35,7 @@ import {
   resolveModelRef,
   resolveModelRefOrNull
 } from './model-resolve'
+import { resolveAvailability } from './model-availability'
 import {
   findTaskBySession
 } from './tasks'
@@ -424,6 +425,28 @@ export async function runTurn(
   if (fromRemote) remoteTurns.add(turnId)
 
   try {
+    // 轮前体检：本对话存的模型引用若已失效（模型被删 / 服务商被禁用 / 密钥丢了），这一轮注定发不出去。与其让
+    // provider 层抛一句 400/401，不如先拦下来、说清是哪一类，把用户引到输入框上方那个标红的模型胶囊去换模型。
+    // 只管「本对话自己存的引用」——空串（尚未定格，跟随全局默认）交给下面的 resolveModelRef 兜底，不算失效。
+    // 定时任务不在此列：它无人值守、没人能当场换模型，拦下来只会让任务静默失败，仍按原路回落（见 resolveDefaultModel）。
+    if (!scheduled && session.model) {
+      const avail = await resolveAvailability(session.model)
+      if (!avail.ok) {
+        const why =
+          avail.kind === 'nokey'
+            ? isEn()
+              ? 'its provider is missing an API key'
+              : '所在服务商还没有配置密钥'
+            : isEn()
+              ? 'the model is no longer available'
+              : '这个模型已不可用'
+        throw new Error(
+          isEn()
+            ? `This chat's model can't be used — ${why}. Pick another model above (or fill in the key), then send again.`
+            : `本对话的模型用不了——${why}。请在上方输入框换一个模型（或填好密钥）后再发送。`
+        )
+      }
+    }
     const parentSession = session.parentId ? getSession(session.parentId) : undefined
     const memberRef = parentSession?.members?.find((m) => m.sessionId === sessionId)
     const mainRoot = parentSession?.focusRoot ?? null

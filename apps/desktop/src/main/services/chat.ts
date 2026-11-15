@@ -9,6 +9,8 @@ import type {
   ChatInsertRequest,
   ChatInsertResult,
   ChatModelConfig,
+  ChatModelSwapApplyRequest,
+  ChatModelSwapScanRequest,
   ChatRenameSessionRequest,
   ChatRewindApplyRequest,
   ChatSendRequest,
@@ -17,7 +19,9 @@ import type {
   ChatSetFocusRequest,
   ChatSetModelRequest,
   ChatStreamEvent,
+  BrokenRef,
   DisplayMessage,
+  ModelSwapResult,
   MountResponse,
   PlanResponse,
   ResolveAutotaskResult
@@ -36,6 +40,7 @@ import {
 import {
   resolveModelRef
 } from './model-resolve'
+import { applyModelSwap, scanSessionsByModel } from './model-swap'
 import {
   createTask,
   releaseTasksOwnedBy,
@@ -530,6 +535,31 @@ export function registerChatIpc(getWin: () => BrowserWindow | null): void {
     markMemberSetting(session, 'modelSet')
     return { ok: true }
   })
+
+  // 模型引用体检：本对话（主对话 + 未移除成员）里引用已失效的会话清单。只读，界面挂载 / 切对话时调。
+  // 判定只在主进程做（model-availability.ts），渲染层不复算——两套规则迟早漂移。会话不存在回空数组，不抛。
+  ipcMain.handle(
+    'chat:model-swap-scan',
+    (_e, payload: ChatModelSwapScanRequest): Promise<BrokenRef[]> => scanSessionsByModel(payload?.mainId)
+  )
+
+  // 批量替换：把本对话里所有引用 fromRef 的会话改成 toRef（引用不同的原样跳过）。目标不可用则整批拒绝，
+  // 回 { error }（错误文案在主进程按界面语言出，渲染层直接显示）。改完发会话变更，列表与其它窗口随之刷新。
+  ipcMain.handle(
+    'chat:model-swap-apply',
+    async (
+      _e,
+      payload: ChatModelSwapApplyRequest
+    ): Promise<ModelSwapResult | { error: string }> => {
+      const r = await applyModelSwap({
+        mainId: payload?.mainId,
+        fromRef: payload?.fromRef,
+        toRef: payload?.toRef
+      })
+      if (!('error' in r) && r.changed.length) publishSessionsChanged()
+      return r
+    }
+  )
 
   // 对话输入框切换思考等级：同 set-model——立即落库到本对话，惰性未建档的会话跳过（随首发落库），不改 updatedAt。
   ipcMain.handle('chat:set-effort', (_e, payload: ChatSetEffortRequest): { ok: true } => {

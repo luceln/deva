@@ -30,13 +30,18 @@ interface StoredProvider {
   id?: unknown
   adapter?: unknown
   apiHost?: unknown
+  enabled?: unknown
   models?: unknown
 }
 
 /**
- * 严格解析 `"providerId:modelId"` → ResolvedModel；任何失败（空 / 非法 / 找不到 / 读配置异常）返回 null。
+ * 严格解析 `"providerId:modelId"` → ResolvedModel；任何失败（空 / 非法 / 找不到 / 已被停用 / 读配置异常）返回 null。
  * 供 resolveModelRef（有 fallback）与 resolveDefaultModel（无 fallback）共享的底座，永不抛错。
  * providerId 由本应用生成、无冒号，按首个冒号切分即可。
+ *
+ * 停用的服务商 / 模型同样算解析失败：只查 id 是否存在的旧写法会让「已禁用」的引用照样跑起来，与界面上的可用性
+ * 判定（model-availability.ts）结论相反——两边必须同源，才不会有「界面说失效、主进程照跑」或反过来。
+ * 判定用 `enabled === false`：旧配置可能完全没有该字段，缺省视为可用（宽松容错）。
  */
 function resolveRefStrict(ref: string | null | undefined): ResolvedModel | null {
   if (!ref || typeof ref !== 'string') return null
@@ -50,9 +55,11 @@ function resolveRefStrict(ref: string | null | undefined): ResolvedModel | null 
     const providers = Array.isArray(models.providers) ? (models.providers as StoredProvider[]) : []
     const provider = providers.find((p) => p && p.id === pid)
     if (!provider) return null
+    if (provider.enabled === false) return null
     const list = Array.isArray(provider.models) ? (provider.models as StoredModelDef[]) : []
     const model = list.find((m) => m && m.id === mid)
     if (!model || typeof model.id !== 'string') return null
+    if (model.enabled === false) return null
     const adapter =
       provider.adapter === 'openai'
         ? 'openai'
