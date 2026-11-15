@@ -36,6 +36,7 @@ import type {
   BrokenRef,
   ModelSwapResult
 } from '../shared/chat-protocol'
+import type { GateResult, ImportProgress, ImportReport } from '../shared/import-protocol'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
 export type {
@@ -684,6 +685,21 @@ const api = {
       const listener = (_e: unknown, skills: SkillRecord[]): void => cb(skills)
       ipcRenderer.on('skills:changed', listener)
       return () => ipcRenderer.removeListener('skills:changed', listener)
+    }
+  },
+  /**
+   * 从原版 Deva（~/.deva）导入数据：服务商 / 角色 / 记忆 / 技能 / 会话 / 附件。
+   * 只补 DevaPlus 没有的，已存在的一律跳过 —— 天然幂等，点多少次结果一致；原版全程只读。
+   * probe 用于按钮置灰（原版在跑 / 找不到源），run 返回逐条结果，onProgress 订阅长任务进度。
+   */
+  import: {
+    probe: (): Promise<GateResult> => ipcRenderer.invoke('import:probe'),
+    run: (): Promise<ImportReport | { error: string }> => ipcRenderer.invoke('import:run'),
+    /** 订阅 import:progress（附件上百 MB，靠事件推进度而不是轮询），返回取消订阅函数。 */
+    onProgress: (cb: (p: ImportProgress) => void): (() => void) => {
+      const listener = (_e: unknown, p: ImportProgress): void => cb(p)
+      ipcRenderer.on('import:progress', listener)
+      return () => ipcRenderer.removeListener('import:progress', listener)
     }
   },
   /** 本机用户资料（个人资料面板）：头像 spec 存 config.json，图片另存 ~/.deva-plus/profile/。 */

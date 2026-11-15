@@ -1,5 +1,5 @@
 /**
- * 设置页：通用、扩展（技能 / MCP / 角色授权）、关于。
+ * 设置页：通用、模型、扩展（技能 / MCP / 角色授权）、导入、关于。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Cog,
+  Download,
   Info,
   Lock,
   Plug,
@@ -19,6 +20,7 @@ import {
   X
 } from 'lucide-react'
 import { UpdateSection } from './UpdateSection'
+import { ImportPane } from './ImportPane'
 import devaIcon from '../../../../build/icon.svg'
 import type { McpKV, McpServer, McpStatus, Persona, Skill } from '../mock/extensions'
 import { Markdown } from '../features/chat/Markdown'
@@ -34,7 +36,7 @@ import { ModelSettings } from '../features/settings/ModelSettings'
 import { clipName, IS_MAC, AvatarStack, Segmented, Toggle } from './shell-common'
 
 /* ============================ 系统设置（Part H） ============================ */
-type SettingsSection = 'general' | 'models' | 'extensions' | 'about'
+type SettingsSection = 'general' | 'models' | 'extensions' | 'import' | 'about'
 
 /** 打开设置时的落点：哪一页，以及（扩展页）直接打开哪一项的详情。 */
 export type SettingsInit = { section?: SettingsSection; ext?: { kind: 'skill' | 'mcp'; id: string } }
@@ -48,6 +50,8 @@ export function Settings({ initial, onClose }: { initial?: SettingsInit; onClose
     { id: 'general', icon: <Cog size={15} />, label: t('settings.general') },
     { id: 'models', icon: <Brain size={15} />, label: t('settings.models') },
     { id: 'extensions', icon: <Puzzle size={15} />, label: t('activity.extensions') },
+    // 「导入」排在扩展之后、关于之前：是一次性的迁移动作，不放最显眼（日常用不到），也不埋到最后。
+    { id: 'import', icon: <Download size={15} />, label: t('settings.import.title') },
     { id: 'about', icon: <Info size={15} />, label: t('settings.about') }
   ]
   return (
@@ -80,6 +84,7 @@ export function Settings({ initial, onClose }: { initial?: SettingsInit; onClose
             {section === 'general' && <GeneralPane />}
             {section === 'models' && <ModelSettings />}
             {section === 'extensions' && <ExtensionsPane initialOpen={extTarget} />}
+            {section === 'import' && <ImportPane />}
             {section === 'about' && <AboutPane />}
           </div>
         </div>

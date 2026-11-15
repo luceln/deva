@@ -338,6 +338,25 @@ function persistIndex(): void {
   }
 }
 
+/**
+ * 丢掉内存缓存并删掉索引文件，让下次 listSessions() 重新扫盘（导入器收尾用，只给主进程内部调，不开放 IPC）。
+ *
+ * 为什么两个缓存都要清：`sessionCache` 与 `indexCache` 是模块私有、进程内常驻，`ensureIndex()` 第一行就是
+ * 「有缓存就直接返回」。只删 `_index.json` 根本没用——内存里那份 Map 还在，界面照旧看不到新会话。
+ *
+ * 为什么删索引文件而不是手工补条目：ensureIndex() 在索引缺失时会扫目录重建并回写，是现成的自愈路径，
+ * 不用手工补字段、也不会漏。手工维护反而要跟 metaOf 的字段演进保持同步。
+ */
+export function invalidateIndex(): void {
+  sessionCache.clear()
+  indexCache = null
+  try {
+    rmSync(indexPath(), { force: true })
+  } catch {
+    /* 删不掉也无妨：缓存已清，下次 ensureIndex 会重扫并覆盖写 */
+  }
+}
+
 // ── 拆分存盘（见 StoredSession.compacted）─────────────────────────────────────
 // 已写进拆分文件的那段消息（对象引用）：保存时逐个比对，前缀原样还在就只追加新的，否则换新文件重写。
 const persistedPrefix = new WeakMap<StoredSession, Message[]>()

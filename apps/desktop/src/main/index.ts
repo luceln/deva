@@ -7,6 +7,7 @@ import { getAppIcon, getTrayIcon } from './services/tray-icon'
 import { registerWorkspaceIpc } from './services/workspace'
 import { registerSecretsIpc } from './services/secrets'
 import { registerProviderIpc } from './services/provider'
+import { registerImportIpc } from './importer-ipc'
 import { hasActiveTurns, registerChatIpc, settleActiveTurns } from './services/chat'
 import { listSessions } from './services/chat-store'
 import { sweepCheckpoints } from './services/checkpoints'
@@ -330,6 +331,9 @@ if (!app.requestSingleInstanceLock()) {
 
   // 服务商探针（拉取模型清单，复用密钥解密）
   registerProviderIpc()
+
+  // 从原版 Deva 导入数据（手动触发；只补缺、幂等，原版全程只读）
+  registerImportIpc(() => mainWindow)
 
   // 会话编排（Agent 主循环：流式 → 工具 → 权限 → 回灌）
   registerChatIpc(() => mainWindow)

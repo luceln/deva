@@ -3582,6 +3582,243 @@ button.cf-mask__pill:hover {
   transition: width 0.2s ease;
 }
 
+/* ---------------------------- 设置 › 导入（见 redesign/ImportPane.tsx） ----------------------------
+   与其它设置分区共用 .cf-pane__title / .cf-pane__desc / .cf-set / .btn；这里只加导入特有的几块：
+   闸门提示、概览数字格、进度条（同 .cf-update__bar 的形态）、结果行。 */
+.cf-imp__gate {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: var(--space-3);
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  color: var(--warning);
+  font-size: 12px;
+}
+.cf-imp__link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cf-imp__link:hover {
+  text-decoration: underline;
+}
+.cf-imp__link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.cf-imp__path {
+  margin-left: auto;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Code', Consolas, monospace);
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+.cf-imp__row--block {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+/* 概览数字：等宽小格，一行放下会话 / 服务商 / 角色 / 记忆 / 技能 / 附件 */
+.cf-imp__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.cf-imp__stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--fg-subtle);
+  font-size: 11.5px;
+}
+.cf-imp__stat b {
+  color: var(--fg);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+/* 进行中：阶段名 + 进度条 + 一句说明 */
+.cf-imp__run {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: var(--space-4);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.cf-imp__runtop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.cf-imp__pct {
+  margin-left: auto;
+  color: var(--fg-subtle);
+  font-size: 11.5px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.cf-imp__bar {
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--radius-full);
+  background: var(--bg-hover);
+}
+.cf-imp__fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+/* 总数未知的步骤（如复制 media 目录）：来回扫一段表示「还在动」，不假装有百分比 */
+.cf-imp__fill.is-moving {
+  width: 35%;
+  animation: cf-imp-sweep 1.1s ease-in-out infinite;
+}
+@keyframes cf-imp-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+.cf-imp__detail {
+  color: var(--fg-subtle);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+.cf-imp__spin {
+  animation: cf-imp-rotate 1s linear infinite;
+}
+@keyframes cf-imp-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 结果：每步一行「步骤 / 新增 / 跳过 / 失败」，可展开明细 */
+.cf-imp__result {
+  margin-top: var(--space-4);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.cf-imp__resulthead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.cf-imp__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.cf-imp__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+}
+.cf-imp__row:hover {
+  background: var(--bg-hover);
+}
+.cf-imp__row--fail {
+  align-items: flex-start;
+}
+.cf-imp__step {
+  flex: none;
+  min-width: 92px;
+  color: var(--fg-muted);
+}
+.cf-imp__num {
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+.cf-imp__num.is-ok {
+  color: var(--fg);
+}
+.cf-imp__num.is-bad {
+  color: var(--danger);
+}
+.cf-imp__row .cf-imp__link {
+  margin-left: auto;
+}
+.cf-imp__sub {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  padding-left: var(--space-4);
+  color: var(--fg-subtle);
+  font-size: 11px;
+  list-style: disc;
+  overflow-wrap: anywhere;
+}
+/* 失败清单：红边常驻，不给折叠——只写日志的失败等于没告诉用户 */
+.cf-imp__fails {
+  margin-top: var(--space-3);
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+.cf-imp__failhead {
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 600;
+}
+.cf-imp__fid {
+  flex: none;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, 'Cascadia Code', Consolas, monospace);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.cf-imp__reason {
+  color: var(--danger);
+  font-size: 11.5px;
+}
+.cf-imp__note {
+  margin: 6px 0 0;
+  color: var(--fg-subtle);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.cf-imp__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  flex-wrap: wrap;
+}
+
 /* ---------------------------- Composer 附件贴片行 ---------------------------- */
 /* ---------------------------- 附件：图片缩略图 + 文件卡片（见 attachments.tsx） ---------------------------- */
 /* 输入框与消息里同一套：图片是缩略图（点开看大图），文件 / 文件夹是卡片（类型图标 + 名称 + 类型与大小）。 */

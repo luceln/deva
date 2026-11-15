@@ -98,6 +98,25 @@ export async function hasSecret(key: string): Promise<boolean> {
   return Boolean(store[key])
 }
 
+/**
+ * 导入专用：**原样写入一段已有密文**（base64），不加密也不解密。
+ *
+ * 为什么要这个入口：从原版 Deva 导入密钥时手里只有密文（DPAPI 密文绑账户不绑路径，同机同账户直接可用），拿不到也
+ * 不该拿到明文。而直接往 secrets.json 写文件是错的——`store` 是进程内缓存，`ensureLoaded` 只在首次载入，
+ * 绕开它写盘会让本进程继续用旧内存态，导入的密钥「导了但用不上」，要重启才生效。
+ *
+ * 加密不可用时拒绝（与 setSecret 同口径：绝不静默存明文）；已有同 key 不覆盖（调用方先 hasSecret 判断）。
+ */
+export async function importEncryptedSecret(key: string, cipherTextBase64: string): Promise<boolean> {
+  await ensureLoaded()
+  if (!key || !cipherTextBase64) return false
+  if (!safeStorage.isEncryptionAvailable()) return false
+  if (key in store) return false
+  store[key] = cipherTextBase64
+  await persist()
+  return true
+}
+
 /** 删除某密钥（幂等）。 */
 export async function deleteSecret(key: string): Promise<void> {
   await ensureLoaded()
