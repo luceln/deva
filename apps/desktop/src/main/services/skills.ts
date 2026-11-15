@@ -252,6 +252,12 @@ const BUILTIN_BY_ID = new Map<string, SkillRecord>(BUILTIN_SKILLS.map((s) => [s.
 /** 保留 id：不可被磁盘技能占用（防同名目录影子），upsert/import 生成 id 时亦回避。 */
 const RESERVED_IDS = new Set<string>(BUILTIN_BY_ID.keys())
 
+/**
+ * 内置元技能的 id（只读）。给导入统计用：这些是应用自带的、代码合成、永不落盘，不是用户的技能，
+ * 不该计入「新增 / 跳过」。导出而不是让调用方另写一份，避免加内置技能时漏改。
+ */
+export const BUILTIN_SKILL_IDS: readonly string[] = [...RESERVED_IDS]
+
 // 导入限额（防 zip 炸弹）：总解压体积 / 文件数 / 单文件体积上限。
 const IMPORT_MAX_TOTAL_BYTES = 20 * 1024 * 1024
 const IMPORT_MAX_FILES = 200

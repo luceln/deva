@@ -128,6 +128,9 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
   // 配置载入完成前不回写，避免用默认种子覆盖已存 ~/.deva-plus/config.json
   const [hydrated, setHydrated] = useState(false)
 
+  // 外部批量改动（导入）后递增，用来重跑下面的载入 effect。
+  const [reloadNonce, setReloadNonce] = useState(0)
+
   useEffect(() => {
     let alive = true
     void (async () => {
@@ -148,7 +151,9 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
     }
   }, [])
 
-  // 载入持久化的模型配置（~/.deva-plus/config.json 的 models 段），与默认种子合并
+  // 载入持久化的模型配置（~/.deva-plus/config.json 的 models 段），与默认种子合并。
+  // reloadNonce 变化时重跑：主进程「从原版导入」这类外部批量改动会经 config:changed 递增它，
+  // 否则本 store 只在挂载时读一次，用户会看到「导完了模型列表还是空的」。
   useEffect(() => {
     let alive = true
     void (async () => {
@@ -187,6 +192,18 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
     return () => {
       alive = false
     }
+  }, [reloadNonce])
+
+  // 主进程外部批量改动（导入）后重载。只认 models 段：别的键（layout 等）与本 store 无关，
+  // 跟着重载会让下面的回写 effect 白跑一次。
+  // 防御：preload 未及时更新时 onChanged 可能不存在，此时退化为「只在挂载时读一次」（旧行为），不让面板崩。
+  useEffect(() => {
+    const onChanged = window.deva.config.onChanged
+    if (typeof onChanged !== 'function') return
+    return onChanged((p) => {
+      if (!p.keys.includes('models')) return
+      setReloadNonce((n) => n + 1)
+    })
   }, [])
 
   // 变更后回写（仅在 hydrate 之后）。密钥不在此列——始终只在主进程加密存储。

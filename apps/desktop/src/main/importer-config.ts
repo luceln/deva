@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { getConfig, setConfig } from './services/config'
 import { importEncryptedSecret } from './services/secrets'
+import { isPresetProviderId } from '../shared/preset-providers'
 import type { StepStat } from '../shared/import-protocol'
 
 /**
@@ -19,9 +20,11 @@ import type { StepStat } from '../shared/import-protocol'
  * layout 是纯界面偏好，搬过去只会让用户觉得「窗口大小我自己还没调过，怎么就变了」。
  */
 
-/** 服务商并入结果：新增了哪些 id、因为已存在而保留本地的是哪些。 */
+/** 服务商并入结果：新增了哪些 id、因为已存在而保留本地的是哪些、哪些是应用自带（不计入用户统计）。 */
 export interface ProviderMergeStat extends StepStat {
   kept: string[]
+  /** 必填（覆盖 StepStat 的可选）：本模块总会填，调用方不必再判空。 */
+  builtin: string[]
 }
 
 type Cfg = Record<string, unknown>
@@ -47,9 +50,14 @@ function providersOf(cfg: Cfg | null): Provider[] {
 /**
  * 把原版 config 里的服务商并入本地 config，**只补 id 不存在的**。
  * 直接改本地 config 的内存态并落盘（setConfig 会持久化），不返回整份配置——避免调用方误以为能自行替换整段。
+ *
+ * 统计口径：应用**自带**的预置服务商（anthropic / openai / … / typesafe，见 shared/preset-providers.ts）单独归入
+ * `builtin`，既不算 copied 也不算 skipped。它们本来就在二开版启动时被种进 config，与原版逐个 id 相同——
+ * 若算 skipped，用户会看到「跳过 11 个」而以为自己有 11 个自定义服务商被忽略（实测用户只有 5 个）。
+ * 同一条判据也用于处理合并本身（预置 id 照常保留本地那份），只是不进入用户的计数。
  */
 export function mergeProviders(srcHome: string): ProviderMergeStat {
-  const stat: ProviderMergeStat = { copied: [], skipped: [], kept: [] }
+  const stat: ProviderMergeStat = { copied: [], skipped: [], kept: [], builtin: [] }
   const srcCfg = readJson(join(srcHome, 'config.json'))
   const srcProviders = providersOf(srcCfg)
   if (!srcProviders.length) return stat
@@ -67,16 +75,21 @@ export function mergeProviders(srcHome: string): ProviderMergeStat {
       stat.skipped.push('<no-id>')
       continue
     }
+    const preset = isPresetProviderId(id)
+    if (preset) stat.builtin.push(id)
     if (existing.has(id)) {
       // 本地已有的 id 整个保留：本地可能改过地址、密钥、模型启用态——凭什么是原版覆盖本地
-      stat.kept.push(id)
+      if (!preset) stat.kept.push(id)
       continue
     }
     merged.push(p)
     existing.add(id)
-    stat.copied.push(id)
+    // 预置服务商若意外缺失就顺手补上（无害），但记在 builtin 而不是 copied：那不是用户的资产
+    if (!preset) stat.copied.push(id)
   }
-  if (stat.copied.length) {
+  // 用「是否真的并入过东西」判落盘，而不是 stat.copied.length：预置服务商缺失时会被补进去但不计入 copied，
+  // 那种情况下同样得写盘，否则内存态与磁盘不一致。
+  if (merged.length !== dstProviders.length) {
     setConfig({ models: { ...dstModels, providers: merged } })
   }
   return stat

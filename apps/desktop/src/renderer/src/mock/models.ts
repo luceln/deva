@@ -55,6 +55,8 @@ export interface Provider {
   models: ModelDef[]
 }
 
+import { PRESET_PROVIDER_IDS } from '../../../shared/preset-providers'
+
 // 官方服务商只预置「连接信息」（地址/协议/文档），不再内置任何模型。
 // 模型清单由用户配置密钥后从服务端拉取，或手动输入模型 ID 添加——避免内置清单很快过时。
 export const seedProviders: Provider[] = [
@@ -201,3 +203,21 @@ export const seedProviders: Provider[] = [
 export const providerPresets: Provider[] = seedProviders.filter(
   (p) => p.kind === 'official' && (p.purpose ?? 'llm') === 'llm'
 )
+
+/**
+ * 与 shared/preset-providers.ts 的一致性自检。
+ *
+ * 那份清单是主进程「导入统计排除应用自带服务商」的唯一依据，而连接信息仍以本文件的 `seedProviders` 为准。
+ * 两处一旦漂移（新增预置服务商时只改了一边），导入报告就会多算/少算，用户看到「跳过 11 个」这类莫名其妙的数字。
+ * 只告警不抛错：这属于开发期问题，不能让一个统计口径把应用启动拦下来。
+ */
+const PRESET_DRIFT = {
+  missing: PRESET_PROVIDER_IDS.filter((id) => !seedProviders.some((p) => p.id === id)),
+  extra: seedProviders.map((p) => p.id).filter((id) => !PRESET_PROVIDER_IDS.includes(id))
+}
+if (PRESET_DRIFT.missing.length || PRESET_DRIFT.extra.length) {
+  console.warn(
+    '[models] shared/preset-providers.ts 与 seedProviders 不一致：',
+    `清单缺 [${PRESET_DRIFT.missing.join(', ')}]，清单多 [${PRESET_DRIFT.extra.join(', ')}]`
+  )
+}

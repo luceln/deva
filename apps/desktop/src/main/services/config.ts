@@ -1,7 +1,8 @@
-import { app, ipcMain } from 'electron'
+import { app, ipcMain, type BrowserWindow } from 'electron'
 import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { writeFileAtomic } from './atomic-write'
+import type { ConfigChangedEvent } from '../../shared/config-protocol'
 
 /**
  * 应用配置存储（主进程）。
@@ -78,6 +79,10 @@ export function getConfig(): Record<string, unknown> {
  * 主进程内写配置（顶层浅合并，值为 undefined 时删除该键），并落盘。
  * 供 skills.ts / personas.ts 等服务在进程内维护启用态（config.json 内的 skills/personas 段），
  * 与渲染层的 `config:set` IPC 走同一份内存态 + 持久化路径。
+ *
+ * ⚠️ **这里刻意不广播 config:changed**。渲染层 `store/models.tsx` 有「providers 一变就 config:set」的回写 effect，
+ * 若每次写盘都广播，就会形成「广播 → 渲染层重载 → 回写 → 广播」的刷新循环（打字卡顿、磁盘狂写）。
+ * 需要通知渲染层的场景只有「外部批量改动」（导入），由调用方在改完后显式调 `publishConfigChanged`。
  */
 export function setConfig(patch: Record<string, unknown>): void {
   ensureLoaded()
@@ -89,8 +94,39 @@ export function setConfig(patch: Record<string, unknown>): void {
   persist()
 }
 
-export function registerConfigIpc(): void {
+/* ───────────── 配置变更广播 ───────────── */
+
+type ConfigChangedListener = (p: ConfigChangedEvent) => void
+const changedListeners = new Set<ConfigChangedListener>()
+
+/**
+ * 通知渲染层「配置被外部改动了」，由 registerConfigIpc 订阅后转发成 `config:changed`。
+ * 订阅者回调里抛错不能打断发布方（导入正在收尾），故逐个 try/catch 隔离。
+ */
+export function publishConfigChanged(p: ConfigChangedEvent): void {
+  for (const l of changedListeners) {
+    try {
+      l(p)
+    } catch (e) {
+      console.warn('[config] config:changed 订阅者异常：', (e as Error)?.message ?? e)
+    }
+  }
+}
+
+export function onConfigChanged(listener: ConfigChangedListener): () => void {
+  changedListeners.add(listener)
+  return () => changedListeners.delete(listener)
+}
+
+export function registerConfigIpc(getWindow: () => BrowserWindow | null): void {
   ensureLoaded()
+
+  // 外部批量改动（导入）后转发给渲染层：渲染层据此重载模型/角色列表，不必重启或切页。
+  // 只由显式 publishConfigChanged 触发；config:set 回写不广播，故不会自激（见 setConfig 的说明）。
+  onConfigChanged((p) => {
+    const win = getWindow()
+    if (win && !win.isDestroyed()) win.webContents.send('config:changed', p)
+  })
 
   // 同步读取整份配置：供渲染层首帧读取主题/语言，避免闪烁（FOUC）。
   ipcMain.on('config:get-sync', (evt) => {

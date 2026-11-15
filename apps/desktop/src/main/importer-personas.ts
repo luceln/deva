@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { setPersonaEnabled } from './services/personas'
+import { DEFAULT_PERSONAS } from './services/default-personas'
 import type { StepStat } from '../shared/import-protocol'
 
 /**
@@ -25,17 +26,31 @@ import type { StepStat } from '../shared/import-protocol'
 /** 头像扩展名白名单，按优先级排列（与 avatar-image.ts 的查找顺序一致）。 */
 const AVATAR_EXTS = ['webp', 'png', 'jpg', 'jpeg'] as const
 
+/**
+ * 应用自带默认角色的 id 集合。取自 `DEFAULT_PERSONAS`（种子定义的唯一来源），不在导入器里另写一份 —— 那样
+ * 加一个默认角色就会漂移。这些角色在二开版首启就被种进 personas/，原版里同名文件必然存在，不该算「跳过」。
+ */
+const DEFAULT_PERSONA_IDS = new Set(DEFAULT_PERSONAS.map((p) => p.id))
+
 /** 角色文件名是否合法（与 personas.ts 的 isSafeId 同一规则，防 `..` 与分隔符逃逸）。 */
 function isSafeId(id: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id) && id !== '.' && id !== '..'
 }
 
+/** 导入结果：copied/skipped 只含用户自建角色；builtin 是应用自带的默认角色（不计入用户统计）。 */
+export interface PersonaImportStat extends StepStat {
+  /** 必填（覆盖 StepStat 的可选）：本模块总会填，调用方不必再判空。 */
+  builtin: string[]
+  /** 实际写入文件的自带默认角色 id（正常为空；本地缺文件时会被补上，仍需补启用态）。 */
+  builtinCopied: string[]
+}
+
 /**
- * 把原版角色搬进 DevaPlus。返回本次新导入的 md id（第 ③ 步据此补 enabled）。
+ * 把原版角色搬进 DevaPlus。返回本次新导入的自建角色 id（第 ③ 步据此补 enabled）。
  * 头像随角色一起搬：先按扩展名找原版里存在的那份，同名同扩展名复制过去即可（avatar-image.ts 也是按这个顺序找）。
  */
-export function importPersonas(srcHome: string): StepStat {
-  const stat: StepStat = { copied: [], skipped: [] }
+export function importPersonas(srcHome: string): PersonaImportStat {
+  const stat: PersonaImportStat = { copied: [], skipped: [], builtin: [], builtinCopied: [] }
   const srcDir = join(srcHome, 'personas')
   const dstDir = join(getDevaHome(), 'personas')
   let names: string[]
@@ -56,19 +71,25 @@ export function importPersonas(srcHome: string): StepStat {
     if (!isSafeId(id)) continue
     const from = join(srcDir, name)
     const to = join(dstDir, name)
+    // 应用自带的默认角色（general / xiaomajiang）：不属于「用户导入」，单独归入 builtin。
+    // 文件仍按需补齐（缺失时补上是无害的），但既不进 copied 也不进 skipped —— 用户不该看到
+    // 「跳过 2 个」而以为自己有默认角色被忽略。启用态也随种子逻辑走，不由导入负责。
+    const builtin = DEFAULT_PERSONA_IDS.has(id)
+    if (builtin) stat.builtin.push(id)
     try {
       if (!statSync(from).isFile()) continue
       if (existsSync(to)) {
         // 本地已有同名角色：整个跳过（含提示词、含头像），这既是幂等，也保住用户的改动
-        stat.skipped.push(id)
+        if (!builtin) stat.skipped.push(id)
         continue
       }
       copyFileSync(from, to)
-      stat.copied.push(id)
+      if (builtin) stat.builtinCopied.push(id)
+      else stat.copied.push(id)
       copyAvatar(srcDir, dstDir, id)
     } catch {
       // 单条失败不影响其余角色；计入 skipped 由调用方看差异（此处不抛，保持「一步失败不中断整轮」）
-      if (!stat.copied.includes(id) && !stat.skipped.includes(id)) stat.skipped.push(id)
+      if (!builtin && !stat.copied.includes(id) && !stat.skipped.includes(id)) stat.skipped.push(id)
     }
   }
   return stat

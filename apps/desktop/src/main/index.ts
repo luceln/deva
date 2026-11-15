@@ -321,7 +321,7 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('app:get-platform', () => process.platform)
 
   // 应用配置（~/.deva-plus/config.json：主题/语言/模型等非敏感项，可 DEVA_HOME 覆盖）
-  registerConfigIpc()
+  registerConfigIpc(() => mainWindow)
 
   // 工作区文件服务（打开文件夹 / 读目录 / 读写文件）
   registerWorkspaceIpc(() => mainWindow)

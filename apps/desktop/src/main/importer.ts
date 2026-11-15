@@ -1,5 +1,6 @@
-import { getDevaHome } from './services/config'
+import { getDevaHome, publishConfigChanged } from './services/config'
 import { invalidateIndex } from './services/chat-store'
+import { publishSessionsChanged } from './services/chat-bus'
 import { canImport, upstreamHome } from './importer-gate'
 import { copySecrets, mergeProviders } from './importer-config'
 import { enableImportedPersonas, importPersonas } from './importer-personas'
@@ -77,7 +78,11 @@ export async function runImport(
     // ① 服务商（含 models.activeModelId 跟随）
     onProgress?.({ step: 'providers', done: 0, total: 0 })
     const providers = mergeProviders(src)
-    report.providers = { copied: providers.copied, skipped: [...providers.skipped, ...providers.kept] }
+    report.providers = {
+      copied: providers.copied,
+      skipped: [...providers.skipped, ...providers.kept],
+      builtin: providers.builtin
+    }
     // 密钥补缺：与原版服务商配套的密文（没有密钥的服务商等于不能用）。单独计，不混进 providers 的数字。
     const secrets = await copySecrets(src)
     report.secrets = { copied: secrets.copied, skipped: secrets.skipped }
@@ -85,11 +90,17 @@ export async function runImport(
     // ② 角色（md + 头像）
     onProgress?.({ step: 'personas', done: 0, total: 0 })
     const personas = importPersonas(src)
-    report.personas = { copied: personas.copied, skipped: personas.skipped }
+    report.personas = {
+      copied: personas.copied,
+      skipped: personas.skipped,
+      builtin: personas.builtin
+    }
 
-    // ③ 角色启用态：只对本次新导入的置 true，本地既有开关不动
-    onProgress?.({ step: 'personaEnabled', done: 0, total: personas.copied.length })
-    report.personaEnabled = enableImportedPersonas(personas.copied)
+    // ③ 角色启用态：只对本次新导入的置 true，本地既有开关不动。
+    // 自带默认角色若恰好被补了文件，也一并置启用（正常为空——它们首启已由种子写好并启用）。
+    const toEnable = [...personas.copied, ...personas.builtinCopied]
+    onProgress?.({ step: 'personaEnabled', done: 0, total: toEnable.length })
+    report.personaEnabled = enableImportedPersonas(toEnable)
 
     // ④ 记忆（全局 + 项目私有，逐条走 writeMemory 受配额约束）
     onProgress?.({ step: 'memories', done: 0, total: 0 })
@@ -104,7 +115,11 @@ export async function runImport(
     // ⑤ 技能（链接按链接重建）
     onProgress?.({ step: 'skills', done: 0, total: 0 })
     const skills = importSkills(src)
-    report.skills = { copied: [...skills.linked, ...skills.copied], skipped: skills.skipped }
+    report.skills = {
+      copied: [...skills.linked, ...skills.copied],
+      skipped: skills.skipped,
+      builtin: skills.builtin
+    }
 
     // ⑥ 会话（必须早于 ⑦）
     onProgress?.({ step: 'sessions', done: 0, total: 0 })
@@ -115,9 +130,16 @@ export async function runImport(
     onProgress?.({ step: 'assoc', done: 0, total: 0 })
     report.assoc = copyAssoc(src, (done, total) => onProgress?.({ step: 'assoc', done, total }))
 
-    // ⑧ 清缓存：不重启也能看见新会话（两个内存缓存 + 索引文件）
+    // ⑧ 清缓存 + 通知渲染层：不重启、不切页也能看见新会话与导入的服务商/角色。
     onProgress?.({ step: 'cache', done: 0, total: 0 })
+    // 先清主进程缓存（sessionCache / indexCache / _index.json），否则渲染层重拉时仍读到旧的空清单。
     invalidateIndex()
+    // 再通知渲染层。两个事件缺一不可：
+    //  - sessions-changed：会话列表刷新（渲染层 chat store 早已在监听，但主进程此前从没发过）；
+    //  - config:changed：模型/角色列表刷新（它们挂在 config.json 的 models / personas 段上）。
+    // 顺序放在清缓存之后，避免渲染层抢在前面读到旧缓存。
+    publishSessionsChanged()
+    publishConfigChanged({ keys: ['models', 'personas'], source: 'import' })
 
     report.ok = report.failures.length === 0
     onProgress?.({ step: 'done', done: 1, total: 1 })

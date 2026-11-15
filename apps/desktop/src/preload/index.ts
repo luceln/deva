@@ -37,6 +37,7 @@ import type {
   ModelSwapResult
 } from '../shared/chat-protocol'
 import type { GateResult, ImportProgress, ImportReport } from '../shared/import-protocol'
+import type { ConfigChangedEvent } from '../shared/config-protocol'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
 export type {
@@ -666,7 +667,17 @@ const api = {
     get: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('config:get'),
     /** 顶层浅合并补丁（值为 undefined 删除该键） */
     set: (patch: Record<string, unknown>): Promise<{ ok: true }> =>
-      ipcRenderer.invoke('config:set', patch)
+      ipcRenderer.invoke('config:set', patch),
+    /**
+     * 订阅「配置被外部批量改动」（如从原版导入并入服务商 / 角色启用态）。
+     * 渲染层据此重载模型、角色列表，不必重启或切页。返回取消订阅函数。
+     * 注意：自己的 `set` 回写不会触发它（主进程刻意不在 setConfig 里广播，避免刷新循环）。
+     */
+    onChanged: (cb: (p: ConfigChangedEvent) => void): (() => void) => {
+      const listener = (_e: unknown, p: ConfigChangedEvent): void => cb(p)
+      ipcRenderer.on('config:changed', listener)
+      return () => ipcRenderer.removeListener('config:changed', listener)
+    }
   },
   /** 技能（全局 ~/.deva-plus/skills）：列出 / 读取 / 上传导入 / 删除 / 启停。渲染层不写技能文件——创建经上传，或经对话（create_skill 工具 / 主智能体直接写技能目录）。 */
   skills: {

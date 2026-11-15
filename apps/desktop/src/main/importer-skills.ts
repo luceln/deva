@@ -1,6 +1,7 @@
 import { cpSync, lstatSync, mkdirSync, readdirSync, readlinkSync, statSync, symlinkSync } from 'fs'
 import { join, resolve } from 'path'
 import { getDevaHome } from './services/config'
+import { BUILTIN_SKILL_IDS } from './services/skills'
 import type { StepStat } from '../shared/import-protocol'
 
 /**
@@ -51,12 +52,15 @@ function makeLink(target: string, dest: string): LinkKind | null {
 
 /**
  * 把原版 skills/ 下的条目搬到 DevaPlus：链接按链接重建，实体目录才递归复制。
- * 返回 linked（重建的链接）/ copied（复制的实体）/ skipped（已存在或失败）。
+ * 返回 linked（重建的链接）/ copied（复制的实体）/ skipped（已存在或失败）/ builtin（应用自带、不计入用户统计）。
  */
-export function importSkills(srcHome: string): StepStat & { linked: string[]; kinds: Record<string, LinkKind> } {
-  const stat: StepStat & { linked: string[]; kinds: Record<string, LinkKind> } = {
+export function importSkills(
+  srcHome: string
+): StepStat & { builtin: string[]; linked: string[]; kinds: Record<string, LinkKind> } {
+  const stat: StepStat & { builtin: string[]; linked: string[]; kinds: Record<string, LinkKind> } = {
     copied: [],
     skipped: [],
+    builtin: [],
     linked: [],
     kinds: {}
   }
@@ -76,12 +80,16 @@ export function importSkills(srcHome: string): StepStat & { linked: string[]; ki
 
   for (const name of names) {
     if (!isSafeId(name)) continue
+    // 内置元技能（create-skill / create-agent / create-mcp）是代码合成、永不落盘；原版 skills/ 里万一有同名残留目录
+    // 也不算用户技能（listSkills 同样会忽略它），归入 builtin 而不是「跳过」。
+    const builtin = BUILTIN_SKILL_IDS.includes(name)
+    if (builtin) stat.builtin.push(name)
     const from = join(srcDir, name)
     const to = join(dstDir, name)
     try {
       // 目标已有同名条目：不覆盖（用户可能自己装了同名技能）
       if (lexists(to)) {
-        stat.skipped.push(name)
+        if (!builtin) stat.skipped.push(name)
         continue
       }
       const st = lstatSync(from)
@@ -94,16 +102,16 @@ export function importSkills(srcHome: string): StepStat & { linked: string[]; ki
           stat.kinds[name] = kind
         } else {
           // 建不了链接就**不搬**：复制实体等于造一份会漂移的副本，比少一个技能（日志里写着）更难查
-          stat.skipped.push(name)
+          if (!builtin) stat.skipped.push(name)
         }
       } else if (st.isDirectory()) {
         // 不是链接的实体目录：原样复制（原版里若用户直接把技能放在这，那就是真源本身）
         cpSync(from, to, { recursive: true })
-        stat.copied.push(name)
+        if (!builtin) stat.copied.push(name)
         stat.kinds[name] = 'copied'
       }
     } catch {
-      if (!stat.copied.includes(name) && !stat.skipped.includes(name)) stat.skipped.push(name)
+      if (!builtin && !stat.copied.includes(name) && !stat.skipped.includes(name)) stat.skipped.push(name)
     }
   }
   return stat
