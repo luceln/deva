@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 
 /**
  * 可拖动尺寸（左侧对话面板宽 / 输入框高）：拖拽手柄 + 上下限 + 落盘。
- * 持久化走 ~/.deva/config.json 的 `layout` 段（与主题/语言同处，getSync 首帧即可读到、不闪烁）；
+ * 持久化走 ~/.deva-plus/config.json 的 `layout` 段（与主题/语言同处，getSync 首帧即可读到、不闪烁）；
  * config.set 是顶层浅合并，故写入时先合并现有 layout，两个尺寸互不覆盖。
  */
 

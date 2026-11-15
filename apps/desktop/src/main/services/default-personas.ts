@@ -6,7 +6,7 @@ import XIAOMAJIANG from "./xiaomajiang-personas"
  *
  * 每条默认角色是一个自包含的 `DefaultPersona` 常量（含身份、主题色、提示词等），
  * 由 `DEFAULT_PERSONAS` 数组收拢；`personas.ts` 的 `ensureSeededPersonas()` 首启时逐条种入
- * `~/.deva/personas/<id>.md`（按 id 幂等、防「删除后复活」、支持将来只补种新增的那条）。
+ * `~/.deva-plus/personas/<id>.md`（按 id 幂等、防「删除后复活」、支持将来只补种新增的那条）。
  * 之后改了某条的 `prompt`，已安装用户只要没改过该角色的提示词，升级后就会自动换成新版。
  *
  * **新增一个默认角色**：在下方照葫芦画瓢写一个 `const XXX: DefaultPersona`（连同其提示词），

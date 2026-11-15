@@ -10,7 +10,7 @@ export interface MessageTree {
 }
 
 const zhCN: MessageTree = {
-  app: { name: 'Deva', tagline: '' },
+  app: { name: 'DevaPlus', tagline: '' },
   activity: {
     chat: '对话',
     explorer: '资源管理器',
@@ -1509,7 +1509,7 @@ const zhCN: MessageTree = {
 }
 
 const en: MessageTree = {
-  app: { name: 'Deva', tagline: '' },
+  app: { name: 'DevaPlus', tagline: '' },
   activity: {
     chat: 'Chat',
     explorer: 'Explorer',

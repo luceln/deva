@@ -1,18 +1,19 @@
 /**
- * electron-builder afterAllArtifactBuild 钩子：给 Windows 便携版 zip 套一层 `Deva\` 目录。
+ * electron-builder afterAllArtifactBuild 钩子：给 Windows 便携版 zip 套一层 `DevaPlus\` 目录。
  *
  * electron-builder 打 Windows zip 时把文件直接放在压缩包根目录（写死，没有配置项），用户右键「解压到当前文件夹」
- * 会把二十来个文件撒在下载目录里；套一层后得到干净的 Deva\Deva.exe。目录名不带版本号：更新时删掉旧目录、
+ * 会把二十来个文件撒在下载目录里；套一层后得到干净的 DevaPlus\DevaPlus.exe。目录名不带版本号：更新时删掉旧目录、
  * 原地解压新版，路径不变，固定到任务栏的图标、桌面快捷方式仍然有效。
  *
- * 做法：所有产物打完后（安装包也已从 win-unpacked 打好），把 win-unpacked 临时改名为 Deva，用 electron-builder
+ * 做法：所有产物打完后（安装包也已从 win-unpacked 打好），把 win-unpacked 临时改名为 DevaPlus，用 electron-builder
  * 打 zip 目标时用的同一个函数（同一个 7za、同样的压缩参数）重打这个 zip，再改回原名。
  * 只打 x64（与 CI 一致），对应的目录就是 win-unpacked。
  */
 const fs = require('fs')
 const path = require('path')
 
-const TOP_DIR = 'Deva'
+// 必须与 productName 一致：叫 Deva 的话便携版解压出来是 Deva\DevaPlus.exe，和原版的目录撞在一起
+const TOP_DIR = 'DevaPlus'
 
 /** 刚生成的文件可能正被杀毒软件扫描，Windows 上改名偶尔 EPERM / EBUSY：稍等重试。 */
 async function rename(from, to) {

@@ -416,7 +416,7 @@ const fullToolSpecs: ToolSpec[] = [
   {
     name: 'create_mcp',
     description:
-      '创建并启用一个新的 **MCP 服务**（Model Context Protocol server），写入用户的全局 MCP 配置（~/.deva/mcp.json）。' +
+      '创建并启用一个新的 **MCP 服务**（Model Context Protocol server），写入用户的全局 MCP 配置（~/.deva-plus/mcp.json）。' +
       '仅在用户明确想接入某个 MCP 服务、且你已收集好要素并向用户复述确认后调用。' +
       '请始终用本工具写入——**不要**用 write_file / run_command 直接改 mcp.json（会绕过配置校验与密钥占位处理）。' +
       '**密钥零明文**：绝不把 API Key / Token 等真实密钥值写进本工具参数或对话；只在 secretEnv / secretHeaders 里列出这些字段的**名字**，' +
@@ -720,7 +720,7 @@ function toAbsPath(root: string | null, p: string): string {
 
 /**
  * 文件工具的路径解析（读写共用）：把 path 解析为绝对路径。
- * 不设任何路径限制（2026-10-09 起）：不校验受信根，凭据目录、~/.deva、.git 一律可读写。
+ * 不设任何路径限制（2026-10-09 起）：不校验受信根，凭据目录、~/.deva-plus、.git 一律可读写。
  */
 function resolvePath(root: string | null, p: unknown): string {
   if (typeof p !== 'string' || !p.trim()) throw new Error('缺少有效的 path 参数')
@@ -1637,7 +1637,7 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
         signal: controller.signal,
         redirect: 'follow',
         headers: {
-          'user-agent': `Deva/${app.getVersion()} (+https://github.com/sqfcyily/deva)`,
+          'user-agent': `DevaPlus/${app.getVersion()} (+https://github.com/luceln/deva)`,
           accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8'
         }
       })
@@ -1854,7 +1854,7 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
     const allowedTools = Array.isArray(a.allowedTools)
       ? a.allowedTools.filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
       : []
-    // 直调主进程 upsertSkill（渲染层写不进 ~/.deva；本工具已过权限闸）——自动启用。
+    // 直调主进程 upsertSkill（渲染层写不进 ~/.deva-plus；本工具已过权限闸）——自动启用。
     const rec = upsertSkill({
       name: skillName,
       description: typeof a.description === 'string' ? a.description : '',
@@ -2034,7 +2034,7 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
       secretFields = secretNames(a.secretHeaders)
     }
 
-    // 直调主进程 upsertServer（渲染层写不进 ~/.deva；本工具已过权限闸）——自动启用；
+    // 直调主进程 upsertServer（渲染层写不进 ~/.deva-plus；本工具已过权限闸）——自动启用；
     // 写入层的变更通知随即触发 mcp.ts 对账，后台连接（缺密钥则停在「待填密钥」）。
     const rec = upsertServer(input)
     const tail = secretFields.length

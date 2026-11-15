@@ -125,7 +125,7 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
   const [keyStatus, setKeyStatus] = useState<Record<string, boolean>>({})
   const [secretsAvailable, setSecretsAvailable] = useState(true)
 
-  // 配置载入完成前不回写，避免用默认种子覆盖已存 ~/.deva/config.json
+  // 配置载入完成前不回写，避免用默认种子覆盖已存 ~/.deva-plus/config.json
   const [hydrated, setHydrated] = useState(false)
 
   useEffect(() => {
@@ -148,7 +148,7 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
     }
   }, [])
 
-  // 载入持久化的模型配置（~/.deva/config.json 的 models 段），与默认种子合并
+  // 载入持久化的模型配置（~/.deva-plus/config.json 的 models 段），与默认种子合并
   useEffect(() => {
     let alive = true
     void (async () => {

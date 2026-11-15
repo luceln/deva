@@ -3,8 +3,8 @@
  * 状态放主进程，是为了下载途中离开关于页再回来，进度还接得上。
  */
 
-/** 所有版本的下载页：检查失败时给用户兜底。 */
-export const RELEASES_URL = 'https://github.com/sqfcyily/deva/releases'
+/** 所有版本的下载页：检查失败时给用户兜底。与 updater.ts 的 RELEASES 同源（上游是 sqfcyily/deva）。 */
+export const RELEASES_URL = 'https://github.com/luceln/deva/releases'
 
 export interface UpdateRelease {
   /** 不带 v 前缀，如 0.1.7 */

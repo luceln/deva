@@ -20,7 +20,7 @@ export type ResolvedTheme = 'light' | 'dark'
 
 const STORAGE_KEY = 'deva.theme'
 
-/** 从 ~/.deva/config.json 同步取主题（首帧，避免闪烁）。不可用时返回 null 走后续兜底。 */
+/** 从 ~/.deva-plus/config.json 同步取主题（首帧，避免闪烁）。不可用时返回 null 走后续兜底。 */
 function readConfigMode(): ThemeMode | null {
   try {
     const v = window.deva?.config?.getSync()?.theme
@@ -44,7 +44,7 @@ function getSystemTheme(): ResolvedTheme {
 }
 
 function readStoredMode(): ThemeMode {
-  // 优先 ~/.deva/config.json（可手改），其次 localStorage 兜底，最后默认跟随系统
+  // 优先 ~/.deva-plus/config.json（可手改），其次 localStorage 兜底，最后默认跟随系统
   const fromConfig = readConfigMode()
   if (fromConfig) return fromConfig
   try {
@@ -79,7 +79,7 @@ export function ThemeProvider({ children }: { children: ReactNode }): React.JSX.
 
   const setMode = (next: ThemeMode): void => {
     setModeState(next)
-    // 主存 ~/.deva/config.json；localStorage 作为兜底缓存
+    // 主存 ~/.deva-plus/config.json；localStorage 作为兜底缓存
     void window.deva?.config?.set({ theme: next })
     try {
       localStorage.setItem(STORAGE_KEY, next)

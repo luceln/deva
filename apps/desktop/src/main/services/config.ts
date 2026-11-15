@@ -6,7 +6,7 @@ import { writeFileAtomic } from './atomic-write'
 /**
  * 应用配置存储（主进程）。
  * 非敏感的用户配置（主题 / 语言 / 服务商与模型 / 默认模型等）以**明文 JSON** 存于
- * `~/.deva/config.json`，开发者可手改 / 备份 / 版本化（对标 ~/.claude）。
+ * `~/.deva-plus/config.json`，开发者可手改 / 备份 / 版本化（对标 ~/.claude）。
  * 根目录可用环境变量 `DEVA_HOME` 覆盖（便携安装 / 测试 / CI）。
  * **敏感信息（API 密钥）绝不进此文件**——见 services/secrets.ts（safeStorage 加密的 secrets.json）。
  * 详见 docs/architecture/security.md。
@@ -14,11 +14,19 @@ import { writeFileAtomic } from './atomic-write'
 
 let home = ''
 
-/** Deva 配置根目录：DEVA_HOME 覆盖，否则 ~/.deva。首次调用即确保目录存在。 */
+/**
+ * DevaPlus 配置根目录：DEVA_HOME 覆盖，否则 ~/.deva-plus。首次调用即确保目录存在。
+ *
+ * 目录名与上游的 ~/.deva 分开（DevaPlus 与 Deva 要能同时运行）：共用同一个目录会让两个独立进程同时写
+ * config.json / _index.json，彼此覆盖，且没有锁拦着——比"跑 dev 看了眼数据"严重得多。
+ * 不跟随 productName / app name 走，是刻意的：DEVA_HOME 与这里都是用户可预期的固定路径（文档、脚本、备份都引用它）。
+ * 也不从 ~/.deva 搬任何东西过来：新装的 DevaPlus 就是全新安装的样子（预置服务商连接信息、零模型、零密钥），
+ * 用户自己配置；把上游的用户资产搬过来属于"与上游同步"，是独立的功能，不该藏在启动路径里。
+ */
 export function getDevaHome(): string {
   if (home) return home
   const override = process.env.DEVA_HOME?.trim()
-  home = override && override.length > 0 ? override : join(app.getPath('home'), '.deva')
+  home = override && override.length > 0 ? override : join(app.getPath('home'), '.deva-plus')
   try {
     if (!existsSync(home)) mkdirSync(home, { recursive: true })
   } catch {

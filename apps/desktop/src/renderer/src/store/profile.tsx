@@ -3,7 +3,7 @@ import { parseAvatarSpec, serializeAvatarSpec, type AvatarSpec } from '../compon
 
 /**
  * 本机用户资料（个人资料面板）：目前只有头像。真源在主进程（spec 存 config.json，图片另存
- * ~/.deva/profile/），这里只持渲染用的镜像；启动拉一次，改头像时本地同步更新（左栏与消息气泡即时刷新）。
+ * ~/.deva-plus/profile/），这里只持渲染用的镜像；启动拉一次，改头像时本地同步更新（左栏与消息气泡即时刷新）。
  */
 interface ProfileContextValue {
   /** 头像 spec（未配置时主进程已回默认头像）；null = 尚未读到 / 读失败，回落固定 seed 头像。 */

@@ -658,7 +658,7 @@ const api = {
       return ipcRenderer.invoke('fs:dropped-entries', paths)
     }
   },
-  /** 应用配置（~/.deva/config.json 非敏感项）：同步读（首帧防闪烁）+ 异步读/写。 */
+  /** 应用配置（~/.deva-plus/config.json 非敏感项）：同步读（首帧防闪烁）+ 异步读/写。 */
   config: {
     /** 同步取整份配置，供首帧读取主题/语言，避免闪烁 */
     getSync: (): Record<string, unknown> => ipcRenderer.sendSync('config:get-sync'),
@@ -667,7 +667,7 @@ const api = {
     set: (patch: Record<string, unknown>): Promise<{ ok: true }> =>
       ipcRenderer.invoke('config:set', patch)
   },
-  /** 技能（全局 ~/.deva/skills）：列出 / 读取 / 上传导入 / 删除 / 启停。渲染层不写技能文件——创建经上传，或经对话（create_skill 工具 / 主智能体直接写技能目录）。 */
+  /** 技能（全局 ~/.deva-plus/skills）：列出 / 读取 / 上传导入 / 删除 / 启停。渲染层不写技能文件——创建经上传，或经对话（create_skill 工具 / 主智能体直接写技能目录）。 */
   skills: {
     list: (): Promise<SkillRecord[]> => ipcRenderer.invoke('skills:list'),
     get: (id: string): Promise<SkillRecord | null> => ipcRenderer.invoke('skills:get', id),
@@ -686,7 +686,7 @@ const api = {
       return () => ipcRenderer.removeListener('skills:changed', listener)
     }
   },
-  /** 本机用户资料（个人资料面板）：头像 spec 存 config.json，图片另存 ~/.deva/profile/。 */
+  /** 本机用户资料（个人资料面板）：头像 spec 存 config.json，图片另存 ~/.deva-plus/profile/。 */
   profile: {
     get: (): Promise<UserProfile> => ipcRenderer.invoke('profile:get'),
     setAvatar: (spec: string): Promise<{ ok: true }> => ipcRenderer.invoke('profile:set-avatar', spec),
@@ -696,7 +696,7 @@ const api = {
   },
   /**
    * 记忆：查看 / 增改删 / 清空，与模型的 memory_* 工具同一套校验。
-   * 末位可选 root：省略 = 全局记忆（~/.deva/memory.json）；给出 = 该工作区的项目私有记忆（~/.deva/projects/<key>/）。
+   * 末位可选 root：省略 = 全局记忆（~/.deva-plus/memory.json）；给出 = 该工作区的项目私有记忆（~/.deva-plus/projects/<key>/）。
    */
   memory: {
     list: (root?: string): Promise<MemorySnapshot> => ipcRenderer.invoke('memory:list', root),
@@ -706,7 +706,7 @@ const api = {
     remove: (id: string, root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:delete', id, root),
     clear: (root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', root)
   },
-  /** Agent 提示词（全局 ~/.deva/personas）：列出 / 读取 / 新建更新 / 删除 / 启停。 */
+  /** Agent 提示词（全局 ~/.deva-plus/personas）：列出 / 读取 / 新建更新 / 删除 / 启停。 */
   personas: {
     list: (): Promise<PersonaRecord[]> => ipcRenderer.invoke('personas:list'),
     get: (id: string): Promise<PersonaRecord | null> => ipcRenderer.invoke('personas:get', id),
@@ -729,7 +729,7 @@ const api = {
       ipcRenderer.invoke('personas:clear-avatar-image', id)
   },
   /**
-   * MCP 服务（全局 ~/.deva/mcp.json）：列出 / 读取 / 增改删 / 启停 / 重试 / 密钥。
+   * MCP 服务（全局 ~/.deva-plus/mcp.json）：列出 / 读取 / 增改删 / 启停 / 重试 / 密钥。
    * 启用即连接：连接由主进程按启用态、配置、密钥自动对账，渲染层不直接连 / 断。
    * 连接、子进程 spawn、密钥解密全部在主进程；渲染层只见配置与运行期状态，明文密钥永不回传。
    */
@@ -1014,7 +1014,7 @@ const api = {
     }
   },
   /**
-   * 定时任务 / 自动任务（全局 ~/.deva/tasks.json）：列出 / 读取 / 创建 / 更新 / 删除 / 启停 / 立即运行。
+   * 定时任务 / 自动任务（全局 ~/.deva-plus/tasks.json）：列出 / 读取 / 创建 / 更新 / 删除 / 启停 / 立即运行。
    * 创建时批准、执行时零交互——授权信封在任务创建时议定，触发执行不再弹任何确认。
    */
   tasks: {

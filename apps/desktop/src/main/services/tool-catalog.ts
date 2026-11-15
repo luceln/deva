@@ -42,7 +42,7 @@ const CATALOG: Record<string, ToolTraits> = {
   glob: { category: 'read', parallel: true, path: 'scan' },
   grep: { category: 'read', parallel: true, path: 'scan' },
   web_fetch: { category: 'read', parallel: true },
-  // 读记忆：主进程直读 ~/.deva 下的全局 / 项目记忆，无路径入参。
+  // 读记忆：主进程直读 ~/.deva-plus 下的全局 / 项目记忆，无路径入参。
   memory_read: { category: 'read', parallel: true },
 
   // ── 写 / 执行 ──

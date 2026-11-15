@@ -26,7 +26,7 @@ interface I18nContextValue {
 const I18nContext = createContext<I18nContextValue | null>(null)
 
 function detectLocale(): Locale {
-  // 优先 ~/.deva/config.json（可手改），其次 localStorage 兜底，最后跟随系统语言
+  // 优先 ~/.deva-plus/config.json（可手改），其次 localStorage 兜底，最后跟随系统语言
   try {
     const v = window.deva?.config?.getSync()?.locale
     if (typeof v === 'string' && SUPPORTED.includes(v as Locale)) return v as Locale
@@ -62,7 +62,7 @@ export function I18nProvider({ children }: { children: ReactNode }): React.JSX.E
 
   const setLocale = (next: Locale): void => {
     setLocaleState(next)
-    // 主存 ~/.deva/config.json；localStorage 作为兜底缓存
+    // 主存 ~/.deva-plus/config.json；localStorage 作为兜底缓存
     void window.deva?.config?.set({ locale: next })
     try {
       localStorage.setItem(STORAGE_KEY, next)

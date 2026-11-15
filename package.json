@@ -8,13 +8,13 @@
     "node": ">=20"
   },
   "scripts": {
-    "dev": "pnpm --filter @deva/desktop dev",
-    "build": "pnpm --filter @deva/desktop build",
-    "start": "pnpm --filter @deva/desktop start",
-    "typecheck": "pnpm --filter @deva/desktop typecheck",
-    "package:win": "pnpm --filter @deva/desktop build:win",
-    "package:mac": "pnpm --filter @deva/desktop build:mac",
-    "package:linux": "pnpm --filter @deva/desktop build:linux"
+    "dev": "pnpm --filter devaplus dev",
+    "build": "pnpm --filter devaplus build",
+    "start": "pnpm --filter devaplus start",
+    "typecheck": "pnpm --filter devaplus typecheck",
+    "package:win": "pnpm --filter devaplus build:win",
+    "package:mac": "pnpm --filter devaplus build:mac",
+    "package:linux": "pnpm --filter devaplus build:linux"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

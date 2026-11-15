@@ -18,7 +18,7 @@ import { reassignTaskPersona } from './tasks'
 import { AUTO_SHAPE, legacyAutoShape } from '../../shared/avatar-shape'
 
 /**
- * Agent 提示词（Personas）服务：发现 / 解析 / 读写 `~/.deva/personas/<id>.md`（全局，与项目无关）。
+ * Agent 提示词（Personas）服务：发现 / 解析 / 读写 `~/.deva-plus/personas/<id>.md`（全局，与项目无关）。
  *
  * 定位（对标 ChatGPT「自定义指令」/ 人格 profile）：每条 persona 是一段命名的**附加系统提示词**
  * （性格、语气、行文风格、偏好等）。可多条并存、独立启停；**已启用**的会在每轮对话前**追加**进

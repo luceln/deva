@@ -26,7 +26,7 @@ import { useDialog } from '../components/DialogProvider'
  * 左侧面板选中某项 → 中央详情页展示与编辑；也可新建自定义项。
  *
  * 三类均已**文件回填**：挂载时经 `deva.skills.list()` / `deva.mcp.list()` /
- * `deva.personas.list()` 读取 ~/.deva，增删改启停都落盘；MCP 还订阅 `deva.mcp.onStatus`
+ * `deva.personas.list()` 读取 ~/.deva-plus，增删改启停都落盘；MCP 还订阅 `deva.mcp.onStatus`
  * 实时打运行期状态补丁（连接/断开/错误）。
  *
  * 子智能体**不在此列**：它是内置能力（通用 / Explore / Research / Plan，见 main/services/subagents.ts），

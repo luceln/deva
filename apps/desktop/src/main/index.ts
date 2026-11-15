@@ -2,6 +2,7 @@ import { app, shell, BrowserWindow, ipcMain, nativeTheme, Tray, Menu } from 'ele
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { getConfig, registerConfigIpc } from './services/config'
+
 import { getAppIcon, getTrayIcon } from './services/tray-icon'
 import { registerWorkspaceIpc } from './services/workspace'
 import { registerSecretsIpc } from './services/secrets'
@@ -226,7 +227,7 @@ function showMainWindow(): void {
 
 /**
  * 建系统托盘（幂等）：图标运行期生成（tray-icon.ts，无二进制资产；macOS 为单色模板图）。
- * 菜单——显示 Deva / 定时任务概览〔直达 Tasks 标签〕/ 退出；左键切换窗口可见。
+ * 菜单——显示 DevaPlus / 定时任务概览〔直达 Tasks 标签〕/ 退出；左键切换窗口可见。
  * 菜单文案按启动时 config.locale 取中/英（运行时改语言需重启方更新，可接受）。
  */
 function createTray(): void {
@@ -239,9 +240,10 @@ function createTray(): void {
   }
   const en = getConfig().locale === 'en'
   const L = en
-    ? { show: 'Show Deva', tasks: 'Scheduled tasks', quit: 'Quit' }
-    : { show: '显示 Deva', tasks: '定时任务概览', quit: '退出' }
-  tray.setToolTip('Deva')
+    ? { show: 'Show DevaPlus', tasks: 'Scheduled tasks', quit: 'Quit' }
+    : { show: '显示 DevaPlus', tasks: '定时任务概览', quit: '退出' }
+  // 托盘提示与菜单都写应用名：两版共存时，托盘里两个同图标的条目靠它区分（Deva 与 DevaPlus）
+  tray.setToolTip('DevaPlus')
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: L.show, click: showMainWindow },
@@ -281,16 +283,16 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.whenReady().then(() => {
-  electronApp.setAppUserModelId('dev.sqfcy.deva')
+  electronApp.setAppUserModelId('dev.lucel.devaplus')
   // 便携版没有开始菜单快捷方式：注册通知显示名与图标，否则通知标题是原始 ID（须早于第一条通知）
-  registerToastIdentity('dev.sqfcy.deva')
-  // Linux AppImage：把 desktop 入口与图标写到用户目录，启动器里才找得到 Deva（后台进行，不阻塞启动）
+  registerToastIdentity('dev.lucel.devaplus')
+  // Linux AppImage：把 desktop 入口与图标写到用户目录，启动器里才找得到 DevaPlus（后台进行，不阻塞启动）
   void integrateAppImage()
-  // Linux X11：窗口的 WM_CLASS 取自应用名（默认是 package.json 的 @deva/desktop），与 deva.desktop 的
-  // StartupWMClass=deva 对不上，任务栏就归不到 Deva 图标下（Wayland 的 app_id 取 desktopName，不受影响）。
-  // 必须在 ready 之后改：应用名同时决定 userData 目录与钥匙环里加密密钥的条目名（application=@deva/desktop），
+  // Linux X11：窗口的 WM_CLASS 取自应用名（默认是 package.json 的 devaplus），与 devaplus.desktop 的
+  // StartupWMClass 对不上，任务栏就归不到 DevaPlus 图标下（Wayland 的 app_id 取 desktopName，不受影响）。
+  // 必须在 ready 之后改：应用名同时决定 userData 目录与钥匙环里加密密钥的条目名（application=devaplus），
   // ready 前改会换目录、找不到原密钥，已存的 API 密钥就解不开了；ready 后两者都已定下，只影响之后建的窗口。
-  if (process.platform === 'linux') app.setName('deva')
+  if (process.platform === 'linux') app.setName('devaplus')
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
@@ -317,7 +319,7 @@ if (!app.requestSingleInstanceLock()) {
   ipcMain.handle('window:is-fullscreen', () => mainWindow?.isFullScreen() ?? false)
   ipcMain.handle('app:get-platform', () => process.platform)
 
-  // 应用配置（~/.deva/config.json：主题/语言/模型等非敏感项，可 DEVA_HOME 覆盖）
+  // 应用配置（~/.deva-plus/config.json：主题/语言/模型等非敏感项，可 DEVA_HOME 覆盖）
   registerConfigIpc()
 
   // 工作区文件服务（打开文件夹 / 读目录 / 读写文件）
@@ -346,11 +348,11 @@ if (!app.requestSingleInstanceLock()) {
   // 图片 / PDF blob 清扫：删掉已无任何对话或子智能体记录引用的文件
   void sweepMedia().catch((e) => console.warn('[media] 清扫失败：', e))
 
-  // 技能（Skills，全局 ~/.deva/skills/*/SKILL.md；渐进式披露，启用态入 config.json）
+  // 技能（Skills，全局 ~/.deva-plus/skills/*/SKILL.md；渐进式披露，启用态入 config.json）
   registerSkillsIpc(() => mainWindow)
   startSkillsWatcher(() => mainWindow)
 
-  // Agent 提示词（Personas，全局 ~/.deva/personas/*.md；已启用者追加进主智能体系统提示词，启用态入 config.json）
+  // Agent 提示词（Personas，全局 ~/.deva-plus/personas/*.md；已启用者追加进主智能体系统提示词，启用态入 config.json）
   // 首启种子：逐条种入默认角色（Deva / 小码酱 …，见 default-personas.ts），对话优先外壳默认身份；
   // 按 id 幂等 + 防删除后复活 + 将来新增默认角色可增量补种（守卫位 personas.seeded[id] 入 config）。
   // 每次启动顺带检查默认提示词：升级后有新版、且用户没改过（基线 personas.seededPrompt[id]）→ 换成新版。
@@ -363,7 +365,7 @@ if (!app.requestSingleInstanceLock()) {
   registerProfileIpc()
   registerMemoryIpc()
 
-  // MCP 服务（全局 ~/.deva/mcp.json；主进程内起真实客户端，工具命名空间化后并入 Agent 工具表，默认 ask 过闸）
+  // MCP 服务（全局 ~/.deva-plus/mcp.json；主进程内起真实客户端，工具命名空间化后并入 Agent 工具表，默认 ask 过闸）
   registerMcpIpc(() => mainWindow)
 
   // 附加文件（原生选择框 + 白名单闸门，base64 只在主进程）
@@ -381,7 +383,7 @@ if (!app.requestSingleInstanceLock()) {
   // 交付卡（present_files）：文件信息与缩略图、用默认应用打开、在文件夹中显示（只作用于该对话里交付的文件）
   registerDeliverablesIpc()
 
-  // 定时任务 / 自动任务（全局 ~/.deva/tasks.json；创建时批准、执行时零交互）。
+  // 定时任务 / 自动任务（全局 ~/.deva-plus/tasks.json；创建时批准、执行时零交互）。
   registerTasksIpc(() => mainWindow)
 
   // 检查更新（设置 → 关于；只在用户点按钮时检查，Windows exe 安装的可应用内下载并覆盖安装）

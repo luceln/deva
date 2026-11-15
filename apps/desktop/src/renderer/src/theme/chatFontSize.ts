@@ -1,6 +1,6 @@
 /**
  * 文字大小（设置 → 通用）：小 / 标准 / 大 / 特大，只缩放对话内容。
- * - 存 ~/.deva/config.json 的 `chatFontSize`；缺省或无效值按「标准」。
+ * - 存 ~/.deva-plus/config.json 的 `chatFontSize`；缺省或无效值按「标准」。
  * - 生效方式：写 <html data-chat-fs>，倍率定义在 tokens.css（--chat-scale），
  *   对话区（redesign.css 的 .cf-msgs / .cf-draft）取作 --cs 参与字号计算。
  * 启动时在首帧渲染前调用 applyChatFontSize(readChatFontSize())，避免先按标准字号闪一下。

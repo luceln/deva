@@ -60,7 +60,7 @@ export interface TaskRun {
   handoff?: { summary: string; needsAction: boolean }
 }
 
-/** 一条定时任务的完整记录（持久化于 ~/.deva/tasks.json）。 */
+/** 一条定时任务的完整记录（持久化于 ~/.deva-plus/tasks.json）。 */
 export interface TaskRecord {
   id: string
   title: string
