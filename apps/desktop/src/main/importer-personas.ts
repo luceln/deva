@@ -8,7 +8,8 @@ import {
   inspectSourceFile,
   readSourceDir,
   sourceFileFailureReason,
-  SOURCE_DIR_UNREADABLE
+  SOURCE_DIR_UNREADABLE,
+  writeFailureReason
 } from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
@@ -82,7 +83,7 @@ export function importPersonas(srcHome: string): PersonaImportStat {
     mkdirSync(dstDir, { recursive: true })
   } catch (e) {
     // 建不出目标目录：整步作废。必须记失败——否则报告是「0 新增 0 失败」，看着像「本来就没有角色」
-    stat.failed.push({ step: 'personas', id: '<dir>', reason: (e as Error)?.message ?? String(e) })
+    stat.failed.push({ step: 'personas', id: '<dir>', reason: writeFailureReason(e) })
     return stat
   }
 
@@ -182,7 +183,7 @@ export function importPersonas(srcHome: string): PersonaImportStat {
       }
     } catch (e) {
       // 单条失败不影响其余角色，但要如实上报（磁盘满 / 无权限）
-      stat.failed.push({ step: 'personas', id, reason: (e as Error)?.message ?? String(e) })
+      stat.failed.push({ step: 'personas', id, reason: writeFailureReason(e) })
     }
   }
   return stat

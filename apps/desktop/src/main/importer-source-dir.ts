@@ -109,6 +109,21 @@ export type SourceFileStat =
 export const SOURCE_FILE_UNREADABLE = 'source-file-unreadable'
 /** 源里那个名字下不是普通文件（例如 `.md` 位置被同名目录占住）：源数据异常，不是「跳过」。 */
 export const SOURCE_NOT_A_FILE = 'source-not-a-file'
+/**
+ * 写目标失败（mkdir / copyFile / symlink 之类）。
+ *
+ * **不把 Node 的原始 message 透给界面**：`EEXIST: file already exists, mkdir 'C:\Users\...\data\chats'`
+ * 用户看不懂，而且把本机绝对路径写进了界面。原始 message 仍进 `console.warn` 供排查，
+ * 界面只认这个码。与 `secrets-write-failed` / `config-write-failed` 同一模式。
+ */
+export const TARGET_WRITE_FAILED = 'target-write-failed'
+
+/** 把任意异常翻成原因码：调用方一律用它，**不要**再把 `error.message` 直接写进 `reason`。 */
+export function writeFailureReason(e: unknown): string {
+  // 排查用的原文留在 terminal，不进界面。
+  console.warn('[import] 写目标失败：', e)
+  return TARGET_WRITE_FAILED
+}
 
 /** 探测一个源文件。**不修改任何东西**，也不读内容。 */
 export function inspectSourceFile(file: string): SourceFileStat {

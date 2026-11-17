@@ -2,7 +2,7 @@ import { copyFileSync, lstatSync, mkdirSync, rmSync, statSync, utimesSync } from
 import { basename, join } from 'path'
 import { getDevaHome } from './services/config'
 import { backupBroken, inspectDirTarget, inspectTarget } from './importer-target'
-import { readSourceDir, SOURCE_DIR_UNREADABLE } from './importer-source-dir'
+import { readSourceDir, SOURCE_DIR_UNREADABLE, writeFailureReason } from './importer-source-dir'
 import type { AssocReport, Failure } from '../shared/import-protocol'
 
 /**
@@ -252,7 +252,7 @@ function mergeDir(srcDir: string, dstDir: string, kind: string, failures: Failur
       }
     } catch (e) {
       // 单条失败不影响其它，但必须上报：否则「导入完成」会盖住磁盘满/权限问题
-      failures.push(fail(kind, name, (e as Error)?.message ?? String(e)))
+      failures.push(fail(kind, name, writeFailureReason(e)))
     }
   }
   return created
@@ -293,7 +293,7 @@ export function copyAssoc(
       mkdirSync(dstMedia, { recursive: true })
     } catch (e) {
       // 目标目录都建不出来：后面每个文件都会失败，这里只记一条更清楚的原因
-      failures.push(fail('media', '<dir>', (e as Error)?.message ?? String(e)))
+      failures.push(fail('media', '<dir>', writeFailureReason(e)))
     }
     let done = 0
     for (const name of mediaNames) {
@@ -328,7 +328,7 @@ export function copyAssoc(
         assoc.media++
       } catch (e) {
         // 单个 blob 失败：对应的图片就是缺失，但不该中断整轮；记下来让界面能显示
-        failures.push(fail('media', name, (e as Error)?.message ?? String(e)))
+        failures.push(fail('media', name, writeFailureReason(e)))
       }
     }
     onProgress?.(mediaNames.length, mediaNames.length)

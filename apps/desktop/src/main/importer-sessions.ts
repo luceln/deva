@@ -2,7 +2,7 @@ import { copyFileSync, mkdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { backupBroken, inspectTarget } from './importer-target'
-import { readSourceDir, SOURCE_DIR_UNREADABLE } from './importer-source-dir'
+import { readSourceDir, SOURCE_DIR_UNREADABLE, writeFailureReason } from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
 /**
@@ -68,7 +68,7 @@ export function importSessions(srcHome: string): StepStat & { compacted: string[
     mkdirSync(dstDir, { recursive: true })
   } catch (e) {
     // 整步作废：必须让报告亮红，否则「会话 0 个 + ok」会被当成「本来就没有会话」
-    stat.failed.push({ step: 'sessions', id: '<dir>', reason: (e as Error)?.message ?? String(e) })
+    stat.failed.push({ step: 'sessions', id: '<dir>', reason: writeFailureReason(e) })
     return stat
   }
 
@@ -122,7 +122,7 @@ export function importSessions(srcHome: string): StepStat & { compacted: string[
       }
     } catch (e) {
       // 复制失败 ≠ 已存在：进 failed，界面才会把「这个会话没导进来」显示出来
-      stat.failed.push({ step: 'sessions', id, reason: (e as Error)?.message ?? String(e) })
+      stat.failed.push({ step: 'sessions', id, reason: writeFailureReason(e) })
       continue
     }
     copyCompacted(srcDir, dstDir, safe, stat, names)
@@ -213,7 +213,7 @@ function copyCompacted(
       stat.compacted.push(name)
     } catch (e) {
       // 主文件已在，那段早期历史仍读不出来——属于真失败，别静默吞掉
-      stat.failed.push({ step: 'sessions', id: name, reason: (e as Error)?.message ?? String(e) })
+      stat.failed.push({ step: 'sessions', id: name, reason: writeFailureReason(e) })
     }
   }
 }

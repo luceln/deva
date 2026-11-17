@@ -2,7 +2,7 @@ import { cpSync, lstatSync, mkdirSync, readlinkSync, statSync, symlinkSync } fro
 import { join, resolve } from 'path'
 import { getDevaHome } from './services/config'
 import { BUILTIN_SKILL_IDS } from './services/skills'
-import { readSourceDir, SOURCE_DIR_UNREADABLE } from './importer-source-dir'
+import { readSourceDir, SOURCE_DIR_UNREADABLE, writeFailureReason } from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
 /**
@@ -98,7 +98,7 @@ export function importSkills(
     mkdirSync(dstDir, { recursive: true })
   } catch (e) {
     // 建不出目标目录：记失败，别让报告看起来「本来就没有技能」
-    stat.failed.push({ step: 'skills', id: '<dir>', reason: (e as Error)?.message ?? String(e) })
+    stat.failed.push({ step: 'skills', id: '<dir>', reason: writeFailureReason(e) })
     return stat
   }
 
@@ -155,7 +155,7 @@ export function importSkills(
         if (!builtin) stat.skipped.push(name)
       }
     } catch (e) {
-      stat.failed.push({ step: 'skills', id: name, reason: (e as Error)?.message ?? String(e) })
+      stat.failed.push({ step: 'skills', id: name, reason: writeFailureReason(e) })
     }
   }
   return stat
