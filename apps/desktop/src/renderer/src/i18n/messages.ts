@@ -819,6 +819,10 @@ const zhCN: MessageTree = {
       hideDetail: '收起',
       moreDetail: '…还有 {n} 条，已省略',
       failures: '失败条目',
+      failureCount: '{n} 条',
+      failureCountCapped: '共 {total} 条，显示前 {shown} 条',
+      failureExpand: '展开看全部 {n} 条',
+      failureCollapse: '收起，只看前几条',
       failureHint: '这些条目没有被写入。记忆类失败通常是总量或条数已达上限——删掉几条不再需要的记忆后重新导入即可补齐。',
       reason: {
         budget: '记忆总量已达上限，拒写',
@@ -841,6 +845,7 @@ const zhCN: MessageTree = {
         sourceMcpCorrupt: '原版 MCP 配置文件内容损坏、解析不了，MCP 服务一个都没导入，请检查 mcp.json',
         sourceMcpEnabledUnknown: 'MCP 服务已导入，但原版配置读不出来，无法得知它原本是开还是关——请到 MCP 页面按需打开',
         mcpWriteFailed: 'MCP 配置没能写入本地文件（权限或磁盘异常），重启后这条配置会丢失',
+        mcpUnsafeId: '原版这个 MCP 服务的 id 不能用作配置键（含冒号或分隔符），没有导入。请在原版里改个名字后重导',
         sourceConfigUnreadable: '原版配置文件读不出来（可能被占用），服务商一个都没能导入，请稍后重试',
         sourceConfigCorrupt: '原版配置文件内容损坏、解析不了，服务商一个都没能导入，请检查 config.json',
         sourceMemoryUnreadable: '原版记忆文件读不出来（可能被占用），这个范围下的记忆没有导入，请稍后重试',
@@ -877,6 +882,11 @@ const zhCN: MessageTree = {
         skills: '技能',
         sessions: '对话记录',
         assoc: '附件',
+        // 附件按类细分（主进程的 step 是 `assoc:<kind>`）：失败清单据此分组，用户一眼看出是哪一类出的错
+        'assoc:media': '附件 · 媒体',
+        'assoc:checkpoints': '附件 · 回滚面板',
+        'assoc:subagents': '附件 · 子智能体记录',
+        'assoc:toolResults': '附件 · 工具结果',
         cache: '刷新会话列表',
         done: '收尾',
         // 整轮级别的异常：失败发生在哪一步已无法确定，主进程记成 unknown
@@ -2429,6 +2439,10 @@ const en: MessageTree = {
       hideDetail: 'Hide',
       moreDetail: '…and {n} more',
       failures: 'Failed items',
+      failureCount: '{n} items',
+      failureCountCapped: '{total} items, showing the first {shown}',
+      failureExpand: 'Show all {n}',
+      failureCollapse: 'Collapse to the first few',
       failureHint:
         'These items were not written. Memory failures are usually quota limits — delete a few memories you no longer need and import again to pick them up.',
       reason: {
@@ -2499,6 +2513,10 @@ const en: MessageTree = {
         skills: 'Skills',
         sessions: 'Conversations',
         assoc: 'Attachments',
+        'assoc:media': 'Attachments · media',
+        'assoc:checkpoints': 'Attachments · rollback panels',
+        'assoc:subagents': 'Attachments · subagent records',
+        'assoc:toolResults': 'Attachments · tool results',
         cache: 'Refreshing the conversation list',
         done: 'Finishing up',
         unknown: 'Whole run',

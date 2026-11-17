@@ -67,6 +67,9 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   'source-mcp-corrupt': 'settings.import.reason.sourceMcpCorrupt',
   'source-mcp-enabled-unknown': 'settings.import.reason.sourceMcpEnabledUnknown',
   'mcp-write-failed': 'settings.import.reason.mcpWriteFailed',
+  // 源里那个服务的 id 不能当映射键 / 密钥前缀（含冒号、分隔符、首字符非法）。
+  // 以前归进 skipped（界面说「不用管」），而这些服务**根本没导入**，必须让用户看见。
+  'mcp-unsafe-id': 'settings.import.reason.mcpUnsafeId',
   // 源侧 config.json / memory.json 读不出来或内容坏：整份资产一个都没导入，必须让用户看到。
   'source-config-unreadable': 'settings.import.reason.sourceConfigUnreadable',
   'source-config-corrupt': 'settings.import.reason.sourceConfigCorrupt',
@@ -124,6 +127,12 @@ export function ImportPane(): React.JSX.Element {
   const [runError, setRunError] = useState('')
   /** 展开看明细的步骤（结果里「跳过了哪些」）。 */
   const [expanded, setExpanded] = useState<Set<RowStep>>(() => new Set())
+  /**
+   * 失败清单是否展开成「全部」。默认收起只显示 FAILURE_LIMIT 条——
+   * 媒体目录被占位时主进程会产出 397 条（396 个文件逐条 + 1 条目录），全量铺开是 397 个 li。
+   * 但失败是用户要处置的，不能只给数字不给看，所以收起态给「展开全部」入口，展开后按 step 分组。
+   */
+  const [failAll, setFailAll] = useState(false)
   // 卸载后不再 setState：导入要跑几十秒，用户完全可能在途中关掉设置面板。
   const aliveRef = useRef(true)
   useEffect(() => {
@@ -193,6 +202,37 @@ export function ImportPane(): React.JSX.Element {
 
   const rows = useMemo(() => (report ? stepRows(report, t) : []), [report, t])
   const failures = useMemo(() => (report ? allFailures(report) : []), [report])
+  /**
+   * 收起态要显示的那几条。取值只看长度，不重排——失败顺序就是主进程产生的顺序（按步骤走的），
+   * 重排会让「第一批失败是哪一步」这个信息丢掉。
+   */
+  const shownFailures = useMemo(
+    () => (failAll ? failures : failures.slice(0, FAILURE_LIMIT)),
+    [failures, failAll]
+  )
+  /**
+   * 展开后按 step 分组。理由：396 条媒体文件失败若平铺成一长串，只能靠滚动找「哪一步出问题」；
+   * 分组后一眼就能看到「媒体 396 条 / 角色 1 条」。组内顺序保持主进程给的顺序。
+   * 只在展开态才算（收起态用不到，省一次分组）。
+   */
+  const failureGroups = useMemo(() => {
+    if (!failAll) return []
+    const out: Array<{ step: string; items: Failure[] }> = []
+    const idx = new Map<string, number>()
+    for (const f of failures) {
+      const k = f.step
+      const at = idx.get(k)
+      if (at === undefined) {
+        idx.set(k, out.length)
+        out.push({ step: k, items: [f] })
+      } else {
+        out[at].items.push(f)
+      }
+    }
+    return out
+  }, [failures, failAll])
+  /** 收起态还有多少条没显示（用它渲染「还有 N 条」）。 */
+  const hiddenFailures = Math.max(0, failures.length - FAILURE_LIMIT)
   /** 失败总数取自报告本身（含被清单省略的 no-encryption 那批），标题用它；清单只是明细。 */
   const failureTotal = report
     ? report.failures.length + report.memories.failed.filter((f) => !report.failures.includes(f)).length
@@ -360,21 +400,78 @@ export function ImportPane(): React.JSX.Element {
             ))}
           </ul>
 
-          {/* 失败常驻：步骤 + 对象 + 原因都写出来，用户才知道该去清哪几条记忆。 */}
+          {/* 失败常驻：步骤 + 对象 + 原因都写出来，用户才知道该去清哪几条记忆。
+              但条数可能几百条（媒体目录被占位时 396 个文件逐条失败），默认只显示 FAILURE_LIMIT 条，
+              剩下用「还有 N 条」+ 展开入口带过；展开后按 step 分组，避免一长串要滚着找哪一步出问题。 */}
           {failures.length > 0 && (
             <div className="cf-imp__fails">
-              <div className="cf-imp__failhead">{t('settings.import.failures')}</div>
-              <ul className="cf-imp__list">
-                {failures.map((f, i) => (
-                  <li key={`${f.step}:${f.id}:${f.reason}:${i}`} className="cf-imp__row cf-imp__row--fail">
-                    <span className="cf-imp__step">{stepText(f.step, t)}</span>
-                    <code className="cf-imp__fid" title={f.id}>
-                      {idText(f.id, t)}
-                    </code>
-                    <span className="cf-imp__reason">{reasonText(f.reason, t)}</span>
-                  </li>
-                ))}
-              </ul>
+              <div className="cf-imp__failhead">
+                <span>{t('settings.import.failures')}</span>
+                <span className="cf-imp__failcount">
+                  {failures.length > FAILURE_LIMIT
+                    ? t('settings.import.failureCountCapped')
+                        .replace('{total}', String(failures.length))
+                        .replace('{shown}', String(shownFailures.length))
+                    : t('settings.import.failureCount').replace('{n}', String(failures.length))}
+                </span>
+                {hiddenFailures > 0 && (
+                  <button
+                    type="button"
+                    className="cf-imp__failmore"
+                    aria-expanded={failAll}
+                    onClick={() => setFailAll((v) => !v)}
+                  >
+                    {failAll
+                      ? t('settings.import.failureCollapse')
+                      : t('settings.import.failureExpand').replace('{n}', String(hiddenFailures))}
+                    <ChevronDown size={12} className="cf-imp__failchev" />
+                  </button>
+                )}
+              </div>
+              {/*
+                收起态与展开态互斥，用**条件渲染**而不是 Fold：
+                Fold 收起时 children 仍然挂载（只是 CSS 0fr + aria-hidden），397 条 li 照样在 DOM 里，
+                而这次要解决的正是「397 个 li 全渲染」。条件渲染才是真的只渲染 8 条。
+              */}
+              {!failAll && (
+                <ul className="cf-imp__list">
+                  {shownFailures.map((f, i) => (
+                    <li key={`${f.step}:${f.id}:${f.reason}:${i}`} className="cf-imp__row cf-imp__row--fail">
+                      <span className="cf-imp__step">{stepText(f.step, t)}</span>
+                      <code className="cf-imp__fid" title={f.id}>
+                        {idText(f.id, t)}
+                      </code>
+                      <span className="cf-imp__reason">{reasonText(f.reason, t)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {failAll && (
+                /* 展开态：按 step 分组。组头给「步骤 + N 条」，组内是完整清单（可滚动）。
+                   396 条媒体失败若平铺成一长串，只能滚着找哪一步出问题；分组后一眼看到分布。 */
+                <div className="cf-imp__failgroups">
+                  {failureGroups.map((g) => (
+                    <section key={g.step} className="cf-imp__failgroup">
+                      <div className="cf-imp__failgrouphd">
+                        <span className="cf-imp__step cf-imp__step--g">{stepText(g.step, t)}</span>
+                        <span className="cf-imp__failcount">
+                          {t('settings.import.failureCount').replace('{n}', String(g.items.length))}
+                        </span>
+                      </div>
+                      <ul className="cf-imp__list">
+                        {g.items.map((f, i) => (
+                          <li key={`${f.step}:${f.id}:${f.reason}:${i}`} className="cf-imp__row cf-imp__row--fail">
+                            <code className="cf-imp__fid" title={f.id}>
+                              {idText(f.id, t)}
+                            </code>
+                            <span className="cf-imp__reason">{reasonText(f.reason, t)}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </section>
+                  ))}
+                </div>
+              )}
               <p className="cf-imp__note">{t('settings.import.failureHint')}</p>
             </div>
           )}
@@ -431,6 +528,16 @@ interface SecretNote {
 
 /** 明细最多列这么多条（跳过几十个会话时不必把列表摊满整屏），余下的用一句「还有 N 个」带过。 */
 const DETAIL_LIMIT = 12
+
+/**
+ * 失败清单默认显示前几条。选 8 的理由：
+ * - 容器 max-height 200px、每行约 24px → 恰好约 8 行可见；N 取 8 时「默认显示」和「可见范围」对齐，
+ *   用户不用先滚动才发现下面还有——而滚动区里藏着的失败等于没告诉他。
+ * - 实际故障分布是「1~3 条真失败」占绝大多数，8 条能把它们全放下；
+ *   而 397 条那种批量失败（媒体目录被占位）本来就是同一步、同原因的重复，8 条足够看出「是哪一步、什么原因」。
+ * - 不取 12 是因为 12×24=288px > 200px 容器，会有 4 条被裁在滚动区外。
+ */
+const FAILURE_LIMIT = 8
 
 /**
  * 密钥行。`report.secrets` 是 `SecretsStat`（不再是 `StepStat` 兼容形状），必须专门摊：

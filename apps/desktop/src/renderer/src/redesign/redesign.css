@@ -3818,8 +3818,70 @@ button.cf-mask__pill:hover {
   overscroll-behavior: contain;
 }
 .cf-imp__failhead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
   color: var(--danger);
   font-size: 12px;
+  font-weight: 600;
+}
+/* 条数计数：常驻 12px（项目规范下限），不加粗以免盖过标题。 */
+.cf-imp__failcount {
+  color: var(--fg-muted);
+  font-size: 12px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+/* 展开/收起触发器：button[aria-expanded] + chevron 旋转（全库不用原生 <details>） */
+.cf-imp__failmore {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cf-imp__failmore:hover {
+  text-decoration: underline;
+}
+.cf-imp__failchev {
+  flex: none;
+  transition: transform 0.15s;
+}
+.cf-imp__failmore[aria-expanded='true'] .cf-imp__failchev {
+  transform: rotate(180deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-imp__failchev {
+    transition: none;
+  }
+}
+/* 展开后的分组：一组一个 step。组头与组体之间不留大空隙，避免几百条时显得散。 */
+.cf-imp__failgroups {
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-top: 4px;
+}
+.cf-imp__failgroup + .cf-imp__failgroup {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+.cf-imp__failgrouphd {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 6px;
+}
+.cf-imp__step--g {
+  min-width: 0;
+  color: var(--fg);
   font-weight: 600;
 }
 .cf-imp__fid {
