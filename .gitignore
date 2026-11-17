@@ -17,7 +17,17 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 .idea/
-.deva/
+# .deva 是本地草稿区，默认整目录忽略；只放开「验收资产」与「*.md 文档」。
+# 必须写成 .deva/*（而不是 .deva/）：git 不允许重新包含一个被整体排除的父目录下的内容，
+# 写成 .deva/ 时后面的 !.deva/qa/ 无效（实测 git add -n 无输出）。
+.deva/*
+!.deva/qa/
+!.deva/*.md
+# 上面放开 qa/ 后，qa 内部仍要排掉产物与临时目录
+.deva/qa/dist/
+# 体积大、与代码无关，不入库
+.deva/code-map/
+.deva/design/
 .claude/
 .vscode/*
 !.vscode/extensions.json
