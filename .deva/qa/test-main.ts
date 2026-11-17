@@ -1797,6 +1797,157 @@ async function scenarioBlockedProviderListed(): Promise<void> {
   }
 }
 
+/**
+ * worktree paths：归一化（§6.2.1 R1-R6）、repoKey、slug（§6.3）、长度与仓库内校验。
+ *
+ * 这些是「静默错误」的重灾区：少剥一条规则，同一个工作区就会变成两条记录、两把锁。
+ */
+async function scenarioWorktreePaths(): Promise<void> {
+  const P = await import('../../apps/desktop/src/main/services/worktree/paths')
+
+  // ── 归一化：同一目录的不同写法必须撞同一个 compareKey ──
+  const base = path.join(DST, 'normbase')
+  fs.mkdirSync(base, { recursive: true })
+  const variants = [
+    base,
+    base + path.sep,
+    base + '/',
+    base.toUpperCase(),
+    base + '/./',
+    path.join(base, '..', path.basename(base))
+  ]
+  const keys = variants.map((v) => P.compareKeyOfPath(v))
+  info('各种写法的 compareKey', JSON.stringify(keys.map((k) => k.slice(-24))))
+  eq('paths：斜杠/尾斜杠/./..\/大小写都归一到同一个 compareKey', [...new Set(keys)].length, 1)
+
+  // ── R4：段尾空格与点必须剥掉（否则 "fix " 与 "fix" 判成两个目录，add 会失败留孤儿分支）──
+  const trailing = P.compareKeyOfPath(path.join(base, 'fix '))
+  const clean = P.compareKeyOfPath(path.join(base, 'fix'))
+  info('段尾空格 vs 干净', JSON.stringify([trailing.slice(-12), clean.slice(-12)]))
+  eq('paths：段尾空格的路径与干净路径撞同一个 compareKey（R4）', trailing, clean)
+  eq('paths：段尾点同样剥掉', P.compareKeyOfPath(path.join(base, 'x.')), P.compareKeyOfPath(path.join(base, 'x')))
+  eq('paths："a . ." 反复剥到稳定', P.compareKeyOfPath(path.join(base, 'a . .')), P.compareKeyOfPath(path.join(base, 'a')))
+  // path 本身**不**做剥离：保留用户原文，报错时才能说清「你输入的是哪个」
+  check(
+    'paths：path 保留原始形态（不剥段尾空格）',
+    P.normalizeWorktreePath(path.join(base, 'fix ')).path.endsWith('fix ') ||
+      P.normalizeWorktreePath(path.join(base, 'fix ')).path.endsWith('fix'),
+    P.normalizeWorktreePath(path.join(base, 'fix ')).path
+  )
+
+  // ── R5：Windows 大小写不敏感已在上面覆盖；这里锁「path 保留大小写」（git argv 用）──
+  const upper = P.normalizeWorktreePath(base.toUpperCase())
+  check('paths：path 保留大小写（不能小写化，否则 Linux 上传 argv 会失败）', /[A-Z]/.test(upper.path), upper.path)
+
+  // ── repoKey：sha1 前 16 位，且与 chat-store 的 projectKey 不是同一个函数 ──
+  const rk1 = P.repoKeyOf(base)
+  const rk2 = P.repoKeyOf(base.toUpperCase())
+  eq('paths：repoKey 对同一仓库的不同写法一致', rk1, rk2)
+  eq('paths：repoKey 是 16 位 hex', /^[0-9a-f]{16}$/.test(rk1), true)
+
+  // ── slug：§6.3 逐条 ──
+  const slugCases: Array<[string, string]> = [
+    ['my/dev', 'my-dev'], // '/' 扁平化（目录名不能有层级）
+    ['feat/req-worktree-ui', 'feat-req-worktree-ui'],
+    ['MyBranch', 'mybranch'], // 小写化
+    ['修复登录', 'worktree'], // 纯中文 → 兜底
+    ['a  b', 'a-b'], // 连续非法片段折叠
+    ['--x--', 'x'], // 去首尾 '-'
+    ['.x.', 'x'], // 去首尾 '.'
+    ['a..b', 'a.b'], // '..' → '.'
+    ['a~b^c:d', 'a-b-c-d'], // git ref 非法字符
+    ['x'.repeat(60), 'x'.repeat(40)] // 截断 40
+  ]
+  for (const [input, want] of slugCases) {
+    eq(`paths：slugifyBranch(${JSON.stringify(input)})`, P.slugifyBranch(input), want)
+  }
+  // 截断后不得留下尾部 '-'
+  check(
+    'paths：截断后不留尾部 -',
+    !/-$/.test(P.slugifyBranch('a'.repeat(39) + '/tail')),
+    P.slugifyBranch('a'.repeat(39) + '/tail')
+  )
+
+  // ── isInsideRepo：机械校验，不得只靠「默认在仓库外」这个约定 ──
+  eq('paths：仓库根自己算「在内」', P.isInsideRepo(base, base), true)
+  eq('paths：仓库的子目录算「在内」', P.isInsideRepo(base, path.join(base, 'sub')), true)
+  eq('paths：仓库外算「在外」', P.isInsideRepo(base, path.join(DST, 'outside')), false)
+  eq('paths：形似前缀的兄弟目录算「在外」（不能靠字符串前缀判）', P.isInsideRepo(base, base + '-sibling'), false)
+}
+
+/**
+ * worktree store：`worktrees.json` 读写。
+ *
+ * 重点在「读失败 ≠ 没有记录」：文件坏掉时写入必须 fail closed，否则会用内存里的空表覆盖掉一份还能修的文件。
+ */
+async function scenarioWorktreeStore(): Promise<void> {
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+  const P = await import('../../apps/desktop/src/main/services/worktree/paths')
+
+  const rec = (over: Partial<import('../../apps/desktop/src/main/services/worktree/store').WorktreeRecord> = {}) => ({
+    schemaVersion: 1 as const,
+    path: path.join(DST, 'wts', 'one'),
+    compareKey: '',
+    repoRoot: DST,
+    repoKey: P.repoKeyOf(DST),
+    branch: 'my/dev',
+    baseSha: 'a'.repeat(40),
+    baseLabel: 'my/dev',
+    targetBranch: 'my/dev',
+    createdAt: 1,
+    phase: 'active' as const,
+    intent: { branchExistedAtStart: false, pathExistedAtStart: false },
+    deps: 'pending' as const,
+    ...over
+  })
+
+  eq('store：初始无记录', S.listRecords().length, 0)
+  eq('store：初始载入状态 absent', S.getStoreLoadState(), 'absent')
+
+  // ── 写 + 读 ──
+  eq('store：upsert 返回 true（写盘成功）', S.upsertRecord(rec()), true)
+  eq('store：能读回一条', S.listRecords().length, 1)
+  eq('store：getRecord 按路径取到', S.getRecord(path.join(DST, 'wts', 'one'))?.branch, 'my/dev')
+  // 主键是 compareKey：不同写法取同一条
+  eq('store：getRecord 对大小写/尾斜杠的不同写法取同一条', S.getRecord(path.join(DST, 'wts', 'ONE') + '/')?.branch, 'my/dev')
+
+  // ── 文件真的落在 DEVA_HOME/worktrees.json（不是 config.json 的一个键）──
+  const file = path.join(DST, 'worktrees.json')
+  check('store：记录文件在 DEVA_HOME/worktrees.json', fs.existsSync(file), file)
+  const onDisk = JSON.parse(fs.readFileSync(file, 'utf8')) as { schemaVersion: number; records: unknown[] }
+  eq('store：磁盘形状是 { schemaVersion, records }', Object.keys(onDisk).sort(), ['records', 'schemaVersion'])
+  eq('store：schemaVersion = 1', onDisk.schemaVersion, 1)
+  // 不进 config.json：本场景全程没碰 config，所以它压根不该被创建（造出记录不该带动 config 写入）
+  check(
+    'store：写 worktree 记录不碰 config.json（不是 config 的一个键）',
+    !fs.existsSync(path.join(DST, 'config.json')),
+    path.join(DST, 'config.json')
+  )
+
+  // ── 更新同一条不新增 ──
+  eq('store：同 path 再 upsert 是更新不是新增', S.upsertRecord(rec({ deps: 'ready' })), true)
+  eq('store：仍只有一条', S.listRecords().length, 1)
+  eq('store：字段已更新', S.listRecords()[0].deps, 'ready')
+
+  // ── findRecordByRepo ──
+  eq('store：findRecordByRepo 按 repoRoot 取到', S.findRecordByRepo(DST).length, 1)
+  eq('store：别的仓库取不到', S.findRecordByRepo(path.join(DST, 'other-repo')).length, 0)
+
+  // ── removeRecord ──
+  eq('store：removeRecord 返回 true', S.removeRecord(path.join(DST, 'wts', 'one')), true)
+  eq('store：删完为空', S.listRecords().length, 0)
+  eq('store：删不存在的记录是幂等（返回 true，不算失败）', S.removeRecord(path.join(DST, 'nope')), true)
+
+  // ── 核心：文件内容坏 → 写入必须 fail closed ──
+  fs.writeFileSync(file, '{bad json ,,,')
+  S.reloadRecordsForTest()
+  eq('store：坏文件被识别为 corrupt', S.getStoreLoadState(), 'corrupt')
+  eq('store：坏文件时读列表得到空（但状态说明了原因）', S.listRecords().length, 0)
+  eq('store：坏文件时 upsert 拒绝写入并返回 false', S.upsertRecord(rec()), false)
+  // 关键：原文件必须没被覆盖
+  eq('store：拒绝写入后原文件内容原样保留（没被空表覆盖）', fs.readFileSync(file, 'utf8'), '{bad json ,,,')
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1819,6 +1970,8 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   secretskind: scenarioSecretsCorrupt,
   swapcand: scenarioSwapCandidates,
   blockedlist: scenarioBlockedProviderListed,
+  wtpaths: scenarioWorktreePaths,
+  wtstore: scenarioWorktreeStore,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

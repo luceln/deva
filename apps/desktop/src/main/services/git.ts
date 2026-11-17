@@ -167,7 +167,7 @@ const DEFAULT_TIMEOUT = 30_000
 const REMOTE_TIMEOUT = 120_000
 const MAX_FILE_BYTES = 2 * 1024 * 1024 // 未跟踪文件读全文的上限（对齐 workspace）
 
-interface RunResult {
+export interface RunResult {
   code: number
   stdout: string
   stderr: string
@@ -176,8 +176,16 @@ interface RunResult {
 /**
  * 底层执行（不做 assertInside）：供 `git --version` 等无仓库根上下文的命令用。
  * 用户可控串一律作独立 argv；env 关掉交互提示与可选锁，锁定英文错误文案便于解析。
+ *
+ * **导出供 worktree 模块复用**（`main/services/worktree/git-worktree.ts`）：那里要执行
+ * `worktree add/remove/prune/branch`，其中 `add` 的路径在受信根之外（`<DEVA_HOME>/worktrees/...`），
+ * 不能用 `runGit`（首行 `assertInside` 会拒）。复制一份 execFile 会漂移（超时、maxBuffer、env
+ * 三处约定都得同步），所以导出这一个。
+ *
+ * `GIT_OPTIONAL_LOCKS=0` 对 `worktree add` 的影响已实测：**无影响**，add 正常成功（写 `.git/worktrees/`
+ * 不需要可选锁）。所以这里不额外传 env 覆盖，与既有调用保持一致。
  */
-function runGitRaw(
+export function runGitRaw(
   cwd: string | undefined,
   args: string[],
   timeout = DEFAULT_TIMEOUT,

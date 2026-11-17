@@ -17,7 +17,7 @@ const roots = new Set<string>()
  * 目标可能尚不存在（如将新建的文件）→ 对最近的存在祖先做 realpath，再把剥下的尾段接回。
  * 任一步失败都回退字面 resolve（不因解析失败而误放行/误拦截）。
  */
-function realResolve(p: string): string {
+export function realResolve(p: string): string {
   const abs = resolve(p)
   const tail: string[] = []
   let cur = abs
