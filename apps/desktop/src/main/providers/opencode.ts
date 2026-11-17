@@ -9,7 +9,8 @@ import { app } from 'electron'
  *     Go 对缺失该头的请求直接回 400 `MissingSessionID`，对话一步都走不下去。值只需稳定、不必可解析
  *     （本应用用对话 id），**且绝不能是写死的常量**——并行对话共用一条会话会被当成异常流量。
  *  2. **用自有 User-Agent 表明身份**（如 `my-agent/1.0`），而不是 SDK / HTTP 库的默认名，让网关
- *     认得出这是编码 agent 的正常流量。
+ *     认得出这是编码 agent 的正常流量。本应用报的是 `DevaPlus/<版本>`——带上 fork 的产品名，
+ *     网关才能把本 fork 与上游 Deva 的流量分开（两者请求同一批端点，同名等于互相冒充）。
  *
  * 第 2 项已推广到所有服务商（见 providerHeaders）；会话头只对 opencode.ai 的推理端点加。
  */
@@ -32,13 +33,18 @@ function isOpencodeInference(baseURL: string): boolean {
 
 /**
  * 模型请求（对话流式与拉取模型清单）要追加的请求头，适配器原样并进 fetch headers 即可：
- *  · 所有服务商都带 `user-agent: deva/<版本>` 自报身份——不带就是网络库的默认值（Chromium 浏览器 UA），网关、
+ *  · 所有服务商都带 `user-agent: DevaPlus/<版本>` 自报身份——不带就是网络库的默认值（Chromium 浏览器 UA），网关、
  *    中转服务与服务商后台都分不出是哪个工具在调用（issue #33）。版本号与更新器 / MCP 客户端同源。
+ *
+ *    用 **fork 的产品名**而不是 `deva`：上游 Deva 与本 fork 同时存在于用户机器上，两者请求的是同一批网关
+ *    与服务商后台。若都自称 `deva/<版本>`，网关侧（含中转服务与我们排查过的上游拦截）无法把「本 fork 发出的
+ *    流量」与「上游发出的流量」分开——出问题时既定位不到来源，也没法只针对一侧放行或限流。产品名的单一来源是
+ *    electron-builder.yml 的 productName，web_fetch 工具（services/tools.ts）用的是同一个名前缀。
  *  · opencode.ai 的推理端点另加 `x-opencode-session`（见文件头）。
  * @param sessionId 所属对话 id；缺省（不经对话的一次性调用）退回本次运行 id。
  */
 export function providerHeaders(baseURL: string, sessionId?: string): Record<string, string> {
-  const ua = { 'user-agent': `deva/${app.getVersion()}` }
+  const ua = { 'user-agent': `DevaPlus/${app.getVersion()}` }
   if (!isOpencodeInference(baseURL)) return ua
   return { ...ua, 'x-opencode-session': sessionId?.trim() || runSessionId }
 }
