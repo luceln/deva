@@ -75,11 +75,21 @@ function readAll(): Record<string, StoredServer> {
   return {}
 }
 
-function writeAll(servers: Record<string, StoredServer>): void {
+/**
+ * 把整份 mcpServers 落盘。返回是否真的写成功。
+ *
+ * ⚠️ 这里以前是 `catch {}`——**写盘失败完全不可感知**：`upsertServer` 照常返回记录、调用方以为写好了，
+ * 而磁盘上什么都没有，重启后配置凭空消失（这是同一个病的第 10 处，与 config.json 那条同形）。
+ * 导入器要据此报 `mcp-write-failed`，所以必须把结果交出去；忽略返回值的调用方行为不变。
+ */
+function writeAll(servers: Record<string, StoredServer>): boolean {
   try {
     writeFileSync(mcpFile(), JSON.stringify({ mcpServers: servers }, null, 2), 'utf8')
-  } catch {
-    /* 写失败：忽略，内存态仍可用（下次可重试） */
+    return true
+  } catch (e) {
+    // 不再静默：内存态仍可用（下次可重试），但调用方现在能知道盘上没落成
+    console.warn('[mcp] 写 mcp.json 失败：', (e as Error)?.message ?? e)
+    return false
   }
 }
 
@@ -157,27 +167,35 @@ function enabledMap(): Record<string, boolean> {
   return {}
 }
 
-function writeEnabledMap(map: Record<string, boolean>): void {
+/**
+ * 落盘启用态，返回是否写成功。
+ *
+ * 与 `writeAll` 同理：`setConfig` 本来就会返回 boolean，以前在这里被丢掉，于是「启用了」只是内存里为真，
+ * 磁盘上还是关的——重启后服务又变回停用，而这一刻界面上明明是开着的。
+ */
+function writeEnabledMap(map: Record<string, boolean>): boolean {
   const mcp = getConfig().mcp
   const base = mcp && typeof mcp === 'object' ? (mcp as Record<string, unknown>) : {}
-  setConfig({ mcp: { ...base, enabled: map } })
+  return setConfig({ mcp: { ...base, enabled: map } })
 }
 
 export function isEnabled(id: string): boolean {
   return enabledMap()[id] === true
 }
 
-function writeEnabled(id: string, enabled: boolean): void {
+function writeEnabled(id: string, enabled: boolean): boolean {
   const map = enabledMap()
   map[id] = enabled === true
-  writeEnabledMap(map)
+  return writeEnabledMap(map)
 }
 
-/** 用户显式启停：落盘并恒通知对账（即便值未变，也当作「请按此状态兑现」）。 */
-export function setEnabled(id: string, enabled: boolean): void {
-  if (!isSafeId(id)) return
-  writeEnabled(id, enabled)
+/** 用户显式启停：落盘并恒通知对账（即便值未变，也当作「请按此状态兑现」）。返回是否真的写进磁盘。 */
+export function setEnabled(id: string, enabled: boolean): boolean {
+  if (!isSafeId(id)) return false
+  const wrote = writeEnabled(id, enabled)
+  // 写盘失败也要通知：内存态已是用户要的状态，此刻兑现连接才与界面一致（下次启动则依赖磁盘）
   changeListener(id, { enabled: true, connection: false })
+  return wrote
 }
 
 // ── 读写 ──────────────────────────────────────────────────────────────────
@@ -200,8 +218,29 @@ export function getServerConfig(id: string): McpServerConfig | null {
   return { id, ...s }
 }
 
-/** 新建或覆盖一个 MCP 服务配置，返回最终记录。 */
+/**
+ * 写入结果：`ok=false` 表示配置只进了内存、没落到磁盘（重启后配置消失）。
+ *
+ * 导入器要靠它报 `mcp-write-failed`。其余调用方（IPC / create_mcp 工具）沿用 `upsertServer` 的返回值即可，
+ * 不因此改变行为——但写盘失败现在至少会被记录，不再被 `catch {}` 完全抹掉。
+ */
+export interface McpWriteResult {
+  server: McpServerConfig
+  ok: boolean
+}
+
+/** 新建或覆盖一个 MCP 服务配置，返回最终记录（不含写入状态；要判写入是否成功用 `upsertServerChecked`）。 */
 export function upsertServer(input: McpServerInput): McpServerConfig {
+  return upsertServerChecked(input).server
+}
+
+/**
+ * 与 `upsertServer` 同一条写路径（同一份 `readAll` / `writeAll` / 变更通知），额外交出**写盘是否成功**。
+ *
+ * 导入器必须走这个而不是 `upsertServer`：`writeAll` 以前 `catch {}` 静默吞，写盘失败时报告会写「已导入」，
+ * 磁盘上却没有，重启即消失——这与 config.json 那条 `config-write-failed` 是同一种病。
+ */
+export function upsertServerChecked(input: McpServerInput): McpWriteResult {
   const name = (input.name || '').trim() || '未命名 MCP'
   let id = input.id && isSafeId(input.id) ? input.id : ''
   const isNew = !id
@@ -227,7 +266,7 @@ export function upsertServer(input: McpServerInput): McpServerConfig {
   const prev = servers[id]
   const wasEnabled = isEnabled(id)
   servers[id] = rec
-  writeAll(servers)
+  const ok = writeAll(servers)
 
   if (typeof input.enabled === 'boolean') writeEnabled(id, input.enabled)
   else if (isNew) writeEnabled(id, false)
@@ -238,7 +277,7 @@ export function upsertServer(input: McpServerInput): McpServerConfig {
   }
   if (change.enabled || change.connection) changeListener(id, change)
 
-  return { id, ...rec }
+  return { server: { id, ...rec }, ok }
 }
 
 /** 删除一个服务：清 mcp.json 条目、启用态、可用角色、以及其全部密钥（`mcp:<id>:` 前缀）。 */

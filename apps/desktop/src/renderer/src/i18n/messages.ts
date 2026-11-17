@@ -829,11 +829,18 @@ const zhCN: MessageTree = {
           '导入的服务商没有留在配置里，可能被其他写入覆盖了，请重新导入一次补上',
         configWriteFailed: '配置写盘失败，权限或磁盘异常',
         linkFailed: '建立链接失败，可能缺少权限',
+        // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串（含本机绝对路径）只进后台日志，不进界面。
+        targetWriteFailed: '写入目标位置失败（权限、磁盘或路径异常），这一项没有导入',
         noEncryption: '这台机器无法保存密钥，需要手动重填',
         targetBlocked: '目标位置被同名文件夹或文件占住，没有写入',
         targetUnreadable: '目标位置有个同名条目读不出来（可能被其他程序占用），没有覆盖它',
         copyTruncated: '文件复制不完整（写入被中断），已丢弃半截副本，请重新导入一次',
-        sourceSecretsCorrupt: '原版密钥文件内容损坏、读不出来，密钥一个都没导入，请检查后重试',
+        sourceSecretsCorrupt: '原版密钥文件内容损坏、解析不了，密钥一个都没导入，请检查该文件',
+        sourceSecretsUnreadable: '原版密钥文件读不出来（可能被其他程序占用），密钥一个都没导入，请稍后重试',
+        sourceMcpUnreadable: '原版 MCP 配置文件读不出来（可能被其他程序占用），MCP 服务一个都没导入，请稍后重试',
+        sourceMcpCorrupt: '原版 MCP 配置文件内容损坏、解析不了，MCP 服务一个都没导入，请检查 mcp.json',
+        sourceMcpEnabledUnknown: 'MCP 服务已导入，但原版配置读不出来，无法得知它原本是开还是关——请到 MCP 页面按需打开',
+        mcpWriteFailed: 'MCP 配置没能写入本地文件（权限或磁盘异常），重启后这条配置会丢失',
         sourceConfigUnreadable: '原版配置文件读不出来（可能被占用），服务商一个都没能导入，请稍后重试',
         sourceConfigCorrupt: '原版配置文件内容损坏、解析不了，服务商一个都没能导入，请检查 config.json',
         sourceMemoryUnreadable: '原版记忆文件读不出来（可能被占用），这个范围下的记忆没有导入，请稍后重试',
@@ -2433,13 +2440,24 @@ const en: MessageTree = {
           'An imported provider is no longer in the config — something else likely overwrote it. Import again to restore it.',
         configWriteFailed: 'Couldn’t write config — check permissions or disk space',
         linkFailed: 'Couldn’t create the link — permission likely denied',
+        targetWriteFailed: 'Couldn’t write to the destination (permissions, disk or path) — this item was not imported',
         noEncryption: 'This machine can’t store keys — add them again by hand',
         targetBlocked: 'The destination is taken by a folder or file of the same name — nothing written',
         targetUnreadable:
           'Something with that name is there but can’t be read (another app may have it open) — it was not overwritten',
         copyTruncated: 'The copy came out incomplete (the write was interrupted); the partial file was discarded — import again',
         sourceSecretsCorrupt:
-          'The upstream secrets file is corrupt and couldn’t be read — no keys were imported. Check it and try again',
+          'The upstream secrets file is corrupt and couldn’t be parsed — no keys were imported. Check the file',
+        sourceSecretsUnreadable:
+          'The upstream secrets file can’t be read (it may be in use) — no keys were imported. Try again later',
+        sourceMcpUnreadable:
+          'The upstream MCP config can’t be read (it may be in use) — no MCP servers were imported. Try again later',
+        sourceMcpCorrupt:
+          'The upstream MCP config is corrupt and couldn’t be parsed — no MCP servers were imported. Check mcp.json',
+        sourceMcpEnabledUnknown:
+          'The MCP server was imported, but the upstream config can’t be read, so whether it was on is unknown — enable it on the MCP page if you need it',
+        mcpWriteFailed:
+          'The MCP config couldn’t be written to disk (permissions or disk full) — this entry will be lost after a restart',
         sourceConfigUnreadable:
           'The upstream config file can’t be read (it may be in use) — no providers were imported. Try again later',
         sourceConfigCorrupt:

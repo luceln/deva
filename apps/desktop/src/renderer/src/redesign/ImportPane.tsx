@@ -59,6 +59,14 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   'secrets-write-failed': 'settings.import.reason.secretsWriteFailed',
   // 源里的 secrets.json 内容坏了（半截 JSON）：一个密钥都没读到，逐条 key 无从谈起，用占位 id。
   'source-secrets-corrupt': 'settings.import.reason.sourceSecretsCorrupt',
+  // 源密钥文件读不出来（EPERM/EBUSY）：与「内容坏」分开，用户处置不同（等等再试 vs 去改文件内容）。
+  'source-secrets-unreadable': 'settings.import.reason.sourceSecretsUnreadable',
+  // MCP 服务已导入，但源 config.json 读不出 → 启用态未知，服务会停在默认关。
+  // 与服务商的 source-config-unreadable 分开：那条讲服务商没导，这条讲 MCP 开关没跟上。
+  'source-mcp-unreadable': 'settings.import.reason.sourceMcpUnreadable',
+  'source-mcp-corrupt': 'settings.import.reason.sourceMcpCorrupt',
+  'source-mcp-enabled-unknown': 'settings.import.reason.sourceMcpEnabledUnknown',
+  'mcp-write-failed': 'settings.import.reason.mcpWriteFailed',
   // 源侧 config.json / memory.json 读不出来或内容坏：整份资产一个都没导入，必须让用户看到。
   'source-config-unreadable': 'settings.import.reason.sourceConfigUnreadable',
   'source-config-corrupt': 'settings.import.reason.sourceConfigCorrupt',
@@ -80,7 +88,9 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   writeFailed: 'cf.profile.err.writeFailed',
   // 下面两个不限于某一步：config.json 写盘失败出现在服务商 / 角色启用态，link-failed 出现在技能建链接。
   'config-write-failed': 'settings.import.reason.configWriteFailed',
-  'link-failed': 'settings.import.reason.linkFailed'
+  'link-failed': 'settings.import.reason.linkFailed',
+  // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串含本机绝对路径，只进后台日志。
+  'target-write-failed': 'settings.import.reason.targetWriteFailed'
 }
 
 /**

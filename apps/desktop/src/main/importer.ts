@@ -11,12 +11,14 @@ import { invalidateIndexOnly } from './services/chat-store'
 import { publishSessionsChanged } from './services/chat-bus'
 import { canImport, upstreamHome } from './importer-gate'
 import { copySecrets, mergeProviders, providersOf } from './importer-config'
+import { importMcp } from './importer-mcp'
 import { enableImportedPersonas, importPersonas } from './importer-personas'
 import { importMemories } from './importer-memory'
 import { importSkills } from './importer-skills'
 import { importSessions } from './importer-sessions'
 import { copyAssoc } from './importer-assoc'
 import { acquireLock, isRunningInProcess, markRunning, releaseLock } from './importer-lock'
+import { writeFailureReason } from './importer-source-dir'
 import type { Failure, ImportProgress, ImportReport } from '../shared/import-protocol'
 
 /**
@@ -27,8 +29,11 @@ import type { Failure, ImportProgress, ImportReport } from '../shared/import-pro
  *
  * **手动触发**，绝不塞进启动路径：导入是重操作（上百 MB、要动用户数据），不该在用户不知情时发生。
  *
- * 八步顺序固定，其中 ⑥ 会话必须早于 ⑦ 附件（否则启动清扫会把「还没有会话引用」的附件当垃圾删掉，见 importer-assoc）：
- *   ① 服务商 ② 角色 ③ 角色启用态 ④ 记忆 ⑤ 技能 ⑥ 会话 ⑦ 附件 ⑧ 清缓存
+ * 九步顺序固定，其中 ⑦ 会话必须早于 ⑧ 附件（否则启动清扫会把「还没有会话引用」的附件当垃圾删掉，见 importer-assoc）：
+ *   ① 服务商 ② MCP 服务 ③ 密钥补缺 ④ 角色 ⑤ 角色启用态 ⑥ 记忆 ⑦ 技能 ⑧ 会话 ⑨ 附件 …（收尾含清缓存）
+ *
+ * ② 必须早于 ③：`copySecrets` 判 `mcp:<id>:<field>` 是否有主，靠的是目标 mcp.json 里已写入的 id。
+ * 密钥在 ③ 一次搬完（服务商 + MCP 各自的密文），所以 `secrets` 不是独立的进度步骤，只在结果里占一行。
  *
  * 不吞错：单条失败不中断整轮（记进 failures 继续），但整轮 ok = failures 为空，界面必须把 failures 逐条显示出来。
  */
@@ -40,6 +45,7 @@ function emptyReport(): ImportReport {
   return {
     ok: true,
     providers: { copied: [], skipped: [], failed: [] },
+    mcp: { copied: [], skipped: [], failed: [] },
     secrets: { copied: [], skipped: [], ignored: [], noEncryption: [], invalid: [], failed: [] },
     personas: { copied: [], skipped: [], failed: [] },
     personaEnabled: [],
@@ -164,7 +170,20 @@ export async function runImport(
       builtin: providers.builtin,
       failed: providers.failed
     }
-    // 密钥补缺：与原版服务商配套的密文（没有密钥的服务商等于不能用）。单独计，不混进 providers 的数字。
+
+    /*
+     * ② MCP 服务配置（原版 mcp.json + config.json 的 mcp.enabled）。
+     *
+     * 为什么排在 copySecrets **之前**：`copySecrets` 判 `mcp:<id>:<field>` 是否「有主」时，
+     * 读的是**目标 mcp.json 里真实存在的 id**。若密钥先搬，此刻目标里还没有这些服务，全部会被
+     * 判成无主密文丢掉（改前就是这个 bug：MCP 密钥一律 ignored）。把 mcp 步骤放在这里，
+     * 顺序依赖就由代码结构本身保证，不需要在 copySecrets 外面传一份可能已过期的 id 列表。
+     */
+    onProgress?.({ step: 'mcp', done: 0, total: 0 })
+    const mcp = importMcp(src)
+    report.mcp = { copied: mcp.copied, skipped: mcp.skipped, failed: mcp.failed }
+
+    // 密钥补缺：与原版服务商 / MCP 服务配套的密文（没有密钥的服务等于不能用）。单独计，不混进各自步骤的数字。
     const secrets = await copySecrets(src)
     report.secrets = {
       copied: secrets.copied,
@@ -175,7 +194,7 @@ export async function runImport(
       failed: secrets.failed
     }
 
-    // ② 角色（md + 头像）
+    // ③ 角色（md + 头像）
     onProgress?.({ step: 'personas', done: 0, total: 0 })
     const personas = importPersonas(src)
     report.personas = {
@@ -185,7 +204,7 @@ export async function runImport(
       failed: personas.failed
     }
 
-    // ③ 角色启用态：只对本次新导入的置 true，本地既有开关不动。
+    // ④ 角色启用态：只对本次新导入的置 true，本地既有开关不动。
     // 自带默认角色若恰好被补了文件，也一并置启用（正常为空——它们首启已由种子写好并启用）。
     const toEnable = [...personas.copied, ...personas.builtinCopied]
     onProgress?.({ step: 'personaEnabled', done: 0, total: toEnable.length })
@@ -194,7 +213,7 @@ export async function runImport(
     // 写盘失败率：这一步以前完全没有失败通道（见 enableImportedPersonas 的注释），必须单独汇总
     report.failures.push(...personaEnabled.failures)
 
-    // ④ 记忆（全局 + 项目私有，逐条走 writeMemory 受配额约束）
+    // ⑤ 记忆（全局 + 项目私有，逐条走 writeMemory 受配额约束）
     onProgress?.({ step: 'memories', done: 0, total: 0 })
     const mem = importMemories(src)
     report.memories = {
@@ -204,7 +223,7 @@ export async function runImport(
     }
     report.failures.push(...report.memories.failed)
 
-    // ⑤ 技能（链接按链接重建）
+    // ⑥ 技能（链接按链接重建）
     onProgress?.({ step: 'skills', done: 0, total: 0 })
     const skills = importSkills(src)
     report.skills = {
@@ -214,17 +233,17 @@ export async function runImport(
       failed: skills.failed
     }
 
-    // ⑥ 会话（必须早于 ⑦）
+    // ⑦ 会话（必须早于 ⑧）
     onProgress?.({ step: 'sessions', done: 0, total: 0 })
     const sessions = importSessions(src)
     report.sessions = { copied: sessions.copied, skipped: sessions.skipped, failed: sessions.failed }
 
-    // ⑦ 附件（media 量大，逐个报进度；IPC 侧有节流，见 importer-ipc）
+    // ⑧ 附件（media 量大，逐个报进度；IPC 侧有节流，见 importer-ipc）
     onProgress?.({ step: 'assoc', done: 0, total: 0 })
     const assoc = copyAssoc(src, (done, total) => onProgress?.({ step: 'assoc', done, total }))
     report.assoc = { ...assoc.assoc, failed: assoc.failures }
 
-    // ⑧ 释放暂存 → 补回被覆盖的成果 → 清缓存 → 通知渲染层。
+    // ⑨ 释放暂存 → 补回被覆盖的成果 → 清缓存 → 通知渲染层。
     onProgress?.({ step: 'cache', done: 0, total: 0 })
     draining = endConfigHold()
     const restored = releaseHoldAndRestoreModels(src, draining)
@@ -263,11 +282,12 @@ export async function runImport(
       if (!have.has(id)) report.failures.push({ step: 'providers', id, reason: 'imported-provider-missing' })
     }
 
-    // 汇总五步的失败：服务商 / 密钥 / 角色 / 技能 / 会话 / 附件。记忆、角色启用态在上面各自已推入。
+    // 汇总各步的失败：服务商 / MCP / 密钥 / 角色 / 技能 / 会话 / 附件。记忆、角色启用态在上面各自已推入。
     // 以前只有记忆有失败通道，其余步骤的失败被伪装成 skipped 或直接消失——用户按「导入完成」为准，
     // 丢的会话/图片/服务商永远不会被追查。
     for (const step of [
       report.providers,
+      report.mcp,
       report.secrets,
       report.personas,
       report.skills,
@@ -288,7 +308,7 @@ export async function runImport(
      * 且日志里无法检索。整轮级别的异常没有具体对象，用这个占位符明确表达「不是某一条数据的问题」；
      * step 保留 `unknown`（失败发生在哪一步已经无法确定，硬写成某一步会误导排障）。
      */
-    report.failures.push({ step: 'unknown', id: '<whole-run>', reason: (e as Error)?.message ?? String(e) })
+    report.failures.push({ step: 'unknown', id: '<whole-run>', reason: writeFailureReason(e) })
     report.ok = false
     /**
      * ⚠️ 这里的收尾必须在 finally 之前跑完，否则退出时队列已被 finally 清掉、补回不再发生。

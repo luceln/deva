@@ -173,7 +173,12 @@ export async function importEncryptedSecret(
   cipherTextBase64: string
 ): Promise<ImportSecretResult> {
   await ensureLoaded()
-  if (!key || !cipherTextBase64) return { ok: false, code: 'invalid' }
+  /*
+   * `trim()` 而不是裸 `!cipherTextBase64`：纯空白 `"   "` 是非空字符串，以前会被当成密文写进 store，
+   * 重启后解密失败、请求拿到空值 401，而界面显示「已配置」。导入器入口已挡一次，这里是**第二层**——
+   * 这个函数是公开 API，将来别的调用方（批量导入、迁移工具）不该靠调用方自觉。
+   */
+  if (!key.trim() || !cipherTextBase64.trim()) return { ok: false, code: 'invalid' }
   if (!safeStorage.isEncryptionAvailable()) return { ok: false, code: 'no-encryption' }
   if (key in store) return { ok: false, code: 'exists' }
   store[key] = cipherTextBase64

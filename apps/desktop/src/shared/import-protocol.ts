@@ -88,6 +88,13 @@ export interface ImportReport {
   ok: boolean
   providers: StepStat
   /**
+   * MCP 服务配置（原版 `mcp.json` 的 `mcpServers` + `config.json` 的 `mcp.enabled` 启用态）。
+   *
+   * 与 providers 一样是「配置类搬运」，但**单独成一步**：MCP 服务有自己的 id 空间与写入层
+   * （`services/mcp-config.ts` 的 `upsertServerChecked`，它还负责触发连接对账）。
+   */
+  mcp: StepStat
+  /**
    * 密钥补缺（与原版 provider 配套的那些密文）。**与 providers 分开计**：密钥不是独立可见的资产，
    * 混进 providers.copied 会让界面「服务商」那行的数字比实际服务商数大一截。
    *
@@ -162,6 +169,7 @@ export type GateResult =
 export interface ImportProgress {
   step:
     | 'providers'
+    | 'mcp'
     | 'personas'
     | 'personaEnabled'
     | 'memories'
