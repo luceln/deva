@@ -121,6 +121,14 @@ const MUST_CHECK = [
 /**
  * 审查方登记的豁免。键：`<文件名>::<源码片段>`。理由**必须写明方向**。
  *
+ * ## 只有「确实压住了一条真命中」的位置才允许留在这里
+ *
+ * 2026-11-17 复查：原来的 13 条里 **10 条是冗余的** —— 把那 10 条从清单里删掉，扫描照样全绿。
+ * 也就是说它们从未参与过判定（典型原因：该位置已被 `GUARD` 正则覆盖，或被 `CANARY` 的
+ * 栓点形态接住），却给出了「已审查」的背书。**豁免越少越好，留下的一条必须有据可查。**
+ *
+ * 留下 = 删掉它扫描就会红（`break-allow.cjs` 的判据 A 会逐条重验这一点）。
+ *
  * 上一版这里出过两次事故，都是「理由把方向写反」：
  *   - `角色 md：读失败最坏是「没覆盖」` → 反了。`existsSync` 返 false 时走的是 `copyFileSync`（先截断再写），
  *     那是**会覆盖**；真正不覆盖的是返 true 那条分支。
@@ -129,56 +137,20 @@ const MUST_CHECK = [
  */
 const ALLOW = [
   {
-    key: 'importer-gate.ts::existsSync(path)',
-    why: '锁文件探测：existsSync 返 false 只说明「没有锁文件」＝没在运行，这是正确结论；返 true 时的 open 失败才算 running（fail closed）'
-  },
-  {
-    key: 'importer-skills.ts::lexists(to)',
-    why: '技能链接必须用 lstat 判存在（链断了 existsSync 会返 false，从而覆盖既有链接）；三态化后 absent 才建链、present 跳过、unreadable 记失败，方向对'
-  },
-  {
-    key: 'importer-skills.ts::const st = lstatSync(from)',
-    why: '读源条目本身（判它是链接还是目录）：在 try 内，抛错由外层 catch 接住并记 writeFailureReason。有通道，只是不在扫描窗口内'
-  },
-  {
-    key: 'importer-gate.ts::return readdirSync(dir, { withFileTypes: true }).filter((d) =>',
-    why: '预览统计（summarize 的 countEntries）：只影响按钮旁「将导入 N 个」的数字，不参与写入、不影响 ok。读失败记 0 的后果是预览偏小，而真实导入时该目录走 readSourceDir 会报 source-dir-unreadable。取舍：概览不该因一个读不出的目录就整块不可用'
-  },
-  {
-    key: 'importer-gate.ts::for (const d of readdirSync(chats, { withFileTypes: true })) {',
-    why: '同上：summarize 数会话用的预览统计，范围内层还有 per-file try 兜底'
+    key: 'importer-skills.ts::if (!isWin || !isDir) return null',
+    why: 'makeLink 的内层 catch：symlink 失败后要**换 junction 再试**，这里的 return null 是 fallback 控制流，不是把失败吞掉。删掉这条会判 SWALLOW（误报）。注意：它守的不是「无通道」，是「这段不是错误分支」'
   },
   {
     key: "importer-target.ts::openSync(to, 'r')",
-    why: '探针本体：开不了 → 返 unreadable（＝不知道），这正是本 bug 的**修法**，不是复制品'
-  },
-  {
-    key: 'importer-skills.ts::if (!isWin || !isDir) return null',
-    why: 'makeLink 内部：symlink 失败只表示「换 junction 再试」，与目标文件是否可读无关；最终失败由调用方记 link-failed（有通道）'
-  },
-  {
-    key: 'importer-skills.ts::return null',
-    why: 'makeLink 返回 null 由调用方记 link-failed（有通道），不是静默'
-  },
-  {
-    key: 'importer-skills.ts::statSync(target)',
-    why: '判的是**源链接的目标**是目录还是文件：读不到时按目录猜（注释已说明），失败方向是「再试一次 junction」，不会写穿'
+    why: '探针本体：开不了 → 返 unreadable（＝不知道），这正是本 bug 的**修法**，不是复制品。删掉这条豁免后 `openSync` 会被判 BARE —— 那是对「修法」的误伤，所以必须留'
   },
   {
     key: 'importer-assoc.ts::const st = statSync(to)',
-    why: 'isStaleTarget：刷 mtime 前的探测。返失败 → false → 不刷 mtime（幂等优先），既不覆盖内容也不改时间戳，无害'
-  },
-  {
-    key: 'importer-assoc.ts::statSync(to).size',
-    why: 'copyFileFresh 的写后校验：读失败会抛给调用方的 catch 记一条 failure（有通道）'
-  },
-  {
-    key: 'importer-assoc.ts::statSync(join(srcMedia, name))',
-    why: '源 blob 尺寸，读失败会抛到本文件 catch 记 failure（有通道）'
+    why: 'isStaleTarget：刷 mtime 前的探测。返失败 → false → 不刷 mtime（幂等优先），既不覆盖内容也不改时间戳。删掉这条会判 BARE，而「读不出就不刷」是本场景的正确方向，所以留'
   },
   {
     key: 'importer-sessions.ts::statSync(join(srcDir, name))',
-    why: '源 compacted 尺寸，读失败同上抛给 catch 记 failure'
+    why: '源 compacted 尺寸：读失败会抛到本文件 catch 记 failure（有通道，不在扫描窗口内）。删掉会判 BARE，而这里确实有通道，所以留'
   }
 ]
 
