@@ -6173,6 +6173,13 @@ select.autotaskcard__input {
 .select-menu__opt.is-active {
   background: var(--bg-hover);
 }
+/* 列出但不可选（如「这个服务商还没填密钥」）：看得见、点不动，说明写在 sub 里 */
+.select-menu__opt.is-disabled,
+.select-menu__opt.is-disabled.is-active {
+  color: var(--fg-subtle);
+  cursor: not-allowed;
+  background: transparent;
+}
 .select-menu__opt .select-icon {
   width: 26px;
   height: 26px;

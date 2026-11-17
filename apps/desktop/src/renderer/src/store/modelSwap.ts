@@ -9,9 +9,15 @@
  * enabled 就是现成的例子）。
  */
 
-import type { BrokenRef, ModelSwapResult } from '../../../shared/chat-protocol'
+import type { BlockedProviderRef, BrokenRef, ModelSwapResult } from '../../../shared/chat-protocol'
 
-export type { AvailabilityKind, AvailabilityResult, BrokenRef, ModelSwapResult } from '../../../shared/chat-protocol'
+export type {
+  AvailabilityKind,
+  AvailabilityResult,
+  BlockedProviderRef,
+  BrokenRef,
+  ModelSwapResult
+} from '../../../shared/chat-protocol'
 
 /**
  * 扫某对话（主对话 + 名下成员会话）里引用已失效的会话。只读。
@@ -21,6 +27,21 @@ export type { AvailabilityKind, AvailabilityResult, BrokenRef, ModelSwapResult }
 export async function scanModelSwap(mainId: string): Promise<BrokenRef[]> {
   try {
     return await window.deva.chat.scanModelSwap({ mainId })
+  } catch {
+    return []
+  }
+}
+
+/**
+ * **全量**服务商里密钥用不了的（`nokey` / `keyunreadable`），不论有没有会话引用它。
+ *
+ * 候选集要据此排除：只从 scan 结果反推会漏掉「缺密钥但没有会话在用」的服务商，用户换过去还是不能用（B4）。
+ * 出错回空数组：拿不到结论时宁可多列几个候选（用户在 apply 时会被主进程的 isUsableRef 再拦一次），
+ * 也不能因为一次读取失败就把所有服务商从候选里删光。
+ */
+export async function loadBlockedProviders(): Promise<BlockedProviderRef[]> {
+  try {
+    return await window.deva.chat.blockedProviders()
   } catch {
     return []
   }

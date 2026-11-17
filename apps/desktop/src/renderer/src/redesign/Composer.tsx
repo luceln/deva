@@ -1052,9 +1052,13 @@ function ModelPicker(): React.JSX.Element {
   // 受影响的会话数（本对话 + 名下成员）：红色胶囊右侧的徽标，告诉用户这不是一处的问题。
   const brokenCount = (brokenModels[mainId] ?? []).length
   // 本次要换掉的引用：优先本会话自己指向的那个（覆盖层 / 已落库值），对不上再退回扫描结果里的第一条。
+  // 比较前 trim：主进程 apply 的匹配规则是归一后相等（见 model-swap.ts 的 normalizeRef），界面得跟它一致，
+  // 否则带空格的会话会「界面认为不匹配、主进程却换了」（A24 的界面侧同形）。
+  const boundModel = currentBinding.model
+  const boundNorm = boundModel ? boundModel.trim() : ''
   const swapFromRef =
-    currentBinding.model && brokenHere.some((b) => b.ref === currentBinding.model)
-      ? currentBinding.model
+    boundModel && brokenHere.some((b) => b.ref.trim() === boundNorm)
+      ? boundModel
       : (brokenHere[0]?.ref ?? '')
 
   // 失效胶囊：不弹模型菜单，直接打开批量替换对话框——用户此刻要处理的就是它，再弹普通菜单只会多一层。

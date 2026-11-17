@@ -75,21 +75,16 @@ async function ensureLoaded(): Promise<void> {
   loaded = true
 }
 
-/**
- * 密钥库的载入状态（**只读、不触发重读**）。
+/*
+ * 这里原先还有一对 `getSecretsLoadKind()`（同步）/ `readSecretsLoadKind()`（异步）用来暴露 `loadKind`，
+ * 已经删除：**两者都没有生产调用点**。
  *
- * 给「读坏就放行」这类旁路判定用：它们需要区分「真没配过密钥」与「密钥库整份读不出来」。
- * 不要为了这个去让 `ensureLoaded` 抛异常——那会把一次文件损坏泄漏成全局崩溃。
+ * 为什么不留着：同步版首次载入前只能返回 `'ok'`，谁在「载入还没发生」的那一刻用它，就会误判成
+ * 「密钥库没问题」——这正是本轮要消灭的那类静默。留一个只能被用错的接口，不如不留。
+ *
+ * 需要区分「真没配过」与「库读不出来」的地方，一律用 `readSecret()` 的返回值：
+ * 它先 `await ensureLoaded()`，坏库时明确回 `store-unreadable`，`absent` 只在真的没有该 key 时出现。
  */
-export function getSecretsLoadKind(): SecretsLoadKind {
-  return loaded ? loadKind : 'ok'
-}
-
-/** 载入并返回状态（判定侧用这个：首次调用时它还没加载完，`getSecretsLoadKind` 会错误地报 ok）。 */
-export async function readSecretsLoadKind(): Promise<SecretsLoadKind> {
-  await ensureLoaded()
-  return loadKind
-}
 
 async function persist(): Promise<void> {
   // 原子写（同步）：写到一半崩溃不会留下半截 JSON——那样下次载入解析失败即视为空库，全部密钥丢失。

@@ -1669,9 +1669,10 @@ async function scenarioSecretsCorrupt(): Promise<void> {
     }
   })
 
-  const loadKind = await secrets.readSecretsLoadKind()
+  // 载入状态不再单独暴露接口（那两个函数没人用、已删）：用 readSecret 的返回值判，正是生产代码的做法
   const direct = await secrets.readSecret('p')
-  info('密钥库载入状态', loadKind)
+  const loadKind = direct.kind === 'store-unreadable' ? 'corrupt' : direct.kind === 'absent' ? 'absent' : 'ok'
+  info('密钥库状态（由 readSecret 反推）', loadKind)
   info('readSecret 结果', JSON.stringify(direct))
 
   const r = await resolveAvailability('p:m')
@@ -1688,6 +1689,111 @@ async function scenarioSecretsCorrupt(): Promise<void> {
     eq('A42(absent)：readSecret 报 absent', direct.kind, 'absent')
     eq('A42(absent)：真没配过仍判 nokey（不能一起放行）', r.kind, 'nokey')
     eq('A42(absent)：真没配过不是 ok', r.ok, false)
+  }
+}
+
+/**
+ * B4：候选排除必须来自**全量**服务商的密钥状态，不能只从 scan（有会话引用的失效项）反推。
+ *
+ * 场景：服务商 A 有会话引用且模型被删；服务商 B **缺密钥但没有任何会话引用**。
+ * 期望：B 的模型不出现在**可选**候选里（否则用户从坏模型换到 B，换完还是不能用，得再来一次）。
+ *
+ * 同时验 B3 的另一半：B 要**列出来并标不可选 + 写明原因**，而不是静默消失——否则用户只知道
+ * 「我的 B 服务商不见了」，不知道该先去填密钥。
+ */
+async function scenarioSwapCandidates(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const { scanSessionsByModel } = await import('../../apps/desktop/src/main/services/model-swap')
+  const { listProvidersWithUnusableKey, resolveAvailability } = await import(
+    '../../apps/desktop/src/main/services/model-availability'
+  )
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        // A：有会话引用、但会话引用的模型**不在 A 的模型清单里**（= 被删了）→ missing
+        { id: 'pa', name: 'A', apiHost: 'http://localhost:1/v1', enabled: true, models: [{ id: 'alive' }] },
+        // B：缺密钥（远端），**没有任何会话引用它**
+        { id: 'pb', name: 'B', apiHost: 'https://b.example/v1', enabled: true, models: [{ id: 'bm' }] },
+        // C：本机 + 可用 → 应该是唯一真正可选的
+        { id: 'pc', name: 'C', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'cm' }] }
+      ]
+    }
+  })
+
+  const s = cs.ensureSession('Cd1', { model: 'pa:gone' })
+  s.title = 'Cand'
+  eq('B4：前置——会话落盘', cs.save('Cd1'), true)
+
+  // ① scan 只含 A（B 没被任何会话引用，所以它不会出现在 affected 里）——这正是原 bug 的成因
+  const scan = await scanSessionsByModel('Cd1')
+  info('scan 结果（只有有会话引用的）', JSON.stringify(scan.map((b) => [b.ref, b.kind])))
+  eq('B4：前置——scan 里只有 A 的引用（B 不在其中，所以不能只靠它反推）', scan.map((b) => b.ref), ['pa:gone'])
+
+  // ② 全量密钥状态里必须含 B
+  const blocked = await listProvidersWithUnusableKey()
+  info('密钥不可用的服务商（全量）', JSON.stringify(blocked))
+  eq('B4：全量密钥状态含 B（无会话引用也要列出）', blocked.map((b) => b.id), ['pb'])
+  eq('B4：B 的原因是 nokey', blocked[0]?.kind, 'nokey')
+  // C 是本机服务，不该被当成缺密钥
+  check('B4：本机服务（C）不被列进密钥不可用', !blocked.some((b) => b.id === 'pc'), JSON.stringify(blocked))
+
+  // ③ 明示 bug 本身：B 的模型**单独看是**不可用的（这就是「换过去还是不能用」的证据）
+  const bModel = await resolveAvailability('pb:bm')
+  info('B 的模型可用性', JSON.stringify(bModel))
+  eq('B4：B 的模型本身不可用（换过去也白换）', bModel.kind, 'nokey')
+
+  // ④ 停用的服务商不重复报（它已不在候选里，另有 disabled 原因）
+  const { setConfig: setCfg2 } = await import('../../apps/desktop/src/main/services/config')
+  setCfg2({
+    models: {
+      providers: [
+        { id: 'off', name: 'Off', apiHost: 'https://off.example/v1', enabled: false, models: [{ id: 'm' }] }
+      ]
+    }
+  })
+  const blocked2 = await listProvidersWithUnusableKey()
+  eq('B4：停用的服务商不进「密钥不可用」名单（另有 disabled 原因）', blocked2, [])
+}
+
+/**
+ * B3：缺密钥的服务商在候选里**列出来但标不可选**，不是静默消失。
+ *
+ * 这里只验文案与「候选构造规则」的可测部分：界面的 `disabled` 标记由 Select 组件承担（纯 UI），
+ * 主进程侧能锁的是「这个服务商确实被判成密钥不可用，且它的模型仍然存在」——两者同时成立才谈得上
+ * 「列出来并标注」而不是「它不见了」。
+ */
+async function scenarioBlockedProviderListed(): Promise<void> {
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+  const { listProvidersWithUnusableKey } = await import('../../apps/desktop/src/main/services/model-availability')
+  const { messages } = await import('../../apps/desktop/src/renderer/src/i18n/messages')
+
+  setConfig({
+    models: {
+      providers: [
+        // 缺密钥，但**有**模型（要能列出来）
+        { id: 'pb', name: 'B', apiHost: 'https://b.example/v1', enabled: true, models: [{ id: 'bm' }] },
+        // 缺密钥且没有模型：没有可列的项，不该凭空出现一个空组
+        { id: 'pempty', name: 'E', apiHost: 'https://e.example/v1', enabled: true, models: [] }
+      ]
+    }
+  })
+
+  const blocked = await listProvidersWithUnusableKey()
+  info('密钥不可用的服务商', JSON.stringify(blocked.map((b) => b.id)))
+  eq('B3：缺密钥且有模型的服务商被判密钥不可用（界面据此标灰）', blocked.map((b) => b.id), ['pb'])
+
+  // 文案两侧都要有，且写清「先填密钥」这个动作
+  for (const locale of ['zh-CN', 'en'] as const) {
+    const tree = messages[locale] as Record<string, unknown>
+    const copy = ((tree.cf as Record<string, unknown>)?.modelSwap as Record<string, unknown>)?.providerNoKey
+    check(`B3(${locale})：候选里的「没填密钥」说明存在`, typeof copy === 'string' && copy.length > 0, String(copy))
+    check(
+      `B3(${locale})：说明指向动作（去填密钥）`,
+      typeof copy === 'string' && /填|add one|key/i.test(copy),
+      String(copy)
+    )
   }
 }
 
@@ -1711,6 +1817,8 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   swapws: scenarioSwapWhitespace,
   blockedturn: scenarioBlockedTurnNoTrace,
   secretskind: scenarioSecretsCorrupt,
+  swapcand: scenarioSwapCandidates,
+  blockedlist: scenarioBlockedProviderListed,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

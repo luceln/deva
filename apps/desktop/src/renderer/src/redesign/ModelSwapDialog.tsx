@@ -6,7 +6,8 @@ import { useToast } from '../components/ToastProvider'
 import { useI18n } from '../i18n/i18n'
 import { useModels } from '../store/models'
 import { useChatActions, useChatState } from '../store/chat'
-import type { BrokenRef, ModelSwapResult } from '../store/modelSwap'
+import type { BlockedProviderRef, BrokenRef, ModelSwapResult } from '../store/modelSwap'
+import { loadBlockedProviders } from '../store/modelSwap'
 import { openModelSettings } from './modelSettingsBus'
 
 /**
@@ -17,12 +18,18 @@ import { openModelSettings } from './modelSettingsBus'
  * 几条刻意的取舍：
  * - **判定不在这里算**：清单与原因全部来自主进程的 scan（见 store 的 brokenModels）。渲染层再按
  *   store/models 的 providers 算一遍，两套规则迟早漂移（`resolveRefStrict` 曾只看 id 不看 enabled 就是现成的例子）。
- * - **目标只列可用模型**：已失效的引用一律不出现在候选里；某个服务商已知缺密钥（scan 里出过 nokey）时，
- *   它名下的模型也整组不列——否则用户会从一个坏模型换到另一个坏模型，正是「默认模型最可能不可用」那个坑。
+ * - **目标只列可用模型**：已失效的引用一律不出现在候选里；某个服务商「密钥用不了」（缺密钥 / 解不开）时，
+ *   它名下的模型**列出来但标成不可选并写明原因**——直接不列，用户只会觉得「我的服务商怎么不见了」，
+ *   不知道该先去填密钥（B3/B4）。
+ * - **密钥状态取自全量服务商**，不是只从本对话的坏引用反推：后者会漏掉「缺密钥但没有会话在用」的服务商，
+ *   用户从坏模型换过去，换完还是不能用，得再来一次。
  * - **nokey 不逼用户换模型**：缺的是密钥，换模型解决不了；这类会话单独给「去填密钥」的入口。
  * - **一次只替换一个引用**：主进程的 apply 按 `session.model === fromRef` 精确匹配。同一对话里若还有别的失效
  *   引用，替换完会重新扫描、红标继续亮着，用户再点一次即可——比在渲染层猜「谁该跟着变」可靠得多。
  */
+/** 引用归一（只用于比较）：与主进程 model-swap.ts 的 normalizeRef 同一规则，两边必须一致。 */
+const norm = (r: string): string => r.trim()
+
 export function ModelSwapDialog({
   mainId,
   fromRef,
@@ -61,40 +68,91 @@ export function ModelSwapDialog({
   }, [mainId, scanModelSwapState])
 
   const affected: BrokenRef[] = brokenModels[mainId] ?? []
-  // 会被这次替换改掉的 / 保持原样的：按引用相等划分（与主进程 apply 的匹配规则一致）。
-  // 引用不同的那些通常是用户单独给某个成员指定过模型，属正常保留，不是失败。
-  const changeable = useMemo(() => affected.filter((b) => b.ref === fromRef), [affected, fromRef])
-  const kept = useMemo(() => affected.filter((b) => b.ref !== fromRef), [affected, fromRef])
+  /*
+   * 会被这次替换改掉的 / 保持原样的：按引用划分，**比较前两边都 trim**。
+   *
+   * 必须与主进程 apply 的匹配规则一致（那边是 `normalizeRef(c.ref) !== normalizeRef(fromRef)`）：
+   * 会话里存的可能是导入来的 / 手改配置留下的 `" p:m "`。这里若按原始字符串比，界面会说「将替换 0 个」
+   * 而主进程实际换掉了——界面与实际不一致，比不改更糟（A24 的界面侧同形）。
+   *
+   * 引用（归一后）不同的那些通常是用户单独给某个成员指定过模型，属正常保留，不是失败。
+   */
+  const changeable = useMemo(() => affected.filter((b) => norm(b.ref) === norm(fromRef)), [affected, fromRef])
+  const kept = useMemo(() => affected.filter((b) => norm(b.ref) !== norm(fromRef)), [affected, fromRef])
 
-  // 候选模型：已启用服务商 × 已启用对话模型，去掉已知失效的引用与「密钥用不了」的服务商。
-  // 「密钥用不了」从 scan 结果反推（nokey / keyunreadable 的引用前缀即 providerId），不在渲染层另立一套判定。
-  // 两种都排除：换成同样解不开密钥的模型，改完还是不可用，用户得再来一次。
+  /*
+   * 「密钥用不了」的服务商 = **全量**服务商里缺密钥 / 解不开的那些，与 scan 结果取并集。
+   *
+   * 只从 `affected` 反推是不够的（B4）：scan 只列出**有会话引用的**失效项，于是「缺密钥但没有任何会话在用」
+   * 的服务商不在 affected 里，它的模型就出现在候选里——用户从坏模型换过去，换完还是不能用，得再来一次。
+   * 这个功能存在的意义就是解决「模型不可用」，把用户从一个坏选项推到另一个坏选项比不做更糟。
+   *
+   * 全量那份由主进程给（`loadBlockedProviders`，判据与 resolveAvailability 同源，不在这里另算一遍）；
+   * 与 affected 取并集是为了兜住「刚改完配置、缓存还没刷新」的短暂时差。
+   */
+  const [blocked, setBlocked] = useState<BlockedProviderRef[]>([])
+  useEffect(() => {
+    let live = true
+    void loadBlockedProviders().then((list) => {
+      if (live) setBlocked(list)
+    })
+    return () => {
+      live = false
+    }
+  }, [mainId])
+
+  /*
+   * 候选模型：已启用服务商 × 已启用对话模型，去掉已知失效的引用，以及「密钥用不了」的服务商名下的模型。
+   *
+   * 缺密钥的**列出来但标成不可选**（`disabled` + 写明原因），不是静默删掉：直接不列，用户只会觉得
+   * 「我的 B 服务商怎么不见了」，根本不知道该先去填密钥。
+   */
   const candidates = useMemo(() => {
+    /*
+     * 两套排除依据，各自解决不同的事：
+     *  - `noKey`（服务商维度）：来自**全量**密钥状态 + scan 的并集。服务商整体缺密钥时，它名下所有模型都不能选。
+     *  - `brokenRefs`（引用维度）：本对话里已知失效的那些引用，逐个排除。
+     *
+     * 为什么后者只来自 `affected` 就够了：它排除的是「这个具体引用坏了」，而 `affected` 正是本对话的坏引用全集。
+     * 其它服务商名下「删掉的模型」压根不在 `providers[].models` 里（那是从 config 读出来的真实清单），
+     * 天然不会出现在候选；万一仍有漏网的，apply 时主进程的 `isUsableRef(to)` 会整批拒绝、一个都不改，
+     * 不会出现「换完才发现不能用」。
+     */
     const brokenRefs = new Set(affected.map((b) => b.ref))
-    const brokenProviderOf = (kind: BrokenRef['kind']): Set<string> =>
-      new Set(
-        affected
-          .filter((b) => b.kind === kind)
-          .map((b) => b.ref.slice(0, Math.max(0, b.ref.indexOf(':'))))
-          .filter(Boolean)
-      )
-    const nokey = new Set([...brokenProviderOf('nokey'), ...brokenProviderOf('keyunreadable')])
+    const noKey = new Set(blocked.map((b) => b.id))
+    for (const b of affected) {
+      if (b.kind !== 'nokey' && b.kind !== 'keyunreadable') continue
+      const pid = b.ref.slice(0, Math.max(0, b.ref.indexOf(':')))
+      if (pid) noKey.add(pid)
+    }
+    // 正常服务商也按「有没有可选项」过滤掉空组；缺密钥的组只要模型存在就保留（要让人看见原因）
     return providers
-      .filter((p) => p.enabled && (p.purpose ?? 'llm') === 'llm' && !nokey.has(p.id))
-      .map((p) => ({
-        p,
-        models: p.models.filter((m) => m.enabled && !brokenRefs.has(`${p.id}:${m.id}`))
-      }))
+      .filter((p) => p.enabled && (p.purpose ?? 'llm') === 'llm')
+      .map((p) => {
+        const keyBlocked = noKey.has(p.id)
+        return {
+          p,
+          keyBlocked,
+          models: p.models.filter((m) => m.enabled && !brokenRefs.has(`${p.id}:${m.id}`))
+        }
+      })
       .filter((g) => g.models.length > 0)
-  }, [providers, affected])
+      // 有可选项的组排在前面：用户默认要点的是能用的那些
+      .sort((a, b) => Number(a.keyBlocked) - Number(b.keyBlocked))
+  }, [providers, affected, blocked])
 
   const items = useMemo<SelectEntry<string>[]>(
     () =>
-      candidates.flatMap(({ p, models }): SelectEntry<string>[] => [
+      candidates.flatMap(({ p, models, keyBlocked }): SelectEntry<string>[] => [
         { group: p.name, lead: <span className="select-dot" style={{ background: p.accent }} /> },
-        ...models.map((m) => ({ value: `${p.id}:${m.id}`, label: m.name }))
+        ...models.map((m) => ({
+          value: `${p.id}:${m.id}`,
+          label: m.name,
+          // 缺密钥的服务商：列出来、写明为什么不能选，而不是让它从列表里消失
+          ...(keyBlocked ? { disabled: true, sub: t('cf.modelSwap.providerNoKey') } : {})
+        }))
       ]),
-    [candidates]
+    [candidates, t]
   )
 
   const kindText = (kind: BrokenRef['kind']): string => t(`cf.modelSwap.kind.${kind}`)

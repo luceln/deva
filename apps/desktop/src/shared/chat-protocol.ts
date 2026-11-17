@@ -244,6 +244,17 @@ export interface BrokenRef {
 }
 
 /**
+ * 一个「密钥用不了」的服务商（不管有没有会话引用它）。
+ *
+ * 为什么要单列：批量替换的候选是「所有可用模型」，而排除依据不能只从 scan 结果反推——scan 只包含
+ * **有会话引用的**失效项，于是「缺密钥但没有会话在用」的服务商会漏掉，用户换过去还是不能用。
+ */
+export interface BlockedProviderRef {
+  id: string
+  kind: 'nokey' | 'keyunreadable'
+}
+
+/**
  * 一次批量替换的结果：
  * - `changed` = 真被改成目标模型**且已写进磁盘**的会话；
  * - `skipped` = 引用与 fromRef 不同而原样保留的（用户单独给它们指定过别的模型，属于正常保留，界面上可展开看是哪些）；

@@ -19,6 +19,7 @@ import type {
   ChatSetFocusRequest,
   ChatSetModelRequest,
   ChatStreamEvent,
+  BlockedProviderRef,
   BrokenRef,
   DisplayMessage,
   ModelSwapResult,
@@ -41,6 +42,7 @@ import {
   resolveModelRef
 } from './model-resolve'
 import { applyModelSwap, scanSessionsByModel } from './model-swap'
+import { listProvidersWithUnusableKey } from './model-availability'
 import {
   createTask,
   releaseTasksOwnedBy,
@@ -541,6 +543,17 @@ export function registerChatIpc(getWin: () => BrowserWindow | null): void {
   ipcMain.handle(
     'chat:model-swap-scan',
     (_e, payload: ChatModelSwapScanRequest): Promise<BrokenRef[]> => scanSessionsByModel(payload?.mainId)
+  )
+  /*
+   * **全量**服务商里密钥用不了的那些（不论有没有会话引用它）。
+   *
+   * 为什么不塞进上面 scan 的返回：scan 的语义是「本对话里哪些会话的引用坏了」，加一坨没有会话的服务商
+   * 会让那个形状说不清自己的意思；这里单独一条，调用方按需取。候选集要的是「所有可用模型」，
+   * 排除依据也就该来自「所有服务商的密钥状态」而不是「恰好有会话引用的那些」（B4）。
+   */
+  ipcMain.handle(
+    'chat:model-swap-blocked-providers',
+    (): Promise<BlockedProviderRef[]> => listProvidersWithUnusableKey()
   )
 
   // 批量替换：把本对话里所有引用 fromRef 的会话改成 toRef（引用不同的原样跳过）。目标不可用则整批拒绝，

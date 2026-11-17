@@ -33,6 +33,7 @@ import type {
   ResolveAutotaskResult,
   ChatStreamEvent,
   MemberProgressGroup,
+  BlockedProviderRef,
   BrokenRef,
   ModelSwapResult
 } from '../shared/chat-protocol'
@@ -69,6 +70,7 @@ export type {
   ResolveAutotaskResult,
   ChatStreamEvent,
   MemberProgressGroup,
+  BlockedProviderRef,
   BrokenRef,
   ModelSwapResult
 }
@@ -858,6 +860,12 @@ const api = {
      */
     scanModelSwap: (req: ChatModelSwapScanRequest): Promise<BrokenRef[]> =>
       ipcRenderer.invoke('chat:model-swap-scan', req),
+    /**
+     * **全量**服务商里密钥用不了的（`nokey` / `keyunreadable`），不论有没有会话引用它。
+     * 批量替换的候选集据此排除，否则「缺密钥但没会话在用」的服务商会漏掉，用户换过去还是不能用。
+     */
+    blockedProviders: (): Promise<BlockedProviderRef[]> =>
+      ipcRenderer.invoke('chat:model-swap-blocked-providers'),
     /**
      * 批量替换：把本对话里所有引用 fromRef 的会话改成 toRef（引用不同的原样跳过）。
      * 目标模型不可用时整批拒绝、回 { error }（文案已在主进程按界面语言出好）。

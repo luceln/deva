@@ -1,6 +1,6 @@
 import { getConfig, getConfigLoadKind } from './config'
 import { readSecret } from './secrets'
-import type { AvailabilityResult, BrokenRef } from '../../shared/chat-protocol'
+import type { AvailabilityKind, AvailabilityResult } from '../../shared/chat-protocol'
 
 /**
  * 模型引用可用性判定（主进程）——**全产品唯一**回答「这个 `"providerId:modelId"` 还能不能用」的地方。
@@ -180,18 +180,44 @@ export async function isUsableRef(ref: string | null | undefined): Promise<boole
 }
 
 /**
- * 从一批「会话 id + 模型引用」里挑出引用已失效的（scanSessionsByModel 的判定底座）。
- * name 可选：给得出名字（成员名 / 对话标题）就带上，给不出留空由调用方补——本函数只做判定，不查会话。
+ * **全量**服务商里「密钥用不了」的那些（不论有没有会话引用它）。
+ *
+ * 为什么需要这个：批量替换的候选集是「所有可用模型」，但排除依据以前只从 scan 结果（`BrokenRef[]`）反推——
+ * 而 scan 只列出**有会话引用的失效项**。于是「服务商 B 缺密钥、但没有任何会话在用 B」不在 scan 里，
+ * B 的模型就出现在候选里：用户从坏模型换到 B，换完还是不能用，得再来一次（B4）。
+ * 这个功能存在的意义就是解决「模型不可用」，把用户从一个坏选项推到另一个坏选项比不做更糟。
+ *
+ * 判据与 `resolveAvailability` 同源（同一个 `readSecret` 三态），不另立一套：
+ * - 本机服务（Ollama 等）从来不需要密钥 → 不列；
+ * - 服务商被停用 → 不列（它已不在候选里，另有 `disabled` 原因）；
+ * - `absent` → 缺密钥；`unreadable` → 解不开；`store-unreadable`（整份库读不出来）→ **不列**：
+ *   那时「不知道」，不该把所有服务商都禁掉（与 `resolveAvailability` 的放行一致）。
  */
-export async function detectAllBrokenRefs(
-  sessions: { id: string; model?: string; name?: string }[]
-): Promise<BrokenRef[]> {
-  const checked = await Promise.all(
-    sessions.map(async (s) => {
-      const a = await resolveAvailability(s.model)
-      if (a.ok || !a.kind) return null
-      return { sessionId: s.id, name: s.name ?? '', ref: s.model ?? '', kind: a.kind }
-    })
-  )
-  return checked.filter((b): b is BrokenRef => b !== null)
+export interface BlockedProvider {
+  id: string
+  kind: Extract<AvailabilityKind, 'nokey' | 'keyunreadable'>
+}
+
+export async function listProvidersWithUnusableKey(): Promise<BlockedProvider[]> {
+  // 配置读坏时与 resolveAvailability 一样放行：不知道就别拦
+  if (getConfigLoadKind() === 'corrupt') return []
+  const models = (getConfig().models ?? {}) as { providers?: unknown }
+  const providers = Array.isArray(models.providers) ? (models.providers as StoredProvider[]) : []
+  const out: BlockedProvider[] = []
+  for (const p of providers) {
+    const pid = typeof p?.id === 'string' ? p.id : ''
+    if (!pid) continue
+    // 停用的服务商不进候选，不必在这里重复报
+    if (p.enabled === false) continue
+    // 没有可用模型的组在候选里根本不会出现（空组被过滤），列出来只会制造一个空条目
+    const list = Array.isArray(p.models) ? (p.models as StoredModelDef[]) : []
+    if (!list.some((m) => m && m.enabled !== false)) continue
+    // 本机服务无需密钥
+    if (keylessHost(p.apiHost)) continue
+    const secret = await readSecret(pid)
+    if (secret.kind === 'absent') out.push({ id: pid, kind: 'nokey' })
+    else if (secret.kind === 'unreadable') out.push({ id: pid, kind: 'keyunreadable' })
+    // ok / store-unreadable：不列（见函数注释）
+  }
+  return out
 }

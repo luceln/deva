@@ -36,6 +36,13 @@ export interface SelectOption<V> {
   lead?: ReactNode
   /** 多选时点了即收起浮层（与其余选项互斥的整体项）。 */
   closeOnPick?: boolean
+  /**
+   * 列出但不可选（配 `sub` 说明原因）。
+   *
+   * 为什么要有这一档而不是「干脆不列」：把一个东西从候选里静默删掉，用户只会觉得「它怎么不见了」；
+   * 列出来并写明理由（如「这个服务商还没填密钥」）才能让人知道该先去做什么。键盘移动与点击都会跳过它。
+   */
+  disabled?: boolean
 }
 export type SelectEntry<V> = SelectOption<V> | { separator: true } | { group: string; lead?: ReactNode }
 
@@ -124,8 +131,9 @@ export function Select<V>(props: SingleProps<V> | MultiProps<V>): React.JSX.Elem
   }
 
   const openMenu = (): void => {
-    const i = options.findIndex((o) => isOn(o.value))
-    setActive(i >= 0 ? i : 0)
+    const cur = options.findIndex((o) => isOn(o.value))
+    // 打开时高亮：优先当前值；否则第一项可选（跳过禁用项，别一打开就停在灰项上）
+    setActive(cur >= 0 ? cur : Math.max(0, options.findIndex((o) => !o.disabled)))
     place()
   }
 
@@ -136,7 +144,8 @@ export function Select<V>(props: SingleProps<V> | MultiProps<V>): React.JSX.Elem
 
   const pick = (i: number): void => {
     const o = options[i]
-    if (!o) return
+    // 禁用项点了不生效：它只是「让你看见并知道原因」，不是一个可选项
+    if (!o || o.disabled) return
     if (props.multiple) {
       props.onToggle(o.value)
       if (o.closeOnPick) close(true)
@@ -201,14 +210,24 @@ export function Select<V>(props: SingleProps<V> | MultiProps<V>): React.JSX.Elem
       return
     }
     const last = options.length - 1
-    const move = (i: number): void => {
+    const setAt = (i: number): void => {
       byKeyboard.current = true
       setActive(Math.max(0, Math.min(last, i)))
     }
-    if (e.key === 'ArrowDown') move(active + 1)
-    else if (e.key === 'ArrowUp') move(active - 1)
-    else if (e.key === 'Home') move(0)
-    else if (e.key === 'End') move(last)
+    /** 从 from 朝 dir 找下一个**可选**项（跳过禁用项）；找不到就留在原地。 */
+    const move = (from: number, dir: 1 | -1): void => {
+      let i = from
+      while (i >= 0 && i <= last) {
+        if (!options[i]?.disabled) return setAt(i)
+        i += dir
+      }
+      // 这一方向全是禁用项：不动高亮，别让用户以为选中了不可用的东西
+      byKeyboard.current = true
+    }
+    if (e.key === 'ArrowDown') move(active + 1, 1)
+    else if (e.key === 'ArrowUp') move(active - 1, -1)
+    else if (e.key === 'Home') move(0, 1)
+    else if (e.key === 'End') move(last, -1)
     else if (e.key === 'Enter' || e.key === ' ') pick(active)
     else if (e.key === 'Tab') return close(false)
     else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -217,8 +236,10 @@ export function Select<V>(props: SingleProps<V> | MultiProps<V>): React.JSX.Elem
         text: (now - typed.current.at < TYPEAHEAD_MS ? typed.current.text : '') + e.key.toLowerCase(),
         at: now
       }
-      const hit = options.findIndex((o) => o.label.toLowerCase().startsWith(typed.current.text))
-      if (hit >= 0) move(hit)
+      const hit = options.findIndex(
+        (o) => !o.disabled && o.label.toLowerCase().startsWith(typed.current.text)
+      )
+      if (hit >= 0) move(hit, 1)
     } else return
     e.preventDefault()
   }
@@ -290,12 +311,13 @@ export function Select<V>(props: SingleProps<V> | MultiProps<V>): React.JSX.Elem
                     data-i={i}
                     role="option"
                     aria-selected={on}
+                    aria-disabled={e.disabled || undefined}
                     className={`select-menu__opt${e.sub ? ' has-sub' : ''}${on ? ' is-on' : ''}${
                       i === active ? ' is-active' : ''
-                    }`}
+                    }${e.disabled ? ' is-disabled' : ''}`}
                     // 焦点留在触发框：按下不抢焦点，点击选中。
                     onMouseDown={(ev) => ev.preventDefault()}
-                    onMouseMove={() => i !== active && setActive(i)}
+                    onMouseMove={() => i !== active && !e.disabled && setActive(i)}
                     onClick={() => pick(i)}
                   >
                     {e.lead}

@@ -1339,6 +1339,8 @@ const zhCN: MessageTree = {
       targetEmpty: '没有可用的模型。请先在「设置 › 模型」添加并启用一个模型。',
       targetPlaceholder: '选择一个可用模型',
       nokeyTip: '缺密钥的会话不用换模型，填上密钥就能继续用。',
+      // 候选里缺密钥服务商的模型不删掉，而是列出来标注原因（删掉用户只会觉得「它怎么不见了」）
+      providerNoKey: '这个服务商还没填密钥，先填上才能用',
       fillKey: '去填密钥',
       apply: '替换',
       applying: '替换中…',
@@ -2975,6 +2977,7 @@ const en: MessageTree = {
       targetEmpty: 'No usable model. Add and enable one under Settings › Models first.',
       targetPlaceholder: 'Pick a usable model',
       nokeyTip: 'Conversations missing a key don’t need a different model — just add the key.',
+      providerNoKey: 'This provider has no API key yet — add one first',
       fillKey: 'Add key',
       apply: 'Switch',
       applying: 'Switching…',
