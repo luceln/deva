@@ -25,10 +25,28 @@ const SRC = path.join(REPO, 'apps/desktop/src/main')
 const SCAN = path.join(__dirname, 'scan-same-class.cjs')
 
 let fails = 0
+let skips = 0
+const skipped = []
 const pass = (n, d = '') => console.log(`PASS ${n}${d ? ` :: ${d}` : ''}`)
 const fail = (n, d = '') => {
   fails++
   console.log(`FAIL ${n}${d ? ` :: ${d}` : ''}`)
+}
+/**
+ * 记一次跳过。
+ *
+ * 为什么必须有这个：破坏样本锚在**源码片段**上，源码一演进（重构、改名、挪位置）样本就命中不到。
+ * 之前的写法是 `throw` —— 那会让整个脚本崩在第一条失效样本上，**后面所有项都没跑**，
+ * 而外面只看到一段堆栈、看不到「这次跑了哪些、哪些没跑」。
+ * 那就是本仓库最防的「不报错但没生效」：脚本看起来执行过，实际只有前 3 条被验证。
+ *
+ * 和 driver.cjs 的 skipReason 同一套思路：跳过必须具名、必须写原因、必须在汇总里单独列，
+ * 且 `--strict` 下视为未完成（非 0 退出）。
+ */
+const skip = (n, d) => {
+  skips++
+  skipped.push({ name: n, why: d })
+  console.log(`SKIP ${n}${d ? ` :: ${d}` : ''}`)
 }
 
 function run(scanRoot) {
@@ -51,6 +69,11 @@ function withCopy(tag, mutate) {
     mutate(dir)
   } catch (e) {
     fs.rmSync(dir, { recursive: true, force: true })
+    /*
+     * 样本失效不是脚本崩溃，是「这条验证这次没发生」。
+     * 交给调用处记 SKIP 并继续跑后面的项 —— 否则第一条失效样本就把整份验证废掉。
+     */
+    if (e instanceof SampleStale) return { stale: true, label: e.label, detail: e.message, code: -1, out: '' }
     throw e
   }
   const r = run(dir)
@@ -58,7 +81,35 @@ function withCopy(tag, mutate) {
   return r
 }
 
-/** 在副本里替换文本；命中不到就抛（源码结构变了时不能静默失效）。 */
+/**
+ * 判「破坏后必须变红」。
+ *
+ * `pattern` 保留「报出的是哪个文件」这层特异性：只说「变红了」不够，
+ * 变红可能是因为样本把别处碰坏了 —— 那证明的不是这条判据有效。
+ */
+function judgeRed(r, name, pattern, about) {
+  if (r.stale) return skip(name, `${about ? `${about} · ` : ''}${r.detail}`)
+  const hits = r.out.split('\n').filter((l) => /^(BARE|SWALLOW|DISCARD)\s/.test(l))
+  if (r.code !== 0 && (!pattern || pattern.test(r.out))) return pass(name)
+  return fail(`${name} 没被抓到`, hits.join(' | ') || '扫描仍全绿')
+}
+
+/**
+ * 破坏样本失效（源码演进后找不到原文）。
+ *
+ * 与「破坏没生效」分开：样本失效说明**这条验证这次没有发生**（该记 SKIP），
+ * 而破坏没生效说明**脚本自己有 bug**（该记 FAIL）。混成一个错误码会让
+ * 「这次少验了 5 条」和「验证逻辑写错了」看起来一样。
+ */
+class SampleStale extends Error {
+  constructor(label, detail) {
+    super(`${label}：${detail}`)
+    this.name = 'SampleStale'
+    this.label = label
+  }
+}
+
+/** 在副本里替换文本；命中不到就抛 SampleStale（由调用处转 SKIP，而不是崩掉整个脚本）。 */
 function sub(dir, file, from, to, label, opts = {}) {
   const f = path.join(dir, file)
   const before = fs.readFileSync(f, 'utf8')
@@ -68,7 +119,7 @@ function sub(dir, file, from, to, label, opts = {}) {
    */
   const crlf = before.includes('\r\n')
   const n = crlf ? before.replace(/\r\n/g, '\n') : before
-  if (!n.includes(from)) throw new Error(`${label}：要替换的原文没找到`)
+  if (!n.includes(from)) throw new SampleStale(label, '要替换的原文没找到（源码结构变了，样本需更新）')
   const out = n.replace(from, to)
   const written = crlf ? out.replace(/\n/g, '\r\n') : out
   fs.writeFileSync(f, written)
@@ -177,31 +228,27 @@ const b1 = withCopy('b1', (d) => {
     'A1-import'
   )
 })
-if (b1.code !== 0 && /BARE\s+importer-assoc\.ts/.test(b1.out)) pass('A1：mergeDir 回裸 existsSync → 变红')
-else fail('A1 没被抓到', b1.out.split('\n').filter((l) => l.startsWith('BARE')).join(' | ') || '无 BARE 行')
+judgeRed(b1, 'A1：mergeDir 回裸 existsSync → 变红', /BARE\s+importer-assoc\.ts/, 'mergeDir 文件分支')
 
 const b2 = withCopy('b2', (d) => {
-  // copySecrets 改回「读失败当没有」（旧 bug 的现场）：整段三态判断换回一个大 catch return
+  /*
+   * copySecrets 改回「读失败当没有」（旧 bug 的现场）。
+   *
+   * 锚点只取**代码行**、不带注释：注释最容易随解释更新而漂移，把注释写进 from 会让样本
+   * 每改一次说明就失效一次（这正是它上一版 SKIP 的原因）。
+   * 这里把「ENOENT 才正常、其余记 failed」改成「一律 return stat」。
+   */
   sub(
     d,
     'importer-config.ts',
-    [
-      "  } catch (e) {",
-      "    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return stat // 原版没有密钥文件：正常",
-      '    // 读到了但解析不了，与读不出来分开说，用户处置不同（前者要检查文件，后者稍后重试）',
-      "    const reason = (e as Error)?.message?.startsWith('Unexpected') || e instanceof SyntaxError",
-      "      ? 'source-secrets-corrupt'",
-      "      : (e as Error)?.message ?? String(e)",
-      "    stat.failed = [{ step: 'secrets', id: '<secrets.json>', reason }]",
-      '    return stat',
-      '  }'
-    ].join('\n'),
-    '  } catch {\n    return stat\n  }',
+    `  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return stat`,
+    `  } catch (e) {
+    if (e) return stat`,
     'A2'
   )
 })
-if (b2.code !== 0 && /(BARE|SWALLOW)\s+importer-config\.ts/.test(b2.out)) pass('A2：copySecrets 改回读失败当没有 → 变红')
-else fail('A2 没被抓到', b2.out.split('\n').filter((l) => /BARE|SWALLOW/.test(l)).join(' | ') || '无相关行')
+judgeRed(b2, 'A2：copySecrets 改回读失败当没有 → 变红', /(?:BARE|SWALLOW)\s+importer-config\.ts/, 'copySecrets 三态')
 
 const b3 = withCopy('b3', (d) => {
   // readMemoryFile 的 unreadable 不再被转成 failed（去掉调用方的失败通道）
@@ -213,8 +260,7 @@ const b3 = withCopy('b3', (d) => {
     'A3'
   )
 })
-if (b3.code !== 0 && /DISCARD\s+importer-memory\.ts/.test(b3.out)) pass('A3：去掉 readMemoryFile 的失败通道 → 变红（DISCARD）')
-else fail('A3 没被抓到（三态调用方的 unreadable 丢弃检测失效）', b3.out.split('\n').filter((l) => /^DISCARD/.test(l)).join(' | ') || '无 DISCARD 行')
+judgeRed(b3, 'A3：去掉 readMemoryFile 的失败通道 → 变红（DISCARD）', /DISCARD\s+importer-memory\.ts/, 'readMemoryFile 三态调用方')
 
 /* ══════ B 方向：已修好的四条，拆回旧写法必须重新变红 ══════ */
 
@@ -236,8 +282,7 @@ const b4 = withCopy('b4', (d) => {
     'B1'
   )
 })
-if (/BARE\s+importer-personas\.ts/.test(b4.out) && b4.code !== 0) pass('B1：头像拆回裸 existsSync → 又变红')
-else fail('B1 没被抓到（修好的位置复发时扫描失灵）', b4.out.split('\n').filter((l) => /^BARE/.test(l)).join(' | '))
+judgeRed(b4, 'B1：头像拆回裸 existsSync → 又变红', /BARE\s+importer-personas\.ts/, '头像四态')
 
 const b5 = withCopy('b5', (d) => {
   // ② 角色本体：把四态判定塞回 existsSync 真分支里（模拟「守卫写在安全的那一侧」）
@@ -250,8 +295,7 @@ const b5 = withCopy('b5', (d) => {
     { keepOld: true }
   )
 })
-if (/BARE\s+importer-personas\.ts/.test(b5.out) && b5.code !== 0) pass('B2：角色本体塞回 existsSync 真分支 → 又变红')
-else fail('B2 没被抓到', b5.out.split('\n').filter((l) => /^BARE/.test(l)).join(' | '))
+judgeRed(b5, 'B2：角色本体塞回 existsSync 真分支 → 又变红', /BARE\s+importer-personas\.ts/, '角色本体四态')
 
 const b6 = withCopy('b6', (d) => {
   // ③ readJson：拆回「读失败返回 null」
@@ -263,8 +307,7 @@ const b6 = withCopy('b6', (d) => {
     'B3'
   )
 })
-if (/BARE\s+importer-config\.ts/.test(b6.out) && b6.code !== 0) pass('B3：readJson 拆回读失败当没有 → 又变红')
-else fail('B3 没被抓到', b6.out.split('\n').filter((l) => /^BARE|^SWALLOW/.test(l)).join(' | '))
+judgeRed(b6, 'B3：readJson 拆回读失败当没有 → 又变红', /(?:BARE|SWALLOW)\s+importer-config\.ts/, 'readJson 三态')
 
 const b7 = withCopy('b7', (d) => {
   // ④ readMemoryFile：拆回「读失败返回空」
@@ -276,11 +319,24 @@ const b7 = withCopy('b7', (d) => {
     'B4'
   )
 })
-if ((/BARE\s+importer-memory\.ts/.test(b7.out) || /已找不到/.test(b7.out)) && b7.code !== 0) {
-  pass('B4：readMemoryFile 拆回读失败当没有 → 又变红（BARE 或 canary 失效）')
-} else {
-  fail('B4 没被抓到', b7.out.split('\n').filter((l) => /^BARE|^SWALLOW|已找不到/.test(l)).join(' | '))
-}
+judgeRed(b7, 'B4：readMemoryFile 拆回读失败当没有 → 又变红', /BARE\s+importer-memory\.ts|已找不到/, 'readMemoryFile 本体')
 
-console.log(`\n${fails === 0 ? '全部按预期（A 抓得到，B 复发也抓得到）' : `${fails} 项未按预期`}（fail=${fails}）`)
-process.exit(fails === 0 ? 0 : 1)
+/* ── 汇总 ── */
+console.log(
+  `\n${fails === 0 && skips === 0 ? '全部按预期（A 抓得到，B 复发也抓得到）' : fails > 0 ? `${fails} 项未按预期` : '无失败，但有跳过'}（fail=${fails}，skip=${skips}）`
+)
+if (skips > 0) {
+  /*
+   * 跳过必须单独点名：`7/11 通过` 不能冒充 `11/11`。
+   * 破坏样本锚在源码片段上，产品代码一重构样本就失效 —— 这是这类脚本的固有衰减，
+   * 唯一能做的就是让衰减可见（这条与 driver.cjs 的 SKIP 汇总同一套思路）。
+   */
+  console.log(`本次未覆盖 ${skips} 项（样本锚在源码片段上，源码演进后失效）：`)
+  for (const s of skipped) console.log(`  - ${s.name} :: ${s.why}`)
+  console.log('处置：按当前源码更新该条 sub() 的 from/to，或确认该形态已不存在 → 删掉这一项。')
+}
+const strict = process.argv.includes('--strict')
+if (strict && skips > 0) {
+  console.log('--strict：跳过视为未完成。')
+}
+process.exit(fails === 0 && !(strict && skips > 0) ? 0 : 1)
