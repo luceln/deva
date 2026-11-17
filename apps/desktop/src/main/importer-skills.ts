@@ -26,15 +26,51 @@ function isSafeId(id: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id) && id !== '.' && id !== '..'
 }
 
-/** 建链接：先 symlink（目录 / POSIX 免 type），失败且是 Windows 时回落 junction。都失败返回 false。 */
-function makeLink(target: string, dest: string): LinkKind | null {
+/**
+ * 建链接：先 symlink（目录 / POSIX 免 type），失败且是 Windows 时回落 junction。
+ *
+ * 返回 `LinkKind` = 建成了（symlink / junction）；`'unreadable'` = 不知道链接目标是什么；
+ * `null` = 建链失败（权限 / 目标被占）。
+ *
+ * ## 为什么先探 statSync（而不是直接猜目录）
+ *
+ * 以前是：
+ * ```ts
+ * let isDir = true
+ * try { isDir = statSync(target).isDirectory() } catch { isDir = true }  // ← 猜
+ * ```
+ * `catch` 里的 `isDir = true` 是**猜**不是断言，违反「读失败 = 不知道」。实测两种失效：
+ *
+ *  1. **断链**（`statSync` → ENOENT：源链接指向的目录已被用户删掉）
+ *     猜目录 → 建出 junction 成功 → 目标里得到一个 `lstat` 存在、但 `existsSync` 为 false 的
+ *     **坏链接**，技能实际用不了，报告却记 `linked`（成功）。用户以为技能导进来了。
+ *  2. **读不出来**（EPERM / EACCES：ACL 改坏）时**目标其实是文件**
+ *     猜目录 → `symlink(...,'dir')` EPERM（Windows 无开发者模式）→ 回落 junction →
+ *     junction 指向文件也「建成功」，但读出来是 ENOENT —— 又是一个坏链接。
+ *
+ * 两种都不该猜：不知道就不搬，记 `link-failed`。这不会把原本能成功的场景变成失败——
+ * 能成功的前提就是 `statSync` 读得到（真目录 → dir，真文件 → file），那时走的还是原路径。
+ *
+ * ## 为什么断链与权限错误用同一个结果
+ *
+ * 断链时「搬过去」本来就无意义（目标指向一个不存在的目录）；权限错误时我们不知道它是什么，
+ * 按目录猜可能建出坏链接。两者对用户的正确结论一样：**这个技能没导进来**。
+ * 区分它们没有处置上的差别，所以只返回一个 `unreadable`，由调用方记 `link-failed`
+ * （界面文案「建立链接失败，可能缺少权限」已经覆盖这两种情形，不额外造码）。
+ */
+function makeLink(target: string, dest: string): LinkKind | 'unreadable' | null {
   const isWin = process.platform === 'win32'
-  // 目标是目录还是文件：断链时 statSync 会抛，按目录猜（技能基本都是目录）
-  let isDir = true
+  let isDir: boolean
   try {
     isDir = statSync(target).isDirectory()
-  } catch {
-    isDir = true
+  } catch (e) {
+    /*
+     * ENOENT = 源链接已经断了（目标不存在）；EPERM/EACCES = 读不出来。
+     * 两种都**不能猜**：猜错会建出指向不存在/文件位置的 junction（见上方实测），
+     * 那是一个「看起来成功、实际打不开」的技能，比少一个更难查。
+     */
+    console.warn(`[import] 无法判断链接目标是目录还是文件（${(e as NodeJS.ErrnoException).code}）：${target}`)
+    return 'unreadable'
   }
   try {
     symlinkSync(target, dest, isWin ? (isDir ? 'dir' : 'file') : undefined)
@@ -131,12 +167,16 @@ export function importSkills(
         // 链接目标按**源链接所在目录**解析成绝对路径：readlinkSync 可能给相对路径，照抄到新目录会指向别处（断链且不报错）
         const target = resolve(join(srcDir), readlinkSync(from))
         const kind = makeLink(target, to)
-        if (kind) {
+        if (kind === 'unreadable') {
+          // 不知道链接目标是什么（断链 / 读不出来）：猜着建会得到一个「存在但打不开」的坏链接
+          // （见 makeLink 的注释与实测），比少一个技能更难查。不搬，如实报失败。
+          stat.failed.push({ step: 'skills', id: name, reason: 'link-failed' })
+        } else if (kind) {
           stat.linked.push(name)
           stat.kinds[name] = kind
         } else {
-          // 建不了链接就**不搬**：复制实体等于造一份会漂移的副本，比少一个技能（日志里写着）更难查。
-          // 这是真失败（EPERM 等），不是「跳过」。
+          // 建链本身失败（EPERM 等权限问题）。复制实体绝不作为兜底：那等于造一份会漂移的副本
+          // （用户在真源改 SKILL.md，DevaPlus 永远看不到），比少一个技能更糟。
           stat.failed.push({ step: 'skills', id: name, reason: 'link-failed' })
         }
       } else if (st.isDirectory()) {
