@@ -1,10 +1,14 @@
-# PR 与推到 main 时做类型检查 + 构建，挡住编不过的改动。打包与发版仍由 release.yml 负责。
+# PR 与推到 main / my/* 时做类型检查 + 构建 + 同类扫描，挡住编不过、也挡住已知形状的静默失效。
+# 打包与发版仍由 release.yml 负责。
+#
+# 为什么带上 my/*：二开全部写在 my/* 分支上（main 只做上游镜像），只监听 main 等于这条门禁
+# 一次都不会跑——改之前 my/dev 从未被推过，Actions 里一条记录都没有。
 name: CI
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'my/**']
 
 permissions:
   contents: read
@@ -35,3 +39,8 @@ jobs:
       - run: pnpm typecheck
 
       - run: pnpm build
+
+      # 同类扫描：把「不许裸 existsSync 判存在、不许吞读失败、不许丢返回值」变成可执行判据。
+      # 它只读源码、跨平台，脚本自己带退出码（待确认项或问题数非 0 即 exit 1）。
+      - name: 同类扫描
+        run: node .deva/qa/scan-same-class.cjs
