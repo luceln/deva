@@ -1557,6 +1557,86 @@ async function scenarioSwapWhitespace(): Promise<void> {
   eq('A24：没被替换的会话原值一个字不改', cs.getSession('Ws1-sub')?.model, 'q:n')
 }
 
+/**
+ * A29/A30：轮前体检拦下的一轮不许留 notices、不许动 updatedAt，但提示不能丢。
+ *
+ * 验收实测：拦截后 `{"notices":1,"noticeKinds":["error"]}` 且 updatedAt 被刷新 → 用户看到「我没发出去，
+ * 它怎么跳上去了」，而那条 error 重启后还在。
+ */
+async function scenarioBlockedTurnNoTrace(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const chatTurns = await import('../../apps/desktop/src/main/services/chat-turns')
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        // 引用悬空：服务商在、模型不在 → 体检必拦
+        { id: 'p', name: 'P', apiHost: 'http://localhost:1/v1', enabled: true, models: [{ id: 'other' }] }
+      ]
+    }
+  })
+
+  // 造一条已经存在、且 updatedAt 是**旧值**的会话
+  const OLD = 1111000
+  const s = cs.ensureSession('Blk1', { model: 'p:missing' })
+  s.title = 'Blocked'
+  s.updatedAt = OLD
+  eq('A29：前置——旧会话落盘', cs.save('Blk1'), true)
+
+  const before = cs.getSession('Blk1')!
+  const noticeCountBefore = before.notices?.length ?? 0
+  const updatedBefore = before.updatedAt
+
+  // 直接跑一轮（体检在调模型之前就抛出并被 runTurn 兜住）
+  // 提示走 chat-bus 的一次性事件（不落盘）：订阅一次，确认拦截仍然给了提示
+  const chatBus = await import('../../apps/desktop/src/main/services/chat-bus')
+  const events: Array<{ turnId: string; event: { type?: string; kind?: string; message?: string } }> = []
+  const unsub = chatBus.onChatEvent((p) => events.push(p as never))
+
+  /*
+   * 走**真实入口** `sendMessage`（而不是直接调 runTurn）：体检必须在 `history.push` 与 `saveProject` 之前
+   * 拦下，否则用户消息已经进历史并落盘、updatedAt 也已刷新——那正是 A29/A30 报的现象。
+   * 注：sendMessage 只回 {turnId}（内部 void 起轮），拦下的那一轮不会有 done 事件以外的副作用。
+   */
+  const res = await chatTurns.sendMessage({
+    sessionId: 'Blk1',
+    text: '你好',
+    model: { providerId: 'p', modelId: 'missing', adapter: 'openai', baseURL: 'http://localhost:1/v1' },
+    workspaceRoot: null,
+    trigger: 'desktop'
+  } as never)
+  // 让 emit 的微任务跑完
+  await new Promise((r) => setTimeout(r, 30))
+  unsub()
+  info('sendMessage 结果', JSON.stringify(res))
+
+  const errEvents = events.filter((e) => e.event?.type === 'error')
+  info('拦截期间发出的事件类型', JSON.stringify(events.map((e) => e.event?.type)))
+  check(
+    'A31：拦截仍然给出提示（发出 error 事件，一次性、不落盘）',
+    errEvents.length > 0,
+    JSON.stringify(errEvents).slice(0, 400)
+  )
+
+  const after = cs.getSession('Blk1')!
+  const noticeCountAfter = after.notices?.length ?? 0
+  info(
+    '拦截后 notices / updatedAt',
+    JSON.stringify({ before: noticeCountBefore, after: noticeCountAfter, updatedBefore, updatedAfter: after.updatedAt })
+  )
+
+  eq('A29：被拦的一轮不新增 notices（以前多一条 error，重启还在）', noticeCountAfter, noticeCountBefore)
+  check(
+    'A29：notices 里没有新的 error 记录',
+    !(after.notices ?? []).some((n) => n.kind === 'error'),
+    JSON.stringify(after.notices)
+  )
+  eq('A30：被拦的一轮不动 updatedAt（以前被顶到列表最前）', after.updatedAt, updatedBefore)
+  // 拦截必须早于 history.push：否则用户消息留在历史里，模型下一轮会看到一条「没发出去的话」
+  eq('A29：被拦的一轮没有把用户消息写进历史', after.messages.length, before.messages.length)
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1575,6 +1655,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   swapfail: scenarioSwapWriteFail,
   kindcopy: scenarioKindCopy,
   swapws: scenarioSwapWhitespace,
+  blockedturn: scenarioBlockedTurnNoTrace,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

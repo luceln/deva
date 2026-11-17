@@ -2,6 +2,7 @@
  * 回合编排：发起一轮（用户发送 / 定时任务 / 通知唤醒）、轮前与轮中压缩、进行中插话、中止与收尾落盘。
  */
 import type {
+  AvailabilityKind,
   ChatInsertRequest,
   ChatInsertResult,
   ChatModelConfig,
@@ -323,6 +324,51 @@ function midTurnCompactor(
  * 主轮（depth 0）薄封装：建控制器/上下文、定格技能快照、调 runAgentLoop，
  * 由本封装发终态 `done`（嵌套子轮不发 done），并在 finally 落盘。
  */
+/**
+ * 模型不可用时的用户提示（同一句，两处共用）。
+ *
+ * 为什么单独抽出来：`startTurn`（正常发送入口）与 `runTurn`（定时任务 / 成员 / 交接的入口）都要拦失效模型，
+ * 文案若各写一份，迟早一处更新一处忘——而这类提示正是用户唯一能看到的解释。
+ *
+ * 每个 kind 给一句**指向动作**的说明，别一句「模型不可用」打发了事：
+ *  - nokey / keyunreadable 的处置不同（还没填 vs 填过但读不出来：换账户 / 换机器 / 无加密存储）；
+ *  - disabled / model-disabled 是**用户自己关掉的**，最省事的解法是去启用，而不是白换一个模型；
+ *  - missing / malformed 才是真的「换一个」。
+ */
+function unavailableModelMessage(kind: AvailabilityKind | undefined): string {
+  const T = isEn()
+  const why = (() => {
+    switch (kind) {
+      case 'nokey':
+        return T ? 'its provider is missing an API key' : '所在服务商还没有配置密钥'
+      case 'keyunreadable':
+        return T
+          ? 'its provider’s key can’t be read (it may have been saved under a different account or machine)'
+          : '所在服务商的密钥读不出来（可能是在别的账户或机器上保存的）'
+      case 'disabled':
+        return T
+          ? 'its provider is turned off in Settings › Models'
+          : '所在服务商在「设置 › 模型」里被停用了'
+      case 'model-disabled':
+        return T ? 'this model is turned off in Settings › Models' : '这个模型在「设置 › 模型」里被停用了'
+      case 'missing':
+        return T ? 'the model no longer exists in your settings' : '这个模型在配置里已经不存在了'
+      default:
+        return T ? 'the model is no longer available' : '这个模型已不可用'
+    }
+  })()
+  // 只是「被停用」的那两种，收尾该引导去启用（换模型不是唯一出路）
+  const tail =
+    kind === 'disabled' || kind === 'model-disabled'
+      ? T
+        ? 'Turn it back on in Settings › Models (or pick another model above), then send again.'
+        : '请到「设置 › 模型」把它重新启用（也可以在上方换一个模型）后再发送。'
+      : T
+        ? 'Pick another model above (or fill in the key), then send again.'
+        : '请在上方输入框换一个模型（或填好密钥）后再发送。'
+  return T ? `This chat's model can't be used — ${why}. ${tail}` : `本对话的模型用不了——${why}。${tail}`
+}
+
 export async function runTurn(
   sessionId: string,
   turnId: string,
@@ -424,6 +470,18 @@ export async function runTurn(
   insertableTurns.add(turnId)
   if (fromRemote) remoteTurns.add(turnId)
 
+  /*
+   * 「这一轮根本没开始」的标记：轮前体检拦下之后，这一轮没有调模型、没有产生任何历史、没有新内容。
+   *
+   * 存在的理由（A29/A30）：catch 里会 `recordTurnNotice('error')` 把错误**持久化**进 `session.notices`，
+   * finally 里会无条件 `session.updatedAt = Date.now()` 把这条对话顶到左侧列表最前。用户看到的是
+   * 「我没发出去，它怎么跳上去了」，而且那条 error 记录重启后还在。
+   *
+   * 提示不能丢（A31 要求拦截时要告诉用户为什么）：错误仍通过 `emit(turnId, …{type:'error'})` 送到界面，
+   * 那是一次性的 UI 反馈、不落盘。
+   */
+  let blockedBeforeStart = false
+
   try {
     // 轮前体检：本对话存的模型引用若已失效（模型被删 / 服务商被禁用 / 密钥丢了），这一轮注定发不出去。与其让
     // provider 层抛一句 400/401，不如先拦下来、说清是哪一类，把用户引到输入框上方那个标红的模型胶囊去换模型。
@@ -432,50 +490,9 @@ export async function runTurn(
     if (!scheduled && session.model) {
       const avail = await resolveAvailability(session.model)
       if (!avail.ok) {
-        /*
-         * 每个 kind 给一句**指向动作**的说明，别一句「模型不可用」打发了事：
-         *  - nokey / keyunreadable 的处置不同（还没填 vs 填过但读不出来：换账户 / 换机器 / 无加密存储）；
-         *  - disabled / model-disabled 是**用户自己关掉的**，最省事的解法是去启用，而不是白换一个模型；
-         *  - missing / malformed 才是真的「换一个」。
-         * 以前这里只有「模型不可用」一句，把上面这些全说成同一件事。
-         */
-        const T = isEn()
-        const why = (() => {
-          switch (avail.kind) {
-            case 'nokey':
-              return T ? 'its provider is missing an API key' : '所在服务商还没有配置密钥'
-            case 'keyunreadable':
-              return T
-                ? 'its provider’s key can’t be read (it may have been saved under a different account or machine)'
-                : '所在服务商的密钥读不出来（可能是在别的账户或机器上保存的）'
-            case 'disabled':
-              return T
-                ? 'its provider is turned off in Settings › Models'
-                : '所在服务商在「设置 › 模型」里被停用了'
-            case 'model-disabled':
-              return T
-                ? 'this model is turned off in Settings › Models'
-                : '这个模型在「设置 › 模型」里被停用了'
-            case 'missing':
-              return T
-                ? 'the model no longer exists in your settings'
-                : '这个模型在配置里已经不存在了'
-            default:
-              return T ? 'the model is no longer available' : '这个模型已不可用'
-          }
-        })()
-        // 只是「被停用」的那两种，收尾该引导去启用（换模型不是唯一出路）
-        const tail =
-          avail.kind === 'disabled' || avail.kind === 'model-disabled'
-            ? T
-              ? 'Turn it back on in Settings › Models (or pick another model above), then send again.'
-              : '请到「设置 › 模型」把它重新启用（也可以在上方换一个模型）后再发送。'
-            : T
-              ? 'Pick another model above (or fill in the key), then send again.'
-              : '请在上方输入框换一个模型（或填好密钥）后再发送。'
-        throw new Error(
-          T ? `This chat's model can't be used — ${why}. ${tail}` : `本对话的模型用不了——${why}。${tail}`
-        )
+        // 标记打在抛错**之前**：catch/finally 据此决定不写 notices、不动 updatedAt
+        blockedBeforeStart = true
+        throw new Error(unavailableModelMessage(avail.kind))
       }
     }
     const parentSession = session.parentId ? getSession(session.parentId) : undefined
@@ -726,7 +743,12 @@ export async function runTurn(
     const message = (e as Error)?.message ?? String(e)
     emit(turnId, sessionId, { type: 'error', kind: 'unknown', message })
     emit(turnId, sessionId, { type: 'done', stopReason: 'error', durationMs: finishDuration() })
-    recordTurnNotice('error', message)
+    /*
+     * 被轮前体检拦下的那一轮不写 notices（A29）：这一轮**没有发生**，把它记成会话里的一条错误记录，
+     * 用户重启后还会看到一条「上一轮失败了」，而实际上什么都没发出去。错误已经通过上面的 emit 送到界面，
+     * 那是一次性反馈、不落盘。
+     */
+    if (!blockedBeforeStart) recordTurnNotice('error', message)
     replyError = message
   } finally {
     activeTurns.delete(turnId)
@@ -746,8 +768,14 @@ export async function runTurn(
     // 落盘前补上，别把一条下一次请求必 400 的会话写进磁盘。
     repairDanglingToolUses(session)
     // 本轮对 history 的原地改写落盘（一对话一文件：只重写这一条）；更新时间用于左侧列表排序
-    session.updatedAt = Date.now()
-    saveProject(sessionId)
+    //
+    // 被体检拦下的那一轮**不动 updatedAt、不落盘**（A30）：这一轮没产生任何内容，刷新时间只会把它顶到左侧
+    // 列表最前，用户会以为「没发出去的对话怎么跳上去了」。会话本身没有任何改动要保存（history 未追加、
+    // notices 未新增），跳过 saveProject 同时省掉一次无意义的整文件重写。
+    if (!blockedBeforeStart) {
+      session.updatedAt = Date.now()
+      saveProject(sessionId)
+    }
     busySessions.delete(sessionId)
     busySince.delete(sessionId)
     // 本轮结束：浏览器窗口 / 胶囊上的「正在操作」立即收起（不等空闲计时）；后台网页从此刻起按短时限计时
@@ -950,6 +978,33 @@ async function startTurn(
   // 发送前自愈：旧版本 / 崩溃遗留的悬空 tool_use 会让这次请求直接 400（此后每次都 400）。
   // 回合进行中不碰——那时的「悬空」是工具正在执行，不是残缺。
   if (!busySessions.has(sessionId)) repairDanglingToolUses(session)
+  /*
+   * 轮前体检放在**这里**，而不是 runTurn 内部——这是 A29/A30 的正解。
+   *
+   * 为什么必须提前：runTurn 被调之前，本函数已经把用户消息 `history.push` 进去并 `saveProject` 落盘、
+   * 还刷新了 `session.updatedAt`。若体检在 runTurn 里才拦，用户看到的是「消息发出去了、报错、但对话被顶到
+   * 列表最前」，而这一轮其实什么都没开始；更糟的是那条消息已经进历史，模型下一轮会看到它。
+   *
+   * 提前到这里之后：拦下的这一轮**不动任何持久化状态**——不 push、不 save、不动 updatedAt、不写 notices。
+   * 提示仍走一次性事件（chat-bus 的 error），不落盘。
+   *
+   * 边界：只管「本对话自己存的引用」；空串交给下面的 resolveModelRef 兜底；定时任务不在此列（无人值守，
+   * 拦下只会让任务静默失败，见 runTurn 里保留的同一判断）。
+   */
+  if (trigger !== 'schedule' && session.model) {
+    const avail = await resolveAvailability(session.model)
+    if (!avail.ok) {
+      const message = unavailableModelMessage(avail.kind)
+      /*
+       * 一次性反馈：发 error + done 事件让界面收掉占位并显示原因，然后**直接返回**。
+       * 不复用 runTurn 的 catch 那条路——它会把错误记进 notices 并落盘（正是要避免的）。
+       */
+      const turnId = genId('turn')
+      emit(turnId, sessionId, { type: 'error', kind: 'unknown', message })
+      emit(turnId, sessionId, { type: 'done', stopReason: 'error', durationMs: 0 })
+      return { turnId, done: Promise.resolve({ stopReason: 'error', text: '', errorMessage: message }) }
+    }
+  }
   const history = session.messages
 
   // 「/技能名」显式触发（消息开头或正文中间，认法见 shared/slash.ts）：命中本对话角色可用的技能 → 把完整正文
