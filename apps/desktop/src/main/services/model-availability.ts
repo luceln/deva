@@ -1,4 +1,4 @@
-import { getConfig } from './config'
+import { getConfig, getConfigLoadKind } from './config'
 import { readSecret } from './secrets'
 import type { AvailabilityResult, BrokenRef } from '../../shared/chat-protocol'
 
@@ -114,6 +114,16 @@ export async function resolveAvailability(
   ref: string | null | undefined
 ): Promise<AvailabilityResult> {
   if (!ref || typeof ref !== 'string') return { ok: true }
+  /*
+   * 配置**读坏**时放行（本函数注释顶上说清了「判定只是提示用的旁路，不该反过来阻断用户的会话」）。
+   *
+   * 这一条以前写在外层 `catch` 里，但从来没有生效过：`getConfig()` → `ensureLoaded()` 自己就把异常吞成
+   * `{}`（见 config.ts），外层 catch 永远进不去。于是配置内容坏时 → providers=[] → 第一个引用就 `missing`
+   * → **全库会话标红、体检拒绝所有发送**，而界面说「模型不可用」，用户找不到真正原因（该去修 config.json）。
+   *
+   * 所以先问一次载入状态：`corrupt` 才是「读不出来，不知道」，`absent` 是「真没配过」，照常判 missing。
+   */
+  if (getConfigLoadKind() === 'corrupt') return { ok: true }
   // detail 只写技术定位（provider / model id），供排查与日志；给用户看的文案由渲染层按 kind 出。
   try {
     const parts = splitRef(ref)
@@ -137,7 +147,7 @@ export async function resolveAvailability(
     return { ok: true }
   } catch {
     // 密钥库异常（readSecret 理论上不抛，但别让判定把自己搞崩）：放行。
-    // 注意「配置读坏」走不到这里——`ensureLoaded` 自己把异常吞了，那条路见 readConfigKindOrNull。
+    // 注意「配置读坏」不走这里（`ensureLoaded` 自己吞了异常），那条路在函数开头的 getConfigLoadKind。
     return { ok: true }
   }
 }

@@ -43,18 +43,56 @@ function configPath(): string {
 let config: Record<string, unknown> = {}
 let loaded = false
 
+/**
+ * 首次载入的结果，**只在 `ensureLoaded` 里记一次**。
+ *
+ * 为什么需要它：`ensureLoaded` 把「文件不存在」与「内容解析不了」折成同一个 `{}`——对绝大多数调用方
+ * 这是对的（读不到就当没配过，别把启动搞崩）。但可用性判定**必须分清**：配置读坏时若当成「一个服务商都
+ * 没有」，就会把全库会话判成 `missing`、体检拒绝所有发送，界面还说「模型不可用」，用户根本找不到真正
+ * 原因（该去修 config.json）。这两态的差别只在错误发生的那一刻能看到，事后内存里只剩 `{}`，故必须当时记下。
+ *
+ * 值：
+ *  - `ok`：读到了并且解析成对象；
+ *  - `absent`：文件不存在（ENOENT）——真的没配过；
+ *  - `corrupt`：文件在但读不出/解析不了（半截写入、手改坏、权限）——**不知道里面有什么**。
+ */
+export type ConfigLoadKind = 'ok' | 'absent' | 'corrupt'
+let loadKind: ConfigLoadKind = 'ok'
+
 /** 同步载入（配置很小；同步读简化了首帧同步 IPC）。 */
 function ensureLoaded(): void {
   if (loaded) return
   try {
     const raw = readFileSync(configPath(), 'utf8')
     const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object') config = parsed as Record<string, unknown>
-  } catch {
-    // 首次运行 / 文件不存在 / 解析失败 —— 视为空配置
+    if (parsed && typeof parsed === 'object') {
+      config = parsed as Record<string, unknown>
+      loadKind = 'ok'
+    } else {
+      // 解析成非对象（字符串 / 数字 / null）：内容不合约定，等同坏文件
+      loadKind = 'corrupt'
+    }
+  } catch (e) {
+    /*
+     * 分两种，别一起折成 `{}`：
+     *  - ENOENT → 真没配过，`absent`；
+     *  - 其它（JSON 语法错、EACCES、EBUSY）→ **不知道里面有什么**，`corrupt`。
+     */
     config = {}
+    loadKind = (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'corrupt'
   }
   loaded = true
+}
+
+/**
+ * 配置的载入状态（**只读、不触发重读**）。
+ *
+ * 给「读坏就放行」这类旁路判定用：它需要知道自己是「真没配过」还是「读不出来」，而 `getConfig()`
+ * 两种都给 `{}`。不要为了这个去改 `ensureLoaded` 抛异常——那会把一次文件损坏泄漏成全局崩溃。
+ */
+export function getConfigLoadKind(): ConfigLoadKind {
+  ensureLoaded()
+  return loadKind
 }
 
 /**

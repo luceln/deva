@@ -1312,6 +1312,46 @@ async function scenarioKeyTriState(): Promise<void> {
   eq(`P1-1(${tag})：真没配过仍是 nokey`, rNoKey.kind, 'nokey')
 }
 
+/**
+ * P1-3：「配置读坏就放行」必须真的能生效。
+ *
+ * 以前那层 `catch { return { ok: true } }` **从来没进去过**：`getConfig()` → `ensureLoaded()` 自己把异常
+ * 吞成 `{}`。于是 config.json 内容坏 → providers=[] → 第一个引用就 missing → 全库标红 + 体检拒绝所有发送，
+ * 界面说「模型不可用」，用户找不到真正原因。
+ *
+ * 本场景必须在**独立进程**里跑：`loaded` 是模块级的，置 true 后不再重读，同进程造不出「刚开始读就坏」。
+ * 走 repro 的 `P13_KIND` 环境：absent（无文件）/ corrupt（内容坏）。
+ */
+async function scenarioConfigCorrupt(): Promise<void> {
+  const kind = (process.env.P13_KIND ?? '') as 'absent' | 'corrupt' | ''
+  const cfgPath = path.join(DST, 'config.json')
+  fs.mkdirSync(DST, { recursive: true })
+  if (kind === 'absent') {
+    fs.rmSync(cfgPath, { force: true })
+  } else {
+    // 半截 JSON：能读到字节，但解析不了
+    fs.writeFileSync(cfgPath, '{invalid ,,,')
+  }
+
+  const { getConfigLoadKind } = await import('../../apps/desktop/src/main/services/config')
+  const { resolveAvailability } = await import('../../apps/desktop/src/main/services/model-availability')
+  info('载入状态', getConfigLoadKind())
+
+  const r = await resolveAvailability('some:model')
+  info('判定结果', JSON.stringify(r))
+
+  if (kind === 'corrupt') {
+    eq('P1-3(corrupt)：载入状态是 corrupt（不是 ok/absent）', getConfigLoadKind(), 'corrupt')
+    eq('P1-3(corrupt)：配置读坏 → 放行 ok:true（旧实现判 missing 并全库标红）', r.ok, true)
+    eq('P1-3(corrupt)：放行时不该带 kind', r.kind, undefined)
+  } else {
+    // 对照：真没配过 ≠ 读坏，必须仍然判 missing，别把「没配」也放行了
+    eq('P1-3(absent)：文件不存在 → absent', getConfigLoadKind(), 'absent')
+    eq('P1-3(absent)：真没配过仍判 missing（不能一起放行）', r.kind, 'missing')
+    eq('P1-3(absent)：真没配过不是 ok', r.ok, false)
+  }
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1326,6 +1366,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   mcpunsafe: scenarioMcpUnsafeId,
   keyless: scenarioKeylessHost,
   keytri: scenarioKeyTriState,
+  cfgcorrupt: scenarioConfigCorrupt,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,
