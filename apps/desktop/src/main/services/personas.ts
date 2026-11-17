@@ -115,18 +115,19 @@ function writeAvatarImage(id: string, dataUri: string): string {
 }
 
 /**
- * 读取 config.json 的 personas.enabled 映射（不存在则空）。
+ * 读取 config.json 的 personas.enabled 映射（不存在则空）的**副本**。
  *
- * ⚠️ **返回的是 `config.personas.enabled` 对象本身，不是副本**。因此对返回值做的原地修改（`map[id] = true`）
- * 立刻生效在内存态上，**不需要**等 `writeEnabledMap` 落盘。这个语义有两面：
- *  - 好处：写盘失败时内存态仍是新的（本次进程内看着正确），不会出现「点一下开关界面没反应」；
- *  - 陷阱：调用方以为「没落盘就等于没改」，或以为 `writeEnabledMap` 才是改内存的地方。判断「磁盘上到底成没成」
- *    只能看 `writeEnabledMap` 的返回值，不能看内存态。
+ * ⚠️ 以前这里返回的是 `config.personas.enabled` 对象**本身**，于是对返回值做 `map[id] = true` 会立刻改到
+ * 内存态上——看着「很方便」，实际是写盘失败后无法回滚：`setConfig` 记的「旧值」已经是改后的样子，
+ * 界面刷新一次又从内存读到「已开启」，比不报错更糟（验收实测过这个不一致）。
+ *
+ * 现在返回副本：改副本 → 整段写回 → 失败由 `setConfig` 回滚内存。判断「磁盘上到底成没成」只能看
+ * `writeEnabledMap` 的返回值。
  */
 function enabledMap(): Record<string, boolean> {
   const personas = getConfig().personas
   const enabled = (personas as { enabled?: unknown })?.enabled
-  if (enabled && typeof enabled === 'object') return enabled as Record<string, boolean>
+  if (enabled && typeof enabled === 'object') return { ...(enabled as Record<string, boolean>) }
   return {}
 }
 
@@ -420,8 +421,8 @@ export function setPersonaEnabled(id: string, enabled: boolean): void {
 /**
  * 同 `setPersonaEnabled`，但**返回是否真的落盘成功**。
  *
- * 为什么要有两个：内存态与磁盘可能不一致（config.json 不可写时 setConfig 仍返回内存态成功），
- * 而绝大多数调用方（IPC 启停、首启种子）只关心「状态已更新」，不该被迫处理这个布尔；
+ * 为什么要有两个：`setConfig` 现在会在写盘失败时回滚内存，所以「内存态」不再能代表「磁盘上成了」——
+ * 绝大多数调用方（IPC 启停、首启种子）只关心「状态已更新」，不该被迫处理这个布尔；
  * 导入器则必须知道——它的报告要说「这些角色已启用」，而启用态没写进磁盘等于没启用。
  *
  * ⚠️ 非法 id 返回 false 而不是「成功了但什么也没做」：调用方是在问「这个 id 现在启用了吗」。

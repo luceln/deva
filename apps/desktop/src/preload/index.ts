@@ -744,7 +744,8 @@ const api = {
   /** 本机用户资料（个人资料面板）：头像 spec 存 config.json，图片另存 ~/.deva-plus/profile/。 */
   profile: {
     get: (): Promise<UserProfile> => ipcRenderer.invoke('profile:get'),
-    setAvatar: (spec: string): Promise<{ ok: true }> => ipcRenderer.invoke('profile:set-avatar', spec),
+    /** ok=false 表示配置没写进磁盘（权限 / 磁盘满），重启后会回到旧头像。 */
+    setAvatar: (spec: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('profile:set-avatar', spec),
     /** 写入头像图片（data URI）；空串 = 清除。返回读回的 data URI（失败 / 清除为空串）。 */
     setAvatarImage: (dataUri: string): Promise<string> =>
       ipcRenderer.invoke('profile:set-avatar-image', dataUri)

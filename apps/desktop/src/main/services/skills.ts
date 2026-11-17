@@ -275,18 +275,24 @@ function skillFile(id: string): string {
   return join(skillsDir(), id, 'SKILL.md')
 }
 
-/** 读取 config.json 的 skills.enabled 映射（不存在则空）。 */
+/**
+ * 读取 config.json 的 skills.enabled 映射（不存在则空）的**副本**。
+ *
+ * 必须是副本，理由见 mcp-config.ts 的同名函数：调用方「取出来改一项再整段写回」，
+ * 改原对象会在 setConfig 之前污染内存，使写盘失败无法回滚。
+ */
 function enabledMap(): Record<string, boolean> {
   const skills = getConfig().skills
   const enabled = (skills as { enabled?: unknown })?.enabled
-  if (enabled && typeof enabled === 'object') return enabled as Record<string, boolean>
+  if (enabled && typeof enabled === 'object') return { ...(enabled as Record<string, boolean>) }
   return {}
 }
 
-function writeEnabledMap(map: Record<string, boolean>): void {
+/** 写技能启用态，返回是否落盘成功（`setConfig` 失败时会回滚内存，见那里注释）。 */
+function writeEnabledMap(map: Record<string, boolean>): boolean {
   const skills = getConfig().skills
   const base = skills && typeof skills === 'object' ? (skills as Record<string, unknown>) : {}
-  setConfig({ skills: { ...base, enabled: map } })
+  return setConfig({ skills: { ...base, enabled: map } })
 }
 
 /** 校验文件夹名安全（防 `..` / 分隔符逃逸）。 */
@@ -463,12 +469,18 @@ export async function deleteSkill(id: string): Promise<{ ok: boolean }> {
   return { ok: true }
 }
 
-export function setSkillEnabled(id: string, enabled: boolean): void {
-  if (RESERVED_IDS.has(id)) return // 内置恒启用，不入 enabled 映射
-  if (!isSafeId(id)) return
+/**
+ * 启停技能，返回是否**真的写进磁盘**。
+ *
+ * 以前返回 void，于是 `skills:set-enabled` 硬编码 `{ok: true}`：开关看着变了、重启后回到旧值。
+ * 内置技能（恒启用）与非法 id 直接返回 true——这两种不是「写盘失败」，调用方据此提示会误导。
+ */
+export function setSkillEnabled(id: string, enabled: boolean): boolean {
+  if (RESERVED_IDS.has(id)) return true // 内置恒启用，不入 enabled 映射：没有要写的东西
+  if (!isSafeId(id)) return false // 非法 id 不接受设置，调用方该报错
   const map = enabledMap()
   map[id] = enabled === true
-  writeEnabledMap(map)
+  return writeEnabledMap(map)
 }
 
 // ── 运行期（chat.ts 直接调用）───────────────────────────────────────────────
@@ -759,15 +771,13 @@ export function registerSkillsIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle('skills:list', (): SkillRecord[] => listSkills())
   ipcMain.handle('skills:get', (_e, id: string): SkillRecord | null => getSkill(id))
   ipcMain.handle('skills:remove', (_e, id: string): Promise<{ ok: boolean }> => deleteSkill(id))
-  ipcMain.handle('skills:set-enabled', (_e, id: string, enabled: boolean): { ok: true } => {
-    setSkillEnabled(id, Boolean(enabled))
-    return { ok: true }
+  ipcMain.handle('skills:set-enabled', (_e, id: string, enabled: boolean): { ok: boolean } => {
+    return { ok: setSkillEnabled(id, Boolean(enabled)) }
   })
   // 可用角色：null = 全部角色。内置技能恒对全部角色开放，不接受设置。
   ipcMain.handle('skills:set-roles', (_e, id: string, roles: string[] | null): { ok: boolean } => {
     if (RESERVED_IDS.has(id) || !isSafeId(id)) return { ok: false }
-    setRoles('skills', id, Array.isArray(roles) ? roles : null)
-    return { ok: true }
+    return { ok: setRoles('skills', id, Array.isArray(roles) ? roles : null) }
   })
   // 上传导入：原生对话框选文件（模态） → importSkillFromFile。取消返回 { ok:false, error:'cancelled' }。
   ipcMain.handle('skills:import', async (): Promise<SkillImportResult> => {

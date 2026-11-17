@@ -160,10 +160,17 @@ function connectionSig(s: StoredServer): string {
 
 // ── 启用态（config.json 的 mcp.enabled）──────────────────────────────────────
 
+/**
+ * 启用态映射的**副本**。
+ *
+ * ⚠️ 必须复制，不能返回内存里的那个对象：调用方普遍是「取出来 → 改一项 → 整段写回」，
+ * 直接改原对象会在 `setConfig` **之前**就污染内存态，导致写盘失败时无从回滚
+ * （`setConfig` 记的「旧值」已经是改后的样子）。实测：IPC 已返回 false，`isEnabled` 仍读回 true。
+ */
 function enabledMap(): Record<string, boolean> {
   const mcp = getConfig().mcp
   const enabled = (mcp as { enabled?: unknown })?.enabled
-  if (enabled && typeof enabled === 'object') return enabled as Record<string, boolean>
+  if (enabled && typeof enabled === 'object') return { ...(enabled as Record<string, boolean>) }
   return {}
 }
 
@@ -189,12 +196,18 @@ function writeEnabled(id: string, enabled: boolean): boolean {
   return writeEnabledMap(map)
 }
 
-/** 用户显式启停：落盘并恒通知对账（即便值未变，也当作「请按此状态兑现」）。返回是否真的写进磁盘。 */
+/**
+ * 用户显式启停：落盘并通知对账。返回是否真的写进磁盘。
+ *
+ * ⚠️ 写盘失败时**不通知**：`setConfig` 已经把内存态回滚成旧值，此时再 `changeListener(id, {enabled:true})`
+ * 等于告诉连接层「用户要开」而内存里是「关」——界面刷新一次又从内存读回关，连接却已按开去兑现，
+ * 正是本轮要消灭的那种不一致（验收实测：磁盘未变而内存已变）。
+ */
 export function setEnabled(id: string, enabled: boolean): boolean {
   if (!isSafeId(id)) return false
   const wrote = writeEnabled(id, enabled)
-  // 写盘失败也要通知：内存态已是用户要的状态，此刻兑现连接才与界面一致（下次启动则依赖磁盘）
-  changeListener(id, { enabled: true, connection: false })
+  // 值没变也要通知（「请按此状态兑现」），但只在真的写进磁盘时
+  if (wrote) changeListener(id, { enabled: enabled === true, connection: false })
   return wrote
 }
 
@@ -280,21 +293,31 @@ export function upsertServerChecked(input: McpServerInput): McpWriteResult {
   return { server: { id, ...rec }, ok }
 }
 
-/** 删除一个服务：清 mcp.json 条目、启用态、可用角色、以及其全部密钥（`mcp:<id>:` 前缀）。 */
-export function deleteServer(id: string): void {
-  if (!isSafeId(id)) return
+/**
+ * 删除一个服务：清 mcp.json 条目、启用态、可用角色、以及其全部密钥（`mcp:<id>:` 前缀）。
+ *
+ * 返回是否**关键的两处配置都写进了磁盘**（mcp.json 与 config.json 的启用态）。
+ * 以前是 void，`mcp:remove` 只能硬编码 `{ok:true}`：条目删掉了但盘上还在，重启后又冒出来
+ * ——与 `mcp:set-enabled` 同一个形状（本轮把 writeAll / writeEnabledMap / setRoles 改成 boolean 时漏掉的调用方）。
+ *
+ * 「本来就没有这条」不算失败：那是幂等的删除，没什么可写。
+ */
+export function deleteServer(id: string): boolean {
+  if (!isSafeId(id)) return false
+  let ok = true
   const servers = readAll()
   if (id in servers) {
     delete servers[id]
-    writeAll(servers)
+    if (!writeAll(servers)) ok = false
   }
   const map = enabledMap()
   if (id in map) {
     delete map[id]
-    writeEnabledMap(map)
+    if (!writeEnabledMap(map)) ok = false
   }
-  setRoles('mcp', id, null)
+  if (!setRoles('mcp', id, null)) ok = false
   void deleteSecretsByPrefix(`mcp:${id}:`)
+  return ok
 }
 
 // ── 连接期：把 `{secretRef}` 解密为可用的明文 env / headers（仅主进程内使用）──────

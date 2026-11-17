@@ -231,6 +231,15 @@ export function applyHeldPatches(held: Array<Record<string, unknown>>): HeldPatc
  * 供 skills.ts / personas.ts 等服务在进程内维护启用态（config.json 内的 skills/personas 段），
  * 与渲染层的 `config:set` IPC 走同一份内存态 + 持久化路径。
  *
+ * ⚠️ **写盘失败会回滚内存**。以前是先改内存再 `persist()`，失败就只返回 false 而内存保持新值：
+ * 于是「界面显示开着、磁盘是关的」，用户重启后发现开关变回去了，中间零提示。
+ * 只把 boolean 透给界面（`mcp:set-enabled` / `skills:set-enabled`）**不够**——界面刷新一次就会按内存态
+ * 又画成「已开启」，那比不报错更糟。所以回滚点必须在这里，而不是散在每个调用方：
+ * 调用方拿到 false 时，内存态已经与磁盘一致（都是旧值），界面拿到 false 去提示就说得通。
+ *
+ * 回滚只针对**本次 `patch` 覆盖到的键**：记下旧值（含「本来没有这个键」）再整体恢复，
+ * 不影响并发的其它键写入。
+ *
  * ⚠️ **这里是替换语义，不做 models 合并**（合并只在 `config:set` / `applyHeldPatches` 那条「渲染层快照写回」
  * 路径上）。`mergeProviders` 写的是自己算好的完整合并结果，若再被「保留未知 id」过滤一遍，用户删掉的服务商
  * 就会在下次导入时复活。见 `mergeModelsPatch` 的说明。
@@ -242,11 +251,28 @@ export function applyHeldPatches(held: Array<Record<string, unknown>>): HeldPatc
 export function setConfig(patch: Record<string, unknown>): boolean {
   ensureLoaded()
   if (!patch || typeof patch !== 'object') return true
+  /*
+   * 记旧值，键不存在时用 `undefined` 表示「本来没有」。
+   *
+   * ⚠️ 必须**深拷贝**：调用方（`writeEnabled` / `writeRolesMap`）是先 `enabledMap()` 拿到内存里的
+   * **同一个对象引用**、改完再交给这里，浅存引用等于存的就是改后的状态，回滚等于没回滚。
+   * 实测踩过：IPC 已如实返回 false，而 `isEnabled` 仍读回 true。
+   */
+  const before = new Map<string, unknown>()
+  for (const k of Object.keys(patch)) {
+    before.set(k, Object.prototype.hasOwnProperty.call(config, k) ? structuredClone(config[k]) : undefined)
+  }
   for (const [k, v] of Object.entries(patch)) {
     if (v === undefined) delete config[k]
     else config[k] = v
   }
-  return persist()
+  if (persist()) return true
+  // 写盘失败：把内存恢复成写之前的样貌，让「内存态」与「磁盘」一致（见上方说明）
+  for (const [k, v] of before) {
+    if (v === undefined) delete config[k]
+    else config[k] = v
+  }
+  return false
 }
 
 /* ───────────── 配置变更广播 ───────────── */

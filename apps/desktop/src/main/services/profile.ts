@@ -40,16 +40,18 @@ export function getProfile(): UserProfile {
   }
 }
 
-function setProfileAvatar(spec: string): void {
+/** 写头像配置。返回是否**真的写进磁盘**（`setConfig` 失败时会回滚内存，见那里的注释）。 */
+function setProfileAvatar(spec: string): boolean {
   const avatar = spec.length > AVATAR_SPEC_MAX ? '' : spec
-  setConfig({ profile: { ...profileSection(), avatar } })
+  return setConfig({ profile: { ...profileSection(), avatar } })
 }
 
 export function registerProfileIpc(): void {
   ipcMain.handle('profile:get', (): UserProfile => getProfile())
-  ipcMain.handle('profile:set-avatar', (_e, spec: string): { ok: true } => {
-    setProfileAvatar(String(spec ?? ''))
-    return { ok: true }
+  // 返回值必须透出：`setConfig` 会告诉调用方「磁盘上到底改没改」。丢弃它就是
+  // 「界面显示新头像、重启后变回旧头像」，与 mcp:set-enabled 同一形状（第 11 处那批的遗漏）。
+  ipcMain.handle('profile:set-avatar', (_e, spec: string): { ok: boolean } => {
+    return { ok: setProfileAvatar(String(spec ?? '')) }
   })
   // 空串 = 清除图片；否则返回读回的 data URI（校验 / 写入失败为空串）。
   ipcMain.handle('profile:set-avatar-image', (_e, dataUri: string): string => {

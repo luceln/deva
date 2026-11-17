@@ -642,22 +642,24 @@ export function registerMcpIpc(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle('mcp:list', (): McpServerView[] => listServers())
   ipcMain.handle('mcp:get', (_e, id: string): McpServerConfig | null => getServerConfig(id))
   ipcMain.handle('mcp:upsert', (_e, input: McpServerInput): McpServerConfig => upsertServer(input))
-  ipcMain.handle('mcp:remove', (_e, id: string): { ok: true } => {
+  ipcMain.handle('mcp:remove', (_e, id: string): { ok: boolean } => {
     forget(id)
-    deleteServer(id)
-    return { ok: true }
+    // 返回值必须透出：删掉内存里的条目但没写进磁盘，重启后它会回来（同 set-enabled 的教训）
+    return { ok: deleteServer(id) }
   })
   // 可用角色：null = 全部角色。只影响哪些角色的工具表里有它，不触发重连。
+  // 返回值必须透出：`setRoles` 现在回答「有没有真的写进磁盘」，丢弃它就是「勾选生效、重启回滚」。
   ipcMain.handle('mcp:set-roles', (_e, id: string, roles: string[] | null): { ok: boolean } => {
     if (!getServerConfig(id)) return { ok: false }
-    setRoles('mcp', id, Array.isArray(roles) ? roles : null)
+    const ok = setRoles('mcp', id, Array.isArray(roles) ? roles : null)
     broadcast(id)
-    return { ok: true }
+    return { ok }
   })
   // 启停即兑现：setEnabled 经配置变更通知触发对账（连上 / 断开）。
-  ipcMain.handle('mcp:set-enabled', (_e, id: string, enabled: boolean): { ok: true } => {
-    setEnabled(id, Boolean(enabled))
-    return { ok: true }
+  // 返回值必须透出：`setEnabled` 明确回答「有没有真的写进磁盘」，这里丢弃它就等于
+  // 「界面变绿 → 重启后变回关」。这是 `setEnabled` 从 void 改成 boolean 之后漏掉的调用方。
+  ipcMain.handle('mcp:set-enabled', (_e, id: string, enabled: boolean): { ok: boolean } => {
+    return { ok: setEnabled(id, Boolean(enabled)) }
   })
   // 重试 = 按当前配置重新对账一次（失败后的手动入口；未启用时只会落到「未启用」，不会连上）。
   ipcMain.handle('mcp:retry', async (_e, id: string): Promise<McpServerView | null> => {

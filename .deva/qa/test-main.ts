@@ -1093,6 +1093,75 @@ async function scenarioPersonas(): Promise<void> {
 
 /* ═════════════════════════════ 入口 ═════════════════════════════ */
 
+/**
+ * P1：`mcp:set-enabled` / `skills:set-enabled` / `mcp:set-roles` 不许丢弃写盘结果。
+ *
+ * 以前 `setEnabled` / `setSkillEnabled` 从 void 改成 boolean 之后，这几个 IPC 仍硬编码 `{ok: true}`：
+ * 用户点开关 → 界面变绿 → 重启后变回关，中间零提示（验收实测 serviceReturn:false / ipcReturn:{ok:true}）。
+ *
+ * 本场景造「config.json 写不进去」，验两件事：
+ *  ① IPC 如实返回 ok:false；
+ *  ② **内存也回滚了**——否则界面刷新一次又会从内存读到「已开启」，比不报错更糟。
+ */
+async function scenarioMcpIpcWriteResult(): Promise<void> {
+  fs.mkdirSync(DST, { recursive: true })
+  // 先在正常状态下把服务写进目标 mcp.json（让 set-enabled 有对象可改）
+  writeJson(path.join(DST, 'mcp.json'), {
+    mcpServers: { s1: { name: 'S1', transport: 'http', url: 'https://a.example/mcp' } }
+  })
+  writeJson(path.join(DST, 'config.json'), { models: { providers: [] }, mcp: { enabled: { s1: false } } })
+
+  const cfg = await import('../../apps/desktop/src/main/services/config')
+  const mcpCfg = await import('../../apps/desktop/src/main/services/mcp-config')
+  const mcpSvc = await import('../../apps/desktop/src/main/services/mcp')
+
+  // 注册 MCP 的 IPC（拿真实 handler，不自己模拟）
+  mcpSvc.registerMcpIpc(() => null)
+  const electronStub = (await import('electron')) as any
+  const handlers = electronStub.__test?.ipcHandlers as Map<string, (...a: any[]) => any> | undefined
+  if (!handlers || !handlers.get('mcp:set-enabled')) {
+    fail('P1：拿不到 mcp:set-enabled handler（IPC 桩未记录 handler）', '')
+    return
+  }
+
+  // ① 正常路径：能写盘时返回 ok:true，且磁盘 + 内存都变了
+  const okRes = handlers.get('mcp:set-enabled')!(null, 's1', true)
+  info('正常写盘的 IPC 返回', JSON.stringify(okRes))
+  eq('P1：正常写盘时 IPC 返回 ok:true', okRes.ok, true)
+  eq('P1：正常写盘后内存态为 true', mcpCfg.isEnabled('s1'), true)
+
+  // 先关回去，作为「失败前的已知状态」
+  handlers.get('mcp:set-enabled')!(null, 's1', false)
+  eq('P1：前置（关掉）', mcpCfg.isEnabled('s1'), false)
+
+  // ② 造写盘失败：把 config.json 换成同名目录 → writeFileAtomic 必失败
+  fs.rmSync(path.join(DST, 'config.json'), { force: true })
+  fs.mkdirSync(path.join(DST, 'config.json'))
+
+  const failRes = handlers.get('mcp:set-enabled')!(null, 's1', true)
+  info('写盘失败时的 IPC 返回', JSON.stringify(failRes))
+  eq('P1：写盘失败 → IPC 返回 ok:false（以前恒 true）', failRes.ok, false)
+
+  // ③ 内存必须回滚：否则界面刷新一次又会画成「已开启」
+  eq(
+    'P1：写盘失败 → 内存态回滚为 false（不是「磁盘关、内存开」）',
+    mcpCfg.isEnabled('s1'),
+    false
+  )
+
+  // ④ set-roles 同一条链：写盘失败也要透出 false
+  const rolesRes = handlers.get('mcp:set-roles')!(null, 's1', ['general'])
+  info('set-roles 写盘失败时的返回', JSON.stringify(rolesRes))
+  eq('P1：mcp:set-roles 写盘失败 → ok:false', rolesRes.ok, false)
+
+  // ⑤ 恢复可写状态后一切照常（证明失败路径没把配置写死）
+  fs.rmSync(path.join(DST, 'config.json'), { recursive: true, force: true })
+  writeJson(path.join(DST, 'config.json'), { models: { providers: [] }, mcp: { enabled: { s1: false } } })
+  cfg.setConfig({ mcp: { enabled: { s1: false } } })
+  const ok2 = handlers.get('mcp:set-enabled')!(null, 's1', true)
+  eq('P1：恢复可写后仍能成功（失败路径没写死状态）', [ok2.ok, mcpCfg.isEnabled('s1')], [true, true])
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1103,6 +1172,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   mcp: scenarioMcp,
   mcpsrc: scenarioMcpSourceUnreadable,
   mcptgt: scenarioMcpTargetBlocked,
+  mcpipc: scenarioMcpIpcWriteResult,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,
