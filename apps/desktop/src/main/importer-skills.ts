@@ -1,8 +1,9 @@
-import { cpSync, lstatSync, mkdirSync, readdirSync, readlinkSync, statSync, symlinkSync } from 'fs'
+import { cpSync, lstatSync, mkdirSync, readlinkSync, statSync, symlinkSync } from 'fs'
 import { join, resolve } from 'path'
 import { getDevaHome } from './services/config'
 import { BUILTIN_SKILL_IDS } from './services/skills'
-import type { StepStat } from '../shared/import-protocol'
+import { readSourceDir, SOURCE_DIR_UNREADABLE } from './importer-source-dir'
+import type { Failure, StepStat } from '../shared/import-protocol'
 
 /**
  * 导入第 ⑤ 步：技能。
@@ -52,34 +53,61 @@ function makeLink(target: string, dest: string): LinkKind | null {
 
 /**
  * 把原版 skills/ 下的条目搬到 DevaPlus：链接按链接重建，实体目录才递归复制。
- * 返回 linked（重建的链接）/ copied（复制的实体）/ skipped（已存在或失败）/ builtin（应用自带、不计入用户统计）。
+ * 返回 linked（重建的链接）/ copied（复制的实体）/ skipped（已存在或名字不可用）/ builtin（应用自带）
+ * / failed（真失败，如无权限建链接、磁盘满）。
+ *
+ * 失败与跳过分开：`skipped` 里是「已有同名」或「名字不能当 id」这类**正常不该搬**的情形；
+ * 复制/建链出错必须进 `failed`，否则界面显示「跳过 1」，用户会以为是本来就有。
  */
 export function importSkills(
   srcHome: string
-): StepStat & { builtin: string[]; linked: string[]; kinds: Record<string, LinkKind> } {
-  const stat: StepStat & { builtin: string[]; linked: string[]; kinds: Record<string, LinkKind> } = {
+): StepStat & {
+  builtin: string[]
+  failed: Failure[]
+  linked: string[]
+  kinds: Record<string, LinkKind>
+} {
+  const stat: StepStat & {
+    builtin: string[]
+    failed: Failure[]
+    linked: string[]
+    kinds: Record<string, LinkKind>
+  } = {
     copied: [],
     skipped: [],
     builtin: [],
+    failed: [],
     linked: [],
     kinds: {}
   }
   const srcDir = join(srcHome, 'skills')
   const dstDir = join(getDevaHome(), 'skills')
-  let names: string[]
-  try {
-    names = readdirSync(srcDir)
-  } catch {
-    return stat // 原版没有 skills 目录
+  /*
+   * 源侧静默第 4 处，注释原文「// 原版没有 skills 目录」。同一个病灶：`skills` 被同名文件占住
+   * （ENOTDIR）/ ACL 改坏（EACCES）/ 被杀毒锁住（EBUSY）都会走到这里，而源里的技能还在。
+   * 当成「没有」→ 报告「技能 0 个、ok:true」，用户以为原版没装过自定义技能。
+   */
+  const srcList = readSourceDir(srcDir)
+  if (srcList.kind === 'unreadable') {
+    stat.failed.push({ step: 'skills', id: '<skills>', reason: SOURCE_DIR_UNREADABLE })
+    return stat
   }
+  if (srcList.kind === 'absent') return stat // 真的没有这个目录：ENOENT
+  const names = srcList.names
   try {
     mkdirSync(dstDir, { recursive: true })
-  } catch {
+  } catch (e) {
+    // 建不出目标目录：记失败，别让报告看起来「本来就没有技能」
+    stat.failed.push({ step: 'skills', id: '<dir>', reason: (e as Error)?.message ?? String(e) })
     return stat
   }
 
   for (const name of names) {
-    if (!isSafeId(name)) continue
+    if (!isSafeId(name)) {
+      // 非法名条目（空格等）以前被静默丢弃；记进 skipped，用户至少能在明细里看到它没被搬
+      stat.skipped.push(name)
+      continue
+    }
     // 内置元技能（create-skill / create-agent / create-mcp）是代码合成、永不落盘；原版 skills/ 里万一有同名残留目录
     // 也不算用户技能（listSkills 同样会忽略它），归入 builtin 而不是「跳过」。
     const builtin = BUILTIN_SKILL_IDS.includes(name)
@@ -101,17 +129,21 @@ export function importSkills(
           stat.linked.push(name)
           stat.kinds[name] = kind
         } else {
-          // 建不了链接就**不搬**：复制实体等于造一份会漂移的副本，比少一个技能（日志里写着）更难查
-          if (!builtin) stat.skipped.push(name)
+          // 建不了链接就**不搬**：复制实体等于造一份会漂移的副本，比少一个技能（日志里写着）更难查。
+          // 这是真失败（EPERM 等），不是「跳过」。
+          stat.failed.push({ step: 'skills', id: name, reason: 'link-failed' })
         }
       } else if (st.isDirectory()) {
         // 不是链接的实体目录：原样复制（原版里若用户直接把技能放在这，那就是真源本身）
         cpSync(from, to, { recursive: true })
         if (!builtin) stat.copied.push(name)
         stat.kinds[name] = 'copied'
+      } else {
+        // 既不是链接也不是目录（散文件），listSkills 不会认它；记 skipped 而不是悄悄丢掉
+        if (!builtin) stat.skipped.push(name)
       }
-    } catch {
-      if (!builtin && !stat.copied.includes(name) && !stat.skipped.includes(name)) stat.skipped.push(name)
+    } catch (e) {
+      stat.failed.push({ step: 'skills', id: name, reason: (e as Error)?.message ?? String(e) })
     }
   }
   return stat
