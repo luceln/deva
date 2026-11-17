@@ -20,7 +20,7 @@ const TMP_ROOT = path.join(os.tmpdir(), 'deva-qa')
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
 /**
  * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
@@ -61,6 +61,14 @@ async function build() {
   console.log('bundle ok → dist/test.cjs')
 }
 
+/** 场景名 → 实际场景 + 该场景需要的环境变量（同一段代码在不同环境下各跑一遍）。 */
+const ENV_OF = {
+  keydecrypt: { scenario: 'keytri', env: { TEST_DECRYPT_FAILS: '1' } },
+  keynoenc: { scenario: 'keytri', env: { TEST_NO_ENCRYPTION: '1' } },
+  cfgcorrupt: { scenario: 'cfgcorrupt', env: { P13_KIND: 'corrupt' } },
+  cfgabsent: { scenario: 'cfgcorrupt', env: { P13_KIND: 'absent' } }
+}
+
 function runOne(name) {
   return new Promise((resolve) => {
     const root = path.join(TMP_ROOT, `${name}-${Date.now()}`)
@@ -72,8 +80,10 @@ function runOne(name) {
     fs.mkdirSync(appdata, { recursive: true })
     fs.mkdirSync(scratch, { recursive: true })
 
+    const spec = ENV_OF[name] ?? { scenario: name, env: {} }
     const env = {
       ...process.env,
+      ...spec.env,
       TEST_HOME: home,
       TEST_APPDATA: appdata,
       TEST_TMP: root,
@@ -85,7 +95,7 @@ function runOne(name) {
       QA_SCRATCH: scratch
     }
     const label = SEEDED && name === 'full' ? 'full(seeded)' : name
-    const child = spawn(process.execPath, [path.join(DIST, 'test.cjs'), name], {
+    const child = spawn(process.execPath, [path.join(DIST, 'test.cjs'), spec.scenario], {
       env,
       stdio: ['ignore', 'pipe', 'pipe']
     })
