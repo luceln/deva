@@ -839,6 +839,8 @@ const zhCN: MessageTree = {
         sourceMemoryUnreadable: '原版记忆文件读不出来（可能被占用），这个范围下的记忆没有导入，请稍后重试',
         sourceMemoryCorrupt: '原版记忆文件内容损坏、解析不了，这个范围下的记忆没有导入，请检查 memory.json',
         sourceDirUnreadable: '原版这个目录读不出来，里面的数据一个都没有导入。请检查权限，或关掉占用它的程序后重新导入',
+        sourceFileUnreadable: '原版这个文件读不出来（可能被占用），这一条没有导入。请稍后重新导入一次',
+        sourceNotAFile: '原版这个位置不是普通文件（可能是同名文件夹占了位置），这一条搬不了。请检查原版数据',
         secretsWriteFailed: '密钥没能写入本地密钥文件（权限或磁盘异常）',
         avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用'
       },
@@ -2448,6 +2450,10 @@ const en: MessageTree = {
           'The upstream memory file is corrupt and couldn’t be parsed — memories in this scope were not imported. Check memory.json',
         sourceDirUnreadable:
           'This upstream folder can’t be read, so none of its data was imported. Check permissions or close the app using it, then import again',
+        sourceFileUnreadable:
+          'This upstream file can’t be read (it may be in use) — this item was not imported. Try importing again later',
+        sourceNotAFile:
+          'This upstream entry is not a regular file (a folder with the same name may be in the way) — it can’t be imported. Check the upstream data',
         secretsWriteFailed: 'The key couldn’t be written to the local secrets file — check permissions or disk space',
         avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable'
       },

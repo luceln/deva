@@ -115,8 +115,14 @@ export function importSkills(
     const from = join(srcDir, name)
     const to = join(dstDir, name)
     try {
-      // 目标已有同名条目：不覆盖（用户可能自己装了同名技能）
-      if (lexists(to)) {
+      // 目标已有同名条目：不覆盖（用户可能自己装了同名技能）。读不出来时也不能覆盖——
+      // 那可能是用户装的同一个技能，只是此刻打不开（见 lexists 的说明）。
+      const at = lexists(to)
+      if (at === 'unreadable') {
+        if (!builtin) stat.failed.push({ step: 'skills', id: name, reason: 'target-unreadable' })
+        continue
+      }
+      if (at === 'present') {
         if (!builtin) stat.skipped.push(name)
         continue
       }
@@ -139,7 +145,13 @@ export function importSkills(
         if (!builtin) stat.copied.push(name)
         stat.kinds[name] = 'copied'
       } else {
-        // 既不是链接也不是目录（散文件），listSkills 不会认它；记 skipped 而不是悄悄丢掉
+        /*
+         * 既不是链接也不是目录（散文件 / socket 等）。`listSkills` 不会认它，所以**搬过去也用不上**。
+         *
+         * 记 skipped 而不是 failed：这不是「读不出来」，而是「读了、确认它不是技能」——与我们搬不动
+         * 的东西无关，纯属源里有一个非技能条目。用户看到「跳过 1」在这里是对的语义（本来就不该搬）。
+         * 与 `mergeDir` 里那个 else（记 failed）不同：那边的条目本该是附件数据文件，搬不了就是真丢了。
+         */
         if (!builtin) stat.skipped.push(name)
       }
     } catch (e) {
@@ -149,12 +161,23 @@ export function importSkills(
   return stat
 }
 
-/** 不跟随链接的存在性判断（existsSync 对断链返回 false，会误判成"不存在"从而覆盖既有链接）。 */
-function lexists(p: string): boolean {
+/**
+ * 不跟随链接的存在性判断（`existsSync` 对断链返回 false，会误判成「不存在」从而覆盖既有链接）。
+ *
+ * ⚠️ 这是「读不出 ≠ 没有」的**第 9 处**，也是本轮唯一漏掉的：它返回 `boolean`，把三种情况压成两种——
+ *  1. 真的没有（ENOENT）→ false，可以写；
+ *  2. 有，但读不出来（EPERM / EBUSY / EACCES）→ 也 false → **调用方会去建链接，覆盖掉用户已装的同名技能**。
+ * 第 2 种在 Windows 上很常见（目录被索引服务占用 / ACL 改坏），而技能目录是用户手装的东西。
+ *
+ * 改成三态，由调用方分开处置。`absent` 才允许写。
+ */
+type Lexists = 'absent' | 'present' | 'unreadable'
+
+function lexists(p: string): Lexists {
   try {
     lstatSync(p)
-    return true
-  } catch {
-    return false
+    return 'present'
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'absent' : 'unreadable'
   }
 }

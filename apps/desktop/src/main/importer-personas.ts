@@ -1,10 +1,15 @@
-import { copyFileSync, mkdirSync, statSync } from 'fs'
+import { copyFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { enablePersonas } from './services/personas'
 import { DEFAULT_PERSONAS } from './services/default-personas'
 import { inspectTarget } from './importer-target'
-import { readSourceDir, SOURCE_DIR_UNREADABLE } from './importer-source-dir'
+import {
+  inspectSourceFile,
+  readSourceDir,
+  sourceFileFailureReason,
+  SOURCE_DIR_UNREADABLE
+} from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
 /**
@@ -98,10 +103,28 @@ export function importPersonas(srcHome: string): PersonaImportStat {
     const builtin = DEFAULT_PERSONA_IDS.has(id)
     if (builtin) stat.builtin.push(id)
     try {
-      // silent-ok: statSync 抛错会被本函数外层 catch 接住并记 failed（原始消息）——有通道，只是通道在几十行之外，扫描窗口看不到
-      if (!statSync(from).isFile()) {
-        // 目录冒充 .md（`<dir>.md`）：同样搬不了，记进 skipped 让用户看得到
-        if (!builtin) stat.skipped.push(name)
+      /*
+       * 源侧单文件四态（同 bug 在**文件级**的形状，见 `inspectSourceFile` 的注释）。
+       *
+       * 以前是 `if (!statSync(from).isFile()) { skipped.push(name); continue }`：`isFile()` 为 false
+       * 既有「源数据坏了（目录冒充 .md）」也有「读不出来（EPERM/EBUSY）」，全被压成「跳过」。
+       * 验收实测：`ludi-afacec76.md` 换成同名目录 → `ok:true`、`failures:[]`、`skipped:["ludi-afacec76.md"]`，
+       * 目标角色 8→7，用户看不出是没导进来。
+       *
+       *  - `ok`       ：是普通文件，照常往下走（复制 / 四态判目标）；
+       *  - `absent`   ：列举之后被删了（TOCTOU）→ 跳过合理，它确实没了；
+       *  - `not-file` ：源里那个位置是个目录 → **源数据异常**，记 failed（不是 skipped：skipped 的意思是
+       *                 「目标已有 / 不该搬」，而这里源本身坏了，用户必须知道这份数据不会进来）；
+       *  - `unreadable`：读不出来 → **不知道**是什么，记 failed（瞬时占用过后重导即可补上）。
+       */
+      const src = inspectSourceFile(from)
+      if (src.kind !== 'ok') {
+        if (src.kind === 'absent') {
+          if (!builtin) stat.skipped.push(name)
+          continue
+        }
+        const reason = sourceFileFailureReason(src)
+        if (reason) stat.failed.push({ step: 'personas', id: name, reason })
         continue
       }
       /*

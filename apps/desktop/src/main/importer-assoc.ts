@@ -238,6 +238,17 @@ function mergeDir(srcDir: string, dstDir: string, kind: string, failures: Failur
         mkdirSync(dstDir, { recursive: true })
         copyFileFresh(from, to)
         if (depth === 0) created++
+      } else {
+        /*
+         * 既不是目录也不是普通文件（socket / FIFO / 设备节点…）。
+         *
+         * ⚠️ 以前没有这个 else：这类条目被**完全静默丢掉**——不进 created、不进 failures、也不进任何
+         * skipped 桶，报告里连字数都看不见。这与「读不出当成没有」是同一个病（都属于 `isFile()` /
+         * `isDirectory()` 两分支穷举时漏掉第三种形态），所以在这里如实上报而不是留个无声的洞。
+         *
+         * 记 failed 而不是 skipped：skipped 的含义是「目标已有 / 不该搬」，而这是源里有、我们搬不了。
+         */
+        failures.push({ step: kind, id: name, reason: 'source-not-a-file' })
       }
     } catch (e) {
       // 单条失败不影响其它，但必须上报：否则「导入完成」会盖住磁盘满/权限问题

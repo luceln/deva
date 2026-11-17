@@ -67,6 +67,11 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   // 源侧目录读不出来（同名文件占位 / ACL 改坏 / 被杀毒锁住）：那一类数据一个都没导入。
   // 统一一个码、目录身份放 id 里，界面文案表不随导入步骤增长。
   'source-dir-unreadable': 'settings.import.reason.sourceDirUnreadable',
+  // 源侧**单个文件**读不出来 / 那个位置不是普通文件（目录冒充 .md 等）。与上面目录级那条分开：
+  // 目录读不出是「整类都没导」，单文件读不出只影响这一条。以前这两种都记成 skipped，
+  // 用户看到「跳过 1」会以为本来就有（验收实测：角色目录冒充 .md → ok:true、目标少一个角色）。
+  'source-file-unreadable': 'settings.import.reason.sourceFileUnreadable',
+  'source-not-a-file': 'settings.import.reason.sourceNotAFile',
   // 角色导进来了，只有头像没复制成功。要让用户知道「角色能用，只是没头像」。
   'avatar-copy-failed': 'settings.import.reason.avatarCopyFailed',
   // 记忆文件读不出来 → 主进程拒绝写入（避免「读失败当成空」把全量覆盖掉）。复用 profile 的现成文案，

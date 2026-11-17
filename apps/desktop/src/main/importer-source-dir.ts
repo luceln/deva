@@ -1,4 +1,4 @@
-import { type Dirent, readdirSync } from 'fs'
+import { type Dirent, readdirSync, statSync } from 'fs'
 
 /**
  * 读源目录列表，三态返回。
@@ -66,3 +66,71 @@ export function readSourceDir(dir: string, withTypes?: true): DirRead {
 
 /** 统一的源目录读失败码：目录身份放 id 里，界面只需一条文案。 */
 export const SOURCE_DIR_UNREADABLE = 'source-dir-unreadable'
+
+/**
+ * 单个源**文件**的实况。四态，比目录版多一态 `not-file`。
+ *
+ * ## 为什么需要它（目录版的第 9 个复制品，形状从目录换到了单文件）
+ *
+ * 角色导入曾是：
+ *
+ * ```ts
+ * if (!statSync(from).isFile()) { stat.skipped.push(name); continue }
+ * ```
+ *
+ * `isFile()` 返回 false 有两种完全不同的情况：
+ *  1. **它确实不是普通文件**（原版里 `ludi.md` 被换成了同名目录）——源数据坏了；
+ *  2. **读不出来**（EPERM / EBUSY / EACCES）——不知道它是什么。
+ * 代码把两者压进 `skipped`，验收实测：把 `ludi-afacec76.md` 换成同名目录 → `ok:true`、
+ * `failures:[]`、`personaSkipped:["ludi-afacec76.md"]`，目标角色 8→7。
+ * 用户看到「跳过 1 个」只会理解为「本来就有，不用导」——这正是本项目最坏的那类失效。
+ *
+ * ## 三种失败分开报的理由
+ *
+ *  - `absent`：ENOENT。条目名是刚 readdir 出来的，理论上不该出现（TOCTOU：列举后被删）；
+ *    真出现时按「没有」跳过是合理的——它确实没了。
+ *  - `not-file`：存在但不是普通文件。**源数据异常**（角色目录只该有 `.md` 文件），记 failed。
+ *    为什么不记 skipped：skipped 的语义是「目标已有 / 不该搬」，而这里源本身坏了，用户需要知道
+ *    那份数据不会进来；把它说成「跳过」等于承认「原版就是这样」。
+ *  - `unreadable`：读不出来。**不知道**是什么，同样记 failed——一次瞬时占用过后重导即可补上。
+ *
+ * 用 `statSync`（跟随链接）而不是 `lstatSync`：角色文件若是指向真文件的链接，原行为是能导的，
+ * 换 lstat 会把它判成 `not-file` 从而**破坏**一个原本可用的场景。
+ */
+export type SourceFileStat =
+  | { kind: 'absent' }
+  | { kind: 'ok'; size: number }
+  /** 存在但不是普通文件（目录 / 设备 / socket…）：源数据异常。 */
+  | { kind: 'not-file' }
+  /** 读不出来（EPERM / EBUSY / EACCES / ELOOP）：不知道是什么。 */
+  | { kind: 'unreadable' }
+
+/** 源文件读不出来。目录用 `SOURCE_DIR_UNREADABLE`，两者分开：单文件失败不影响同目录其它文件。 */
+export const SOURCE_FILE_UNREADABLE = 'source-file-unreadable'
+/** 源里那个名字下不是普通文件（例如 `.md` 位置被同名目录占住）：源数据异常，不是「跳过」。 */
+export const SOURCE_NOT_A_FILE = 'source-not-a-file'
+
+/** 探测一个源文件。**不修改任何东西**，也不读内容。 */
+export function inspectSourceFile(file: string): SourceFileStat {
+  let st
+  try {
+    st = statSync(file)
+  } catch (e) {
+    // 只有 ENOENT 才是「真的没有了」；其余（EPERM / EBUSY / EACCES / ELOOP）是「读不出来」
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { kind: 'absent' } : { kind: 'unreadable' }
+  }
+  if (!st.isFile()) return { kind: 'not-file' }
+  return { kind: 'ok', size: st.size }
+}
+
+/**
+ * 把 `inspectSourceFile` 的结果翻成失败原因码（`ok` / `absent` 返回 null，调用方自行跳过）。
+ *
+ * 集中在一处是为了让**所有**调用方对同一种形态给同一个码：上次 `copyAvatar` 与另外 7 处各写一遍，
+ * 结果漏了一处没人发现。
+ */
+export function sourceFileFailureReason(s: SourceFileStat): string | null {
+  if (s.kind === 'unreadable') return SOURCE_FILE_UNREADABLE
+  if (s.kind === 'not-file') return SOURCE_NOT_A_FILE
+  return null
+}
