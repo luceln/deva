@@ -897,6 +897,7 @@ const zhCN: MessageTree = {
       idWholeRun: '整轮导入',
       idDir: '目标目录',
       idConfig: '配置文件',
+      idUnsafeId: '不能用作配置键的 id：',
       assoc: {
         media: '图片附件',
         checkpoints: '回滚检查点',
@@ -2472,6 +2473,8 @@ const en: MessageTree = {
           'The MCP server was imported, but the upstream config can’t be read, so whether it was on is unknown — enable it on the MCP page if you need it',
         mcpWriteFailed:
           'The MCP config couldn’t be written to disk (permissions or disk full) — this entry will be lost after a restart',
+        mcpUnsafeId:
+          'This MCP server’s id can’t be used as a config key (it contains a colon or separator), so it wasn’t imported. Rename it upstream and import again',
         sourceConfigUnreadable:
           'The upstream config file can’t be read (it may be in use) — no providers were imported. Try again later',
         sourceConfigCorrupt:
@@ -2525,6 +2528,7 @@ const en: MessageTree = {
       idWholeRun: 'Whole run',
       idDir: 'Target folder',
       idConfig: 'Config file',
+      idUnsafeId: 'ID that can’t be used as a config key:',
       assoc: {
         media: 'Images',
         checkpoints: 'Checkpoints',

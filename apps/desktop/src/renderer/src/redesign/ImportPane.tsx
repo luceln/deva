@@ -709,6 +709,9 @@ function stepText(step: string, t: (k: string) => string): string {
 /**
  * 失败条目指向的对象。主进程对「没有具体对象」的失败用尖括号占位（`<whole-run>` / `<dir>` /
  * `<config.json>`），这些是给日志检索用的，直接摆在界面上用户看不懂。
+ *
+ * `<unsafe-id:xxxx>` 是同一类占位：原始 id 可能很长或含控制字符，主进程截短后带前缀传过来。
+ * 它没有固定文案（xxxx 是数据），所以按前缀识别后显示「不能用作配置键的那个 id」+ 截短值。
  */
 const ID_PLACEHOLDER_KEY: Record<string, string> = {
   '<whole-run>': 'settings.import.idWholeRun',
@@ -718,6 +721,9 @@ const ID_PLACEHOLDER_KEY: Record<string, string> = {
 
 function idText(id: string, t: (k: string) => string): string {
   if (!id) return '—'
+  if (id.startsWith('<unsafe-id:')) {
+    return `${t('settings.import.idUnsafeId')}${id.slice('<unsafe-id:'.length, -1)}`
+  }
   const key = ID_PLACEHOLDER_KEY[id]
   return key ? t(key) : id
 }

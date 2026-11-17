@@ -1162,6 +1162,46 @@ async function scenarioMcpIpcWriteResult(): Promise<void> {
   eq('P1：恢复可写后仍能成功（失败路径没写死状态）', [ok2.ok, mcpCfg.isEnabled('s1')], [true, true])
 }
 
+/** 源里 MCP 服务的 id 不能当配置键（含冒号 / 分隔符）→ 必须记 failed，不许归 skipped。 */
+async function scenarioMcpUnsafeId(): Promise<void> {
+  fs.mkdirSync(SRC, { recursive: true })
+  writeJson(path.join(SRC, 'config.json'), { models: { providers: [] } })
+  writeJson(path.join(SRC, 'mcp.json'), {
+    mcpServers: {
+      // 冒号：会撕开密钥命名空间 `mcp:<id>:<field>`
+      'bad:colon': { name: 'Bad Colon', transport: 'http', url: 'https://a.example/mcp' },
+      // 首字符非法（`-` 开头）
+      '-leading-dash': { name: 'Dash', transport: 'http', url: 'https://b.example/mcp' },
+      // 正常对照
+      goodone: { name: 'Good', transport: 'http', url: 'https://c.example/mcp' }
+    }
+  })
+  fs.mkdirSync(DST, { recursive: true })
+  writeJson(path.join(DST, 'config.json'), { models: { providers: [] } })
+
+  const r = (await runOnce()) as Report
+  if ('error' in r) {
+    fail('P3：不该整轮抛异常', JSON.stringify(r).slice(0, 200))
+    return
+  }
+  info('MCP 非法 id 的结果', JSON.stringify({ copied: r.mcp?.copied, skipped: r.mcp?.skipped, failed: r.mcp?.failed }))
+  eq('P3：正常 id 照常导入（对照组）', r.mcp?.copied, ['goodone'])
+  eq('P3：非法 id 不进 skipped（那是「不用管」的意思）', r.mcp?.skipped, [])
+  eq(
+    'P3：非法 id 记 failed + mcp-unsafe-id',
+    (r.mcp?.failed ?? []).map((f: any) => f.reason),
+    ['mcp-unsafe-id', 'mcp-unsafe-id']
+  )
+  check(
+    'P3：failures 汇总里有这两条（整轮 ok=false）',
+    (r.failures ?? []).filter((f: any) => f.reason === 'mcp-unsafe-id').length === 2 && r.ok === false,
+    JSON.stringify({ ok: r.ok, n: (r.failures ?? []).filter((f: any) => f.reason === 'mcp-unsafe-id').length })
+  )
+  // 目标里不该有它们
+  const dstMcp = readJson(path.join(DST, 'mcp.json')) as { mcpServers?: Record<string, unknown> }
+  eq('P3：目标里只有正常那个', Object.keys(dstMcp.mcpServers ?? {}), ['goodone'])
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1173,6 +1213,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   mcpsrc: scenarioMcpSourceUnreadable,
   mcptgt: scenarioMcpTargetBlocked,
   mcpipc: scenarioMcpIpcWriteResult,
+  mcpunsafe: scenarioMcpUnsafeId,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

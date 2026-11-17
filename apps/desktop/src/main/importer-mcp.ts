@@ -170,8 +170,18 @@ export function importMcp(srcHome: string): StepStat & { failed: Failure[] } {
   const imported: string[] = []
   for (const id of ids) {
     if (!isSafeId(id)) {
-      // id 要当映射键与密钥前缀用，非法就搬不进来；记 skipped 而不是悄悄丢掉
-      stat.skipped.push(`<unsafe-id:${id.slice(0, 20)}>`)
+      /*
+       * 非法 id 搬不了（要当映射键与密钥前缀 `mcp:<id>:<field>`，含冒号/分隔符会撕开命名空间）。
+       *
+       * ⚠️ 这**不是** `skipped`。界面上 skipped 是中性的「目标已有同名、保留本地、不用管」，
+       * 而这里的东西**根本没导进来**——归到 skipped 等于告诉用户「不用管」，那是错的分类
+       * （AGENTS.md：一个桶只能表示它字面说的那件事）。
+       *
+       * 也不能直接塞 `failed` 而不给码：界面 `FAILURE_REASON_KEY` 查不到码就原样渲染，
+       * 用户会看到 `<unsafe-id:...>` 这个内部占位符。所以单独给一个原因码 + 中英文案。
+       * id 用脱敏后的短串（原始 id 可能很长/含控制字符），`<` 开头让界面按占位符规则处理。
+       */
+      stat.failed.push({ step: 'mcp', id: `<unsafe-id:${id.slice(0, 20)}>`, reason: 'mcp-unsafe-id' })
       continue
     }
     if (existing.has(id)) {
