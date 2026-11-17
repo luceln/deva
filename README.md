@@ -9,14 +9,14 @@
 一个对话，带起一支 AI 团队
 
 <p>
-  <a href="https://github.com/sqfcyily/deva/releases"><img src="https://img.shields.io/github/v/release/sqfcyily/deva?style=flat-square&color=6D28D9&label=%E7%89%88%E6%9C%AC" alt="版本" /></a>
+  <a href="https://github.com/luceln/deva/releases"><img src="https://img.shields.io/github/v/release/luceln/deva?style=flat-square&color=6D28D9&label=%E7%89%88%E6%9C%AC" alt="版本" /></a>
   <img src="https://img.shields.io/badge/%E5%B9%B3%E5%8F%B0-Windows%20%7C%20macOS%20%7C%20Linux-4F46E5?style=flat-square" alt="平台" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF-MIT-7C3AED?style=flat-square" alt="许可" /></a>
   <img src="https://img.shields.io/badge/Electron-33-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
   <a href="https://linux.do"><img src="https://img.shields.io/badge/LINUX%20DO-%E7%A4%BE%E5%8C%BA-FFB003?style=flat-square" alt="LINUX DO 社区" /></a>
 </p>
 
-<a href="https://github.com/sqfcyily/deva/releases"><b>下载</b></a> · <a href="#模型破甲"><b>模型破甲</b></a> · <a href="#成员协作"><b>成员协作</b></a> · <a href="#功能"><b>功能</b></a> · <a href="#快速开始"><b>快速开始</b></a> · <a href="#工作方式"><b>工作方式</b></a> · <a href="#工具参考"><b>工具参考</b></a> · <a href="#安全模型"><b>安全模型</b></a> · <a href="#从源码构建"><b>从源码构建</b></a>
+<a href="https://github.com/luceln/deva/releases"><b>下载</b></a> · <a href="#模型破甲"><b>模型破甲</b></a> · <a href="#成员协作"><b>成员协作</b></a> · <a href="#功能"><b>功能</b></a> · <a href="#快速开始"><b>快速开始</b></a> · <a href="#工作方式"><b>工作方式</b></a> · <a href="#工具参考"><b>工具参考</b></a> · <a href="#安全模型"><b>安全模型</b></a> · <a href="#从源码构建"><b>从源码构建</b></a>
 
 </div>
 
@@ -79,7 +79,7 @@ Deva 是运行在本机的桌面 AI Agent，以对话为唯一入口。交代一
 
 ### 安装
 
-从 [Releases](https://github.com/sqfcyily/deva/releases) 下载对应安装包：
+从 [Releases](https://github.com/luceln/deva/releases) 下载对应安装包：
 
 | 平台      | 文件                                                                |
 | ------- | ----------------------------------------------------------------- |

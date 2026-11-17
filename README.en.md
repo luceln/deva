@@ -9,14 +9,14 @@
 One conversation, a whole AI team
 
 <p>
-  <a href="https://github.com/sqfcyily/deva/releases"><img src="https://img.shields.io/github/v/release/sqfcyily/deva?style=flat-square&color=6D28D9&label=release" alt="Release" /></a>
+  <a href="https://github.com/luceln/deva/releases"><img src="https://img.shields.io/github/v/release/luceln/deva?style=flat-square&color=6D28D9&label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4F46E5?style=flat-square" alt="Platform" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-7C3AED?style=flat-square" alt="License" /></a>
   <img src="https://img.shields.io/badge/Electron-33-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" />
   <a href="https://linux.do"><img src="https://img.shields.io/badge/LINUX%20DO-community-FFB003?style=flat-square" alt="LINUX DO Community" /></a>
 </p>
 
-<a href="https://github.com/sqfcyily/deva/releases"><b>Download</b></a> ·
+<a href="https://github.com/luceln/deva/releases"><b>Download</b></a> ·
 <a href="#model-breaking"><b>Model Breaking</b></a> ·
 <a href="#team-members"><b>Team Members</b></a> ·
 <a href="#features"><b>Features</b></a> ·
@@ -87,7 +87,7 @@ Members can ask questions, submit plans and write project memory for the folder 
 
 ### Install
 
-Download from [Releases](https://github.com/sqfcyily/deva/releases):
+Download from [Releases](https://github.com/luceln/deva/releases):
 
 | Platform | File |
 | --- | --- |
