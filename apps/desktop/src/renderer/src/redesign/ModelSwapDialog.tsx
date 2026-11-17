@@ -66,8 +66,9 @@ export function ModelSwapDialog({
   const changeable = useMemo(() => affected.filter((b) => b.ref === fromRef), [affected, fromRef])
   const kept = useMemo(() => affected.filter((b) => b.ref !== fromRef), [affected, fromRef])
 
-  // 候选模型：已启用服务商 × 已启用对话模型，去掉已知失效的引用与已知缺密钥的服务商。
-  // 「缺密钥」从 scan 结果反推（kind === 'nokey' 的引用前缀即 providerId），不在渲染层另立一套判定。
+  // 候选模型：已启用服务商 × 已启用对话模型，去掉已知失效的引用与「密钥用不了」的服务商。
+  // 「密钥用不了」从 scan 结果反推（nokey / keyunreadable 的引用前缀即 providerId），不在渲染层另立一套判定。
+  // 两种都排除：换成同样解不开密钥的模型，改完还是不可用，用户得再来一次。
   const candidates = useMemo(() => {
     const brokenRefs = new Set(affected.map((b) => b.ref))
     const brokenProviderOf = (kind: BrokenRef['kind']): Set<string> =>
@@ -77,7 +78,7 @@ export function ModelSwapDialog({
           .map((b) => b.ref.slice(0, Math.max(0, b.ref.indexOf(':'))))
           .filter(Boolean)
       )
-    const nokey = brokenProviderOf('nokey')
+    const nokey = new Set([...brokenProviderOf('nokey'), ...brokenProviderOf('keyunreadable')])
     return providers
       .filter((p) => p.enabled && (p.purpose ?? 'llm') === 'llm' && !nokey.has(p.id))
       .map((p) => ({
@@ -98,7 +99,8 @@ export function ModelSwapDialog({
 
   const kindText = (kind: BrokenRef['kind']): string => t(`cf.modelSwap.kind.${kind}`)
   // 本对话的失效**全部**只是缺密钥：此时正确的解法是去填密钥，不该把用户推向换模型（换模型解决不了缺密钥）。
-  const allNoKey = affected.length > 0 && affected.every((b) => b.kind === 'nokey')
+  const allNoKey =
+    affected.length > 0 && affected.every((b) => b.kind === 'nokey' || b.kind === 'keyunreadable')
 
   const run = async (): Promise<void> => {
     if (!target || busy) return
@@ -170,10 +172,10 @@ export function ModelSwapDialog({
                     {b.name || b.sessionId}
                   </span>
                   <span className={`cf-swap__kind is-${b.kind}`}>
-                    {b.kind === 'nokey' && <KeyRound size={12} />}
+                    {(b.kind === 'nokey' || b.kind === 'keyunreadable') && <KeyRound size={12} />}
                     {kindText(b.kind)}
                   </span>
-                  {b.kind === 'nokey' && (
+                  {(b.kind === 'nokey' || b.kind === 'keyunreadable') && (
                     <button type="button" className="cf-swap__link" onClick={goFillKey}>
                       {t('cf.modelSwap.fillKey')}
                     </button>
@@ -185,7 +187,9 @@ export function ModelSwapDialog({
           </ul>
         )}
         {kept.length > 0 && <p className="cf-swap__note">{t('cf.modelSwap.keepHint')}</p>}
-        {affected.some((b) => b.kind === 'nokey') && <p className="cf-swap__note">{t('cf.modelSwap.nokeyTip')}</p>}
+        {affected.some((b) => b.kind === 'nokey' || b.kind === 'keyunreadable') && (
+          <p className="cf-swap__note">{t('cf.modelSwap.nokeyTip')}</p>
+        )}
       </div>
 
       <div className="cf-swap__section">

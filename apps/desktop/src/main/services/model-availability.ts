@@ -1,5 +1,5 @@
 import { getConfig } from './config'
-import { hasSecret } from './secrets'
+import { readSecret } from './secrets'
 import type { AvailabilityResult, BrokenRef } from '../../shared/chat-protocol'
 
 /**
@@ -11,7 +11,7 @@ import type { AvailabilityResult, BrokenRef } from '../../shared/chat-protocol'
  * 只查 id 不看 enabled，界面与主进程各说各话。故判定只在这里做，渲染层拿 IPC 结果。
  *
  * 判定依据只有两处现成真源：config.json 的 `models.providers`（明文非敏感项，宽松逐字段容错）与
- * `secrets:has`（密钥**存在性**，不解密、不把明文带出 secrets.ts）。**不抛错、不弹窗**——判定异常时宁可放行，
+ * `secrets.ts` 的 `readSecret` 三态（**能不能解开**决定可用性，明文仍不外泄）。**不抛错、不弹窗**——判定异常时宁可放行，
  * 由 runTurn 的兜底去处理，别因为一次读配置失败就把用户的会话全标红。
  *
  * 注意：判定要读密钥存在性，而密钥库（secrets.ts）是异步惰性载入的，故本模块的函数都是 async。
@@ -91,13 +91,24 @@ function splitRef(ref: string): [string, string] | null {
 }
 
 /**
- * 判定一个模型引用能否使用。顺序即优先级（先命中先返回），四类失效原因分开报：
- * 界面要能区分「得换个模型」（malformed / missing / disabled）与「只是缺密钥」（nokey，该去填密钥而不是换模型）。
+ * 判定一个模型引用能否使用。顺序即优先级（先命中先返回），五类失效原因分开报：
+ * 界面要能区分「得换个模型」（malformed / missing / disabled）与「密钥的事」（nokey / keyunreadable）。
  *
  * - 空引用 → 可用：空 = 尚未定格模型（跟随全局默认，见 StoredSession.model 注释），它没引用任何具体模型，
  *   谈不上失效；标红只会把用户赶去换一个本来就好好的会话。
- * - 密钥按**存在性**判（secrets.ts 的 hasSecret，与设置页的 keyStatus 同口径）。加密不可用的环境（如缺
- *   libsecret 的 Linux）密文仍在、解密会失败，此处仍记为「已配置」——判定不替 provider 层预判解密成败。
+ * - 密钥按 `readSecret` 的**三态**判，不再用 `hasSecret`。
+ *
+ * ## 为什么不能用 `hasSecret`（P1-1）
+ *
+ * `hasSecret` 只有 `Boolean(store[key])`——只看**密文在不在**。换 OS 账户 / 换机器 / Linux 缺 libsecret 时，
+ * 密文还在但解不开：`hasSecret` 返 true → 这里判 `ok` → 红标不亮、轮前体检放行 → 请求发出去才 401。
+ * 而这恰是已确认「换账户必现」的那一类，提交声称的「四类识别」与「轮前拦截」在这一形态上**双双失效**。
+ *
+ * `providers/index.ts` 早已把 `unreadable` 单独报成 auth 错误（「无法读取 X 的密钥：…」），
+ * 这里接同一口径，两处才不会再各说各话。
+ *
+ * `unreadable` 单列一个 kind 而不是折进 `nokey`：密文在但解不开 ≠ 没配过，用户的处置不同
+ * （前者要重填或装 libsecret，后者只要填一次），界面文案也该不同。
  */
 export async function resolveAvailability(
   ref: string | null | undefined
@@ -118,11 +129,15 @@ export async function resolveAvailability(
     const model = list.find((m) => m && m.id === mid)
     if (!model || model.enabled === false) return { ok: false, kind: 'missing', detail: `model ${pid}:${mid}` }
     // 本机服务无需密钥，不能按「没密钥」标红——那会把好好的本地模型（Ollama 等）赶去换模型。
-    if (!keylessHost(provider.apiHost) && !(await hasSecret(pid)))
-      return { ok: false, kind: 'nokey', detail: `provider ${pid}` }
+    if (keylessHost(provider.apiHost)) return { ok: true }
+    const secret = await readSecret(pid)
+    if (secret.kind === 'absent') return { ok: false, kind: 'nokey', detail: `provider ${pid}` }
+    if (secret.kind === 'unreadable')
+      return { ok: false, kind: 'keyunreadable', detail: `provider ${pid}: ${secret.reason}` }
     return { ok: true }
   } catch {
-    // 配置读坏 / 密钥库异常：放行。判定只是提示用的旁路，不该反过来阻断用户的会话。
+    // 密钥库异常（readSecret 理论上不抛，但别让判定把自己搞崩）：放行。
+    // 注意「配置读坏」走不到这里——`ensureLoaded` 自己把异常吞了，那条路见 readConfigKindOrNull。
     return { ok: true }
   }
 }

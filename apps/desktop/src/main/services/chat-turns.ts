@@ -432,14 +432,22 @@ export async function runTurn(
     if (!scheduled && session.model) {
       const avail = await resolveAvailability(session.model)
       if (!avail.ok) {
+        /*
+         * 分三句而不是两句：`nokey`（还没填）与 `keyunreadable`（填过但解不开：换账户 / 换机器 / 无加密存储）
+         * 的处置不同——后者重填一次即可，用户若以为是「没配过」会怀疑自己明明配过。
+         */
         const why =
           avail.kind === 'nokey'
             ? isEn()
               ? 'its provider is missing an API key'
               : '所在服务商还没有配置密钥'
-            : isEn()
-              ? 'the model is no longer available'
-              : '这个模型已不可用'
+            : avail.kind === 'keyunreadable'
+              ? isEn()
+                ? 'its provider’s key can’t be read (it may have been saved under a different account or machine)'
+                : '所在服务商的密钥读不出来（可能是在别的账户或机器上保存的）'
+              : isEn()
+                ? 'the model is no longer available'
+                : '这个模型已不可用'
         throw new Error(
           isEn()
             ? `This chat's model can't be used — ${why}. Pick another model above (or fill in the key), then send again.`

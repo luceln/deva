@@ -1042,9 +1042,12 @@ function ModelPicker(): React.JSX.Element {
     [brokenModels, mainId, currentSessionId]
   )
   const broken = brokenHere.length > 0
-  // 本对话的失效原因全都只是「缺密钥」时，胶囊用警示色而非危险色：填上密钥就好，不该被读成「得换模型」。
+  // 本对话的失效原因全都只是「密钥的事」时，胶囊用警示色而非危险色：填上密钥就好，不该被读成「得换模型」。
   // 只要有一处是真坏（被删 / 被禁用 / 引用非法），就按严重处理（危险色）。
-  const onlyNoKey = brokenHere.length > 0 && (brokenModels[mainId] ?? []).every((b) => b.kind === 'nokey')
+  // keyunreadable（密文在但解不开）同属「密钥的事」：换模型解决不了，仍要引导去重填。
+  const onlyNoKey =
+    brokenHere.length > 0 &&
+    (brokenModels[mainId] ?? []).every((b) => b.kind === 'nokey' || b.kind === 'keyunreadable')
   // 受影响的会话数（本对话 + 名下成员）：红色胶囊右侧的徽标，告诉用户这不是一处的问题。
   const brokenCount = (brokenModels[mainId] ?? []).length
   // 本次要换掉的引用：优先本会话自己指向的那个（覆盖层 / 已落库值），对不上再退回扫描结果里的第一条。

@@ -1358,7 +1358,9 @@ const zhCN: MessageTree = {
         missing: '模型不可用，请换一个',
         disabled: '模型不可用，请换一个',
         malformed: '模型配置异常，请重新选择',
-        nokey: '这个服务商缺少密钥'
+        nokey: '这个服务商缺少密钥',
+        // 与 nokey 分开：不是「还没填」，是「填过但读不出来」（换账户 / 换机器 / 本机无加密存储）
+        keyunreadable: '这个服务商的密钥读不出来，需要重新填写'
       }
     },
     git: {
@@ -2983,7 +2985,8 @@ const en: MessageTree = {
         missing: 'Model unavailable — pick another',
         disabled: 'Model unavailable — pick another',
         malformed: 'Model settings are broken — pick again',
-        nokey: 'This provider has no API key'
+        nokey: 'This provider has no API key',
+        keyunreadable: 'This provider’s key can’t be read — enter it again'
       }
     },
     git: {

@@ -2872,8 +2872,9 @@ button.tl__line:hover {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 18%, transparent);
 }
-/* 失效原因只是「缺密钥」时改用警示色：填上密钥就好，不该被读成「模型坏了」。 */
-.chip.is-broken.is-nokey {
+/* 失效原因只是「密钥的事」（没配 / 解不开）时改用警示色：填上密钥就好，不该被读成「模型坏了」。 */
+.chip.is-broken.is-nokey,
+.chip.is-broken.is-keyunreadable {
   color: var(--warning);
   background: color-mix(in srgb, var(--warning) 12%, transparent);
   border-color: color-mix(in srgb, var(--warning) 32%, transparent);

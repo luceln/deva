@@ -1563,7 +1563,8 @@ body.cf-resizing-y * {
   color: var(--danger);
   font-size: 11.5px;
 }
-.cf-swap__kind.is-nokey {
+.cf-swap__kind.is-nokey,
+.cf-swap__kind.is-keyunreadable {
   color: var(--warning);
 }
 .cf-swap__kind.is-ok {

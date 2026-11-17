@@ -1235,6 +1235,83 @@ async function scenarioKeylessHost(): Promise<void> {
   eq('P1-4：非字符串不算本机', keylessHost(undefined), false)
 }
 
+/**
+ * P1-1：可用性判定必须用 `readSecret` 三态，不能只看「密文在不在」。
+ *
+ * 本场景由 repro 跑三遍：默认（能解开）、`TEST_DECRYPT_FAILS=1`（换账户 / 换机器：密文在但解不开）、
+ * `TEST_NO_ENCRYPTION=1`（Linux 缺 libsecret）。
+ *
+ * 旧实现在后两种下判 `ok:true`：红标不亮、轮前体检放行，请求发出去才 401。
+ */
+async function scenarioKeyTriState(): Promise<void> {
+  const decryptFails = process.env.TEST_DECRYPT_FAILS === '1'
+  const noEncryption = process.env.TEST_NO_ENCRYPTION === '1'
+  const tag = decryptFails ? 'decrypt-fails' : noEncryption ? 'no-encryption' : 'normal'
+  info('密钥环境', tag)
+
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+  const { setSecret } = await import('../../apps/desktop/src/main/services/secrets')
+  const { resolveAvailability } = await import('../../apps/desktop/src/main/services/model-availability')
+
+  setConfig({
+    models: {
+      providers: [
+        {
+          id: 'remote',
+          name: 'Remote',
+          apiHost: 'https://api.example.com/v1',
+          enabled: true,
+          models: [{ id: 'm', enabled: true }]
+        },
+        {
+          // 本机服务：不管密钥能不能解开，都不该被标红
+          id: 'local',
+          name: 'Local',
+          apiHost: 'http://localhost:11434/v1',
+          enabled: true,
+          models: [{ id: 'q', enabled: true }]
+        },
+        {
+          // 真没配过密钥：对照组，无论哪个环境都该是 nokey
+          id: 'nokey',
+          name: 'NoKey',
+          apiHost: 'https://api.example.com/v1',
+          enabled: true,
+          models: [{ id: 'm', enabled: true }]
+        }
+      ]
+    }
+  })
+  // 写一段密文：正常环境下能解开；TEST_DECRYPT_FAILS 下解不开；TEST_NO_ENCRYPTION 下 setSecret 会拒绝写
+  // （绝不明文落盘），所以那里直接塞一段历史密文进 secrets.json 模拟「以前有加密能力时存的」。
+  if (noEncryption) {
+    fs.mkdirSync(DST, { recursive: true })
+    writeJson(path.join(DST, 'secrets.json'), { remote: Buffer.from('enc:sk-test', 'utf8').toString('base64') })
+  } else {
+    const wrote = await setSecret('remote', 'sk-test')
+    info('写密钥结果', JSON.stringify(wrote))
+  }
+
+  const rRemote = await resolveAvailability('remote:m')
+  const rLocal = await resolveAvailability('local:q')
+  const rNoKey = await resolveAvailability('nokey:m')
+  info('remote 判定', JSON.stringify(rRemote))
+  info('local 判定', JSON.stringify(rLocal))
+  info('nokey 判定', JSON.stringify(rNoKey))
+
+  if (decryptFails || noEncryption) {
+    eq(`P1-1(${tag})：密文在但解不开 → keyunreadable（旧实现返回 ok:true）`, rRemote.kind, 'keyunreadable')
+    eq(`P1-1(${tag})：解不开不能算 ok`, rRemote.ok, false)
+    // 与「没配过」分开：处置不同
+    eq(`P1-1(${tag})：解不开 ≠ 没配过（kind 不同）`, rRemote.kind !== rNoKey.kind, true)
+  } else {
+    eq('P1-1(normal)：能解开就是可用', rRemote.ok, true)
+  }
+  // 不影响的三类：本机服务、真没配过、别的引用
+  eq(`P1-1(${tag})：本机服务不因密钥状态被标红`, rLocal.ok, true)
+  eq(`P1-1(${tag})：真没配过仍是 nokey`, rNoKey.kind, 'nokey')
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1248,6 +1325,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   mcpipc: scenarioMcpIpcWriteResult,
   mcpunsafe: scenarioMcpUnsafeId,
   keyless: scenarioKeylessHost,
+  keytri: scenarioKeyTriState,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

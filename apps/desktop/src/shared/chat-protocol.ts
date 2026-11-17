@@ -201,13 +201,15 @@ export interface ChatSetArchivedRequest {
 // ── 模型可用性 / 批量替换（见 services/model-availability.ts、model-swap.ts）──
 
 /**
- * 一个模型引用失效的原因，四类分开是为了让界面能给出不同的出路：
+ * 一个模型引用失效的原因，五类分开是为了让界面能给出不同的出路：
  * - malformed：引用本身不合 `providerId:modelId` 格式（旧数据 / 手改配置）；
  * - missing：配置里找不到该服务商，或该服务商下找不到该模型（含模型被删）；
  * - disabled：服务商或模型存在但被停用（`enabled === false`）；
- * - nokey：服务商与模型都在、也都启用，只是没配 API 密钥——**应引导去填密钥，不该逼用户换模型**。
+ * - nokey：服务商与模型都在、也都启用，只是没配 API 密钥——**应引导去填密钥，不该逼用户换模型**；
+ * - keyunreadable：密文在、但解不开（换 OS 账户 / 换机器 / 本机没有可用加密）——**处置与 nokey 不同**：
+ *   不是「还没填」，是「填过但现在读不出来」，要重填或装 libsecret。
  */
-export type AvailabilityKind = 'malformed' | 'missing' | 'disabled' | 'nokey'
+export type AvailabilityKind = 'malformed' | 'missing' | 'disabled' | 'nokey' | 'keyunreadable'
 
 /**
  * 一个模型引用能不能用的判定结果（主进程 model-availability.ts 唯一产出，渲染层只消费，不复算）。
