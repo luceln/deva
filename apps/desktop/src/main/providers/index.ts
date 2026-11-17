@@ -49,13 +49,15 @@ export async function* streamChat(
 ): AsyncGenerator<StreamEvent> {
   const secret = await readSecret(cfg.providerId)
   /*
-   * 三种情况必须分开，否则「解不开」会被当成「没配过」：
+   * 四种情况必须分开，否则「解不开 / 读不出」会被当成「没配过」：
    *  - `absent`：真的没配。**以空串继续**——本地 Ollama 这类可无钥服务靠这个工作，不能拦；
    *  - `unreadable`：有密文但解不开（换账户 / 换机 / 本机无加密）。**立刻报 auth 错误并说清原因**：
    *    继续用空串请求会拿到 401，用户被引向「密钥填错了」，而真正要做的可能是重填或装 libsecret；
+   *  - `store-unreadable`：整份密钥库文件读不出来（内容坏 / 被占）。同样**立刻报错**——此时「不知道有没有」，
+   *    拿空串去请求只会得到一条误导性的 401；
    *  - `ok`：正常注入。
    */
-  if (secret.kind === 'unreadable') {
+  if (secret.kind === 'unreadable' || secret.kind === 'store-unreadable') {
     yield {
       type: 'error',
       error: {

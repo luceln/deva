@@ -159,7 +159,9 @@ async function decideJev(
   questions: DecisionQuestion[]
 ): Promise<DecisionResult> {
   const secret = await readSecret(cfg.providerId)
-  if (secret.kind === 'unreadable') return { ok: false, outcomes: [], kind: 'auth', message: secret.reason }
+  // store-unreadable（整份密钥库读不出来）同样必须报错：拿空串去请求只会得到误导性的 401
+  if (secret.kind === 'unreadable' || secret.kind === 'store-unreadable')
+    return { ok: false, outcomes: [], kind: 'auth', message: secret.reason }
   const apiKey = secret.kind === 'ok' ? secret.value : ''
   if (!apiKey) return { ok: false, outcomes: [], kind: 'auth', message: 'no-key' }
   const base = normalizeBase(cfg.baseURL)

@@ -1637,6 +1637,60 @@ async function scenarioBlockedTurnNoTrace(): Promise<void> {
   eq('A29：被拦的一轮没有把用户消息写进历史', after.messages.length, before.messages.length)
 }
 
+/**
+ * A42：密钥库内容坏掉时不能集体判「缺密钥」（与 P1-3 同形，发生在 secrets 侧）。
+ *
+ * 以前 `ensureLoaded` 的 catch 一律 `store = {}`，于是 `secrets.json` 坏 → 所有服务商判 nokey → 全库红标 +
+ * 体检拒绝发送，用户看到「我密钥怎么全没了」，实际该去修 secrets.json。
+ *
+ * 独立进程跑（store / loaded 是模块级），由 S42_KIND 控制：absent（无文件）/ corrupt（内容坏）。
+ */
+async function scenarioSecretsCorrupt(): Promise<void> {
+  const kind = (process.env.S42_KIND ?? '') as 'absent' | 'corrupt' | ''
+  const secretsPath = path.join(DST, 'secrets.json')
+  fs.mkdirSync(DST, { recursive: true })
+  if (kind === 'absent') {
+    fs.rmSync(secretsPath, { force: true })
+  } else {
+    // 半截 JSON：能读到字节，解析不了
+    fs.writeFileSync(secretsPath, '{bad json ,,,')
+  }
+
+  const secrets = await import('../../apps/desktop/src/main/services/secrets')
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+  const { resolveAvailability } = await import('../../apps/desktop/src/main/services/model-availability')
+
+  setConfig({
+    models: {
+      providers: [
+        // 远端服务商：需要密钥才会被判 nokey
+        { id: 'p', name: 'P', apiHost: 'https://api.example.com/v1', enabled: true, models: [{ id: 'm' }] }
+      ]
+    }
+  })
+
+  const loadKind = await secrets.readSecretsLoadKind()
+  const direct = await secrets.readSecret('p')
+  info('密钥库载入状态', loadKind)
+  info('readSecret 结果', JSON.stringify(direct))
+
+  const r = await resolveAvailability('p:m')
+  info('可用性判定', JSON.stringify(r))
+
+  if (kind === 'corrupt') {
+    eq('A42(corrupt)：载入状态是 corrupt（不是 ok/absent）', loadKind, 'corrupt')
+    eq('A42(corrupt)：readSecret 报 store-unreadable（不是 absent=没配过）', direct.kind, 'store-unreadable')
+    eq('A42(corrupt)：密钥库读坏 → 可用性放行（旧实现判 nokey 全库红标）', r.ok, true)
+    eq('A42(corrupt)：放行时不该带 kind', r.kind, undefined)
+  } else {
+    // 对照：真没配过 ≠ 读坏，必须仍然判 nokey，别把「没配」也放行了
+    eq('A42(absent)：无文件 → absent', loadKind, 'absent')
+    eq('A42(absent)：readSecret 报 absent', direct.kind, 'absent')
+    eq('A42(absent)：真没配过仍判 nokey（不能一起放行）', r.kind, 'nokey')
+    eq('A42(absent)：真没配过不是 ok', r.ok, false)
+  }
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1656,6 +1710,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   kindcopy: scenarioKindCopy,
   swapws: scenarioSwapWhitespace,
   blockedturn: scenarioBlockedTurnNoTrace,
+  secretskind: scenarioSecretsCorrupt,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

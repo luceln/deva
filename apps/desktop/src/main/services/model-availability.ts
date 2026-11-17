@@ -156,6 +156,14 @@ export async function resolveAvailability(
     if (keylessHost(provider.apiHost)) return { ok: true }
     const secret = await readSecret(pid)
     if (secret.kind === 'absent') return { ok: false, kind: 'nokey', detail: `provider ${pid}` }
+    /*
+     * 整份密钥库读不出来 → **放行**（与配置读坏同一条原则：判定只是提示用的旁路，不该因为一次文件损坏
+     * 就把用户所有会话拦下来）。这时既不能说「没配过」（会全库标红 + 体检拒绝），也不能说「解不开」
+     * （那是单条密文的问题，重填这一条就好）——真正的动作是去修 secrets.json。
+     *
+     * 这也与 `readSecretsLoadKind()` 同源：那边用于需要「知道整体状态」的判定，这里用单条读取的返回即可。
+     */
+    if (secret.kind === 'store-unreadable') return { ok: true }
     if (secret.kind === 'unreadable')
       return { ok: false, kind: 'keyunreadable', detail: `provider ${pid}: ${secret.reason}` }
     return { ok: true }

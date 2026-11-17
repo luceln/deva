@@ -334,9 +334,9 @@ async function resolveValueMap(
     } else if (v && typeof v.secretRef === 'string') {
       const read = await readSecret(`mcp:${id}:${v.secretRef}`)
       if (read.kind === 'ok') out[k] = read.value
-      else if (read.kind === 'unreadable') {
+      else if (read.kind === 'unreadable' || read.kind === 'store-unreadable') {
         // 绝不注入空值（那会让 MCP 服务启动后鉴权失败，看不出是本地解不开）；
-        // 原因由 missingSecrets 的预检通道报给界面。
+        // 原因由 missingSecrets 的预检通道报给界面。整份库读不出来同样走这条：都是「不知道值是什么」。
         console.warn(`[mcp] ${id} 的字段 ${k} 密钥读不出来：${read.reason}`)
       }
       // absent：本来就没配 → 同样跳过（缺密钥由 missingSecrets 报）
@@ -363,7 +363,7 @@ export async function missingSecrets(
     if (typeof v === 'string' || !v || typeof v.secretRef !== 'string') continue
     const read = await readSecret(`mcp:${cfg.id}:${v.secretRef}`)
     if (read.kind === 'absent') fields.push(k)
-    else if (read.kind === 'unreadable') {
+    else if (read.kind === 'unreadable' || read.kind === 'store-unreadable') {
       fields.push(k) // 仍然算「没有可用值」，连接前要拦住
       unreadable.push({ field: k, reason: read.reason })
     }

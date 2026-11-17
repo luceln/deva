@@ -74,7 +74,9 @@ export function registerProviderIpc(): void {
   ipcMain.handle('provider:list-models', async (_e, cfg: ProbeConfig): Promise<ListModelsResult> => {
     const secret = await readSecret(cfg.providerId)
     // 解不开要说清是「本地解不开」而不是「密钥错」：否则用户会去复制粘贴一遍密钥，而问题在账户/加密环境。
-    if (secret.kind === 'unreadable') return { ok: false, kind: 'auth', message: secret.reason }
+    // store-unreadable 同属「不知道密钥是什么」，一样要报 auth 而不是静默用空串
+    if (secret.kind === 'unreadable' || secret.kind === 'store-unreadable')
+      return { ok: false, kind: 'auth', message: secret.reason }
     const apiKey = secret.kind === 'ok' ? secret.value : ''
     const base = normalizeBase(cfg.baseURL)
     // 清单地址：opencode 网关只在推理根下给 /v1/models（各 API 路径下没有清单，照常规拼法必 404）；

@@ -51,7 +51,8 @@ const ADAPTERS: Record<Platform, (bot: BotConfig) => Promise<RemoteAdapter | str
      * 三种情况要分开说，别都报「凭据丢失」：解不开时让用户删了重扫码是**过度处置**——
      * 他真正要做的是重填密钥（换账户的情况），或者装 libsecret（无加密能力的情况）。
      */
-    if (secret.kind === 'unreadable') return `飞书凭据读取失败：${secret.reason}`
+    if (secret.kind === 'unreadable' || secret.kind === 'store-unreadable')
+      return `飞书凭据读取失败：${secret.reason}`
     const appSecret = secret.kind === 'ok' ? secret.value : ''
     if (!appId || !appSecret) return '机器人凭据丢失，请删除后重新扫码创建。'
     return new FeishuAdapter(bot.id, {
@@ -62,7 +63,8 @@ const ADAPTERS: Record<Platform, (bot: BotConfig) => Promise<RemoteAdapter | str
   },
   telegram: async (bot) => {
     const secret = await readSecret(SECRET_KEY(bot.id, 'botToken'))
-    if (secret.kind === 'unreadable') return `Telegram 凭据读取失败：${secret.reason}`
+    if (secret.kind === 'unreadable' || secret.kind === 'store-unreadable')
+      return `Telegram 凭据读取失败：${secret.reason}`
     const token = secret.kind === 'ok' ? secret.value : ''
     if (!token) return '机器人 Token 丢失，请删除后重新添加。'
     return new TelegramAdapter(bot.id, { token })

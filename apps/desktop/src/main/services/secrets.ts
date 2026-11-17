@@ -18,6 +18,10 @@ let store: Record<string, string> = {}
 let filePath = ''
 let loaded = false
 
+/** 首次载入的结果（照搬 config.ts 的 ConfigLoadKind 那套）。 */
+export type SecretsLoadKind = 'ok' | 'absent' | 'corrupt'
+let loadKind: SecretsLoadKind = 'ok'
+
 /** 从旧位置 userData/secrets.json 一次性迁移（密文原样搬运，加密不受路径影响）。 */
 async function migrateLegacy(): Promise<void> {
   try {
@@ -27,10 +31,17 @@ async function migrateLegacy(): Promise<void> {
     if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
       store = parsed as Record<string, string>
       await persist() // 写到新位置 ~/.deva-plus/secrets.json（旧文件保留，作兜底，不删）
+      loadKind = 'ok'
+      return
     }
-  } catch {
-    // 无旧文件 / 解析失败 —— 视为空库
-    store = {}
+    // 旧文件存在但内容为空对象：确实是「没有密钥」
+    loadKind = 'absent'
+  } catch (e) {
+    /*
+     * 旧位置也没有 → 真的没配过（absent）。
+     * 旧文件在但解析不了 → **不知道里面有什么**（corrupt），不能当成空库。
+     */
+    loadKind = (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'corrupt'
   }
 }
 
@@ -40,12 +51,44 @@ async function ensureLoaded(): Promise<void> {
   try {
     const raw = await fs.readFile(filePath, 'utf8')
     const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object') store = parsed as Record<string, string>
-  } catch {
-    // 新位置不存在：尝试从旧 userData 位置迁移一次
-    await migrateLegacy()
+    if (parsed && typeof parsed === 'object') {
+      store = parsed as Record<string, string>
+      loadKind = 'ok'
+    } else {
+      // 解析成非对象（字符串 / 数字 / null）：内容不合约定，等同坏文件
+      loadKind = 'corrupt'
+    }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') {
+      // 新位置不存在：尝试从旧 userData 位置迁移一次
+      await migrateLegacy()
+    } else {
+      /*
+       * 文件在但读不出来（半截写入的 JSON 语法错、EACCES、EBUSY）→ **不知道里面有什么**。
+       * 以前这里一律 `store = {}`，于是用户看到「我的密钥怎么全没了」——而实际上该去修 secrets.json。
+       * 这条不能当成空库（A42，与 config.ts 的 P1-3 同形）。
+       */
+      loadKind = 'corrupt'
+    }
   }
   loaded = true
+}
+
+/**
+ * 密钥库的载入状态（**只读、不触发重读**）。
+ *
+ * 给「读坏就放行」这类旁路判定用：它们需要区分「真没配过密钥」与「密钥库整份读不出来」。
+ * 不要为了这个去让 `ensureLoaded` 抛异常——那会把一次文件损坏泄漏成全局崩溃。
+ */
+export function getSecretsLoadKind(): SecretsLoadKind {
+  return loaded ? loadKind : 'ok'
+}
+
+/** 载入并返回状态（判定侧用这个：首次调用时它还没加载完，`getSecretsLoadKind` 会错误地报 ok）。 */
+export async function readSecretsLoadKind(): Promise<SecretsLoadKind> {
+  await ensureLoaded()
+  return loadKind
 }
 
 async function persist(): Promise<void> {
@@ -68,10 +111,15 @@ async function persist(): Promise<void> {
  * 显示「没配过密钥」，用户去重填一遍——而实际是解不开，重填能解决，但他永远不知道原因；更糟的是
  * 请求侧会拿空串去请求，得到的 `401` 被归成「密钥错误」而不是「本地解不开」。
  *
- * 三态：
+ * 四态：
  *  - `absent`：真没配过。调用方按「无密钥」处理（本地 Ollama 这类可无钥的服务照常继续）；
  *  - `ok`：取到了明文；
- *  - `unreadable`：**有密文但解不出来**，或本机压根没有加密能力。调用方必须**明确报错**，不能静默用空值。
+ *  - `unreadable`：**有密文但解不出来**，或本机压根没有加密能力。调用方必须**明确报错**，不能静默用空值；
+ *  - `store-unreadable`：**整份密钥库读不出来**（文件内容坏 / 读不出），所以「不知道这个 key 有没有」。
+ *
+ * 为什么第 4 态不能折进 `absent`（A42）：`secrets.json` 内容坏时 `store` 是空的，`store[key]` 自然取不到，
+ * 但那跟「用户没配过」是两件事——前者要修文件 / 重填全部密钥，后者只要填这一次。折进 `absent` 的后果是
+ * 全部服务商一起判 `nokey`、全库会话红标 + 体检拒绝发送，用户看到「我密钥怎么全没了」。
  *
  * 绝不经 IPC 返回渲染层（明文不出主进程这一条不变）；渲染层要看「配没配」用 `hasSecret`。
  */
@@ -80,12 +128,23 @@ export type SecretRead =
   | { kind: 'ok'; value: string }
   /** `reason` 是给人看的原因，`code` 供调用方分类（`no-encryption` 可指引装 libsecret，`decrypt-failed` 指引重填）。 */
   | { kind: 'unreadable'; code: 'no-encryption' | 'decrypt-failed'; reason: string }
+  | { kind: 'store-unreadable'; reason: string }
 
 /**
  * @param key 键约定：provider 用 providerId；MCP 用 `mcp:<serverId>:<field>`；remote 用 `remote:<botId>:<field>`。
  */
 export async function readSecret(key: string): Promise<SecretRead> {
   await ensureLoaded()
+  /*
+   * 整份库读不出来：**不知道**这个 key 有没有，绝不能报 `absent`（那会说成「没配过」）。
+   * 放在查 `store[key]` 之前：此时 store 是空的，先查只会得到 absent。
+   */
+  if (loadKind === 'corrupt') {
+    return {
+      kind: 'store-unreadable',
+      reason: '密钥库文件读不出来（内容损坏或被占用），无法判断密钥是否存在，需要检查 secrets.json 或重新填写'
+    }
+  }
   const enc = store[key]
   // 没这个 key 才是「没配过」。注意 `!enc` 与「配了空值」区分：空值在 setSecret 里已被当作删除。
   if (!enc) return { kind: 'absent' }

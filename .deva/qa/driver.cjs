@@ -20,7 +20,7 @@ const TMP_ROOT = path.join(os.tmpdir(), 'deva-qa')
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
 /**
  * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
@@ -66,7 +66,9 @@ const ENV_OF = {
   keydecrypt: { scenario: 'keytri', env: { TEST_DECRYPT_FAILS: '1' } },
   keynoenc: { scenario: 'keytri', env: { TEST_NO_ENCRYPTION: '1' } },
   cfgcorrupt: { scenario: 'cfgcorrupt', env: { P13_KIND: 'corrupt' } },
-  cfgabsent: { scenario: 'cfgcorrupt', env: { P13_KIND: 'absent' } }
+  cfgabsent: { scenario: 'cfgcorrupt', env: { P13_KIND: 'absent' } },
+  secretscorrupt: { scenario: 'secretskind', env: { S42_KIND: 'corrupt' } },
+  secretsabsent: { scenario: 'secretskind', env: { S42_KIND: 'absent' } }
 }
 
 function runOne(name) {
