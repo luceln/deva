@@ -1482,6 +1482,81 @@ async function scenarioKindCopy(): Promise<void> {
   }
 }
 
+/**
+ * A24/A25：带首尾空格的引用必须能被批量替换掉，且跳过项的解释必须正确。
+ *
+ * 以前 `from` 被 trim、`c.ref` 没 trim，`!==` 于是成立：同一个模型被判成「用的是别的模型」→ 落进 skipped
+ * → 永远换不掉（导入来的数据带空格很常见）。
+ */
+async function scenarioSwapWhitespace(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const { applyModelSwap, scanSessionsByModel } = await import(
+    '../../apps/desktop/src/main/services/model-swap'
+  )
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        // 源服务商：模型列表里没有 m → 判 missing
+        { id: 'p', name: 'P', apiHost: 'http://localhost:1/v1', enabled: true, models: [{ id: 'gone' }] },
+        // 目标：本机地址，不需要密钥
+        { id: 'q', name: 'Q', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'n' }] }
+      ]
+    }
+  })
+
+  // ① 主对话：带首尾空格的引用（模拟导入 / 手改配置留下的数据）
+  const main = cs.ensureSession('Ws1', { model: ' p:m ' })
+  main.title = 'SpacedRef'
+  eq('A24：前置——会话存的是带空格的原值', cs.save('Ws1'), true)
+
+  // ② 成员会话：真的用了别的模型（对照组，必须留在 skipped）
+  const sub = cs.ensureSession('Ws1-sub', { model: 'q:n' })
+  sub.title = 'Other'
+  sub.parentId = 'Ws1'
+  eq('A24：前置——成员会话落盘', cs.save('Ws1-sub'), true)
+  const s = cs.getSession('Ws1')!
+  s.members = [{ sessionId: 'Ws1-sub', name: 'Other', personaId: 'general' } as never]
+  cs.save('Ws1')
+
+  // 扫描：带空格的那个能被判失效（内部 trim 过），所以它会出现在红标清单里
+  const scan = await scanSessionsByModel('Ws1')
+  info('扫描结果', JSON.stringify(scan.map((b) => [b.sessionId, b.ref, b.kind])))
+  check(
+    'A24：带空格的引用能被判失效（所以用户会看到红标）',
+    scan.some((b) => b.sessionId === 'Ws1'),
+    JSON.stringify(scan)
+  )
+
+  // 替换：界面传来的 fromRef 是**没带空格**的规范值
+  const r = await applyModelSwap({ mainId: 'Ws1', fromRef: 'p:m', toRef: 'q:n' })
+  if ('error' in r) {
+    fail('A24：不该整批拒绝', JSON.stringify(r))
+    return
+  }
+  info('替换结果', JSON.stringify({ changed: r.changed.map((b) => b.sessionId), skipped: r.skipped.map((b) => b.sessionId) }))
+
+  eq('A24：带空格的会话被换掉（以前落进 skipped 永远换不掉）', r.changed.map((b) => b.sessionId), ['Ws1'])
+  eq('A24：磁盘上的值已更新为 toRef', cs.getSession('Ws1')?.model, 'q:n')
+
+  // A25：跳过项的 ref 是**真实的另一个模型**，不是「同一个值带空格」
+  eq('A25：真正用了别的模型的仍跳过', r.skipped.map((b) => b.sessionId), ['Ws1-sub'])
+  check(
+    'A25：跳过项的理由成立——它确实是另一个引用（归一后也不同于 from）',
+    r.skipped.every((b) => b.ref.trim() !== 'p:m'),
+    JSON.stringify(r.skipped.map((b) => b.ref))
+  )
+  // 被换掉的那条不该出现在 skipped 里（否则界面会说「它用的是别的模型」，那是错的）
+  check(
+    'A25：被换掉的会话不出现在 skipped 里',
+    !r.skipped.some((b) => b.sessionId === 'Ws1'),
+    JSON.stringify(r.skipped.map((b) => b.sessionId))
+  )
+  // 用户数据不被归一化改写：另一个会话的原值保持原样
+  eq('A24：没被替换的会话原值一个字不改', cs.getSession('Ws1-sub')?.model, 'q:n')
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1499,6 +1574,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   cfgcorrupt: scenarioConfigCorrupt,
   swapfail: scenarioSwapWriteFail,
   kindcopy: scenarioKindCopy,
+  swapws: scenarioSwapWhitespace,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,
