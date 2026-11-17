@@ -1939,13 +1939,20 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
       return { content: `${id} 是项目私有记忆，但当前未挂载工作区，无法定位`, summary: '未找到', isError: true }
     const scope: MemoryScope =
       kind === 'project' ? { kind: 'project', root: ctx.workspaceRoot as string } : GLOBAL_SCOPE
-    const removed = deleteMemory(id, scope)
-    if (!removed)
+    const r = deleteMemory(id, scope)
+    if (!r.removed)
       return { content: `不存在 id 为 ${id} 的记忆（可先用 memory_read 查看）`, summary: '未找到', isError: true }
+    // 盘上没删掉就不能回「已删除」：模型会据此告诉用户「记下了」，而重启后它又回来
+    if (!r.written)
+      return {
+        content: `记忆 ${id} 未能从磁盘删除（磁盘空间 / 权限 / 文件被占用），请稍后重试`,
+        summary: '未删除',
+        isError: true
+      }
     return {
-      content: `已删除记忆：${formatMemoryLine(removed)}`,
+      content: `已删除记忆：${formatMemoryLine(r.removed)}`,
       summary: '已删除',
-      listing: memoryDeletedRecord(removed.id)
+      listing: memoryDeletedRecord(r.removed.id)
     }
   },
   propose_agent: async (a, _ctx) => {

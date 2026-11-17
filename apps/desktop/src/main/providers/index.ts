@@ -1,4 +1,4 @@
-import { getSecret } from '../services/secrets'
+import { readSecret } from '../services/secrets'
 import { streamAnthropic } from './anthropic'
 import { streamOpenAI } from './openai'
 import { providerHeaders } from './opencode'
@@ -47,7 +47,27 @@ export async function* streamChat(
   cfg: StreamChatConfig,
   req: GenerateRequest
 ): AsyncGenerator<StreamEvent> {
-  const apiKey = (await getSecret(cfg.providerId)) ?? ''
+  const secret = await readSecret(cfg.providerId)
+  /*
+   * 三种情况必须分开，否则「解不开」会被当成「没配过」：
+   *  - `absent`：真的没配。**以空串继续**——本地 Ollama 这类可无钥服务靠这个工作，不能拦；
+   *  - `unreadable`：有密文但解不开（换账户 / 换机 / 本机无加密）。**立刻报 auth 错误并说清原因**：
+   *    继续用空串请求会拿到 401，用户被引向「密钥填错了」，而真正要做的可能是重填或装 libsecret；
+   *  - `ok`：正常注入。
+   */
+  if (secret.kind === 'unreadable') {
+    yield {
+      type: 'error',
+      error: {
+        kind: 'auth',
+        retryable: false,
+        message: `无法读取 ${cfg.providerId} 的密钥：${secret.reason}`
+      }
+    }
+    yield { type: 'done', stopReason: 'error' }
+    return
+  }
+  const apiKey = secret.kind === 'ok' ? secret.value : ''
   // 服务商专有头（如 OpenCode Go 的会话 id + 自有 UA）：只对认得的端点非空，其余服务商不受影响。
   const adapterCfg = {
     baseURL: cfg.baseURL,

@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { getConfig, getDevaHome, setConfig } from './config'
-import { deleteSecretsByPrefix, getSecret } from './secrets'
+import { deleteSecretsByPrefix, readSecret } from './secrets'
 import { setRoles } from './ext-roles'
 
 /**
@@ -270,26 +270,43 @@ async function resolveValueMap(
     if (typeof v === 'string') {
       if (v) out[k] = v
     } else if (v && typeof v.secretRef === 'string') {
-      const val = await getSecret(`mcp:${id}:${v.secretRef}`)
-      if (val) out[k] = val // 未配置 / 解密失败 → 跳过该项（绝不注入空值）
+      const read = await readSecret(`mcp:${id}:${v.secretRef}`)
+      if (read.kind === 'ok') out[k] = read.value
+      else if (read.kind === 'unreadable') {
+        // 绝不注入空值（那会让 MCP 服务启动后鉴权失败，看不出是本地解不开）；
+        // 原因由 missingSecrets 的预检通道报给界面。
+        console.warn(`[mcp] ${id} 的字段 ${k} 密钥读不出来：${read.reason}`)
+      }
+      // absent：本来就没配 → 同样跳过（缺密钥由 missingSecrets 报）
     }
   }
   return out
 }
 
 /**
- * 尚无可用值的密钥字段名（未填写或解密失败）。连接前预检：缺密钥的服务直接标「待填密钥」，
- * 不再明知会鉴权失败还去起进程 / 发请求。只看当前传输方式用到的那张表（env 或 headers）。
+ * 尚无可用值的密钥字段名。连接前预检：缺密钥的服务直接标「待填密钥」，不再明知会鉴权失败还去起进程。
+ *
+ * ⚠️ **「没配」与「解不开」必须分开**：以前两者都算进这个数组，界面统一提示「待填密钥」——
+ * 用户会去重填一遍，而如果是换了账户导致解不开，重填确实能解决，但他不知道为什么；
+ * 反过来如果是本机没有加密能力，重填也存不进去。所以额外给一个 `unreadable` 明细。
  */
-export async function missingSecrets(cfg: McpServerConfig): Promise<string[]> {
+export async function missingSecrets(
+  cfg: McpServerConfig
+): Promise<{ fields: string[]; unreadable: Array<{ field: string; reason: string }> }> {
   const map = cfg.transport === 'stdio' ? cfg.env : cfg.headers
-  const out: string[] = []
-  if (!map) return out
+  const fields: string[] = []
+  const unreadable: Array<{ field: string; reason: string }> = []
+  if (!map) return { fields, unreadable }
   for (const [k, v] of Object.entries(map)) {
     if (typeof v === 'string' || !v || typeof v.secretRef !== 'string') continue
-    if (!(await getSecret(`mcp:${cfg.id}:${v.secretRef}`))) out.push(k)
+    const read = await readSecret(`mcp:${cfg.id}:${v.secretRef}`)
+    if (read.kind === 'absent') fields.push(k)
+    else if (read.kind === 'unreadable') {
+      fields.push(k) // 仍然算「没有可用值」，连接前要拦住
+      unreadable.push({ field: k, reason: read.reason })
+    }
   }
-  return out
+  return { fields, unreadable }
 }
 
 /** 解析 stdio 的环境变量（明文 + 解密后的密钥）。 */

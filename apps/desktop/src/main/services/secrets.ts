@@ -55,21 +55,67 @@ async function persist(): Promise<void> {
 }
 
 /**
- * 主进程内部使用：取解密后的密钥。返回 null 表示未配置或无法解密。
- * 仅供 provider 适配层 / MCP 连接层在发起请求时调用，绝不经 IPC 返回渲染层。
- * 键约定：provider 用 providerId；MCP 用 `mcp:<serverId>:<field>`。
+ * 取解密后的密钥，**三态**返回。
+ *
+ * ## 为什么不能再用 `string | null`
+ *
+ * 以前 `catch { return null }`，于是三种完全不同的情况同形：
+ *  1. 没配过（`store` 里没有这个 key）；
+ *  2. 这台机器没有可用加密（Linux 缺 libsecret）；
+ *  3. **有密文但解不开**（换了 OS 账户 / 换机 / DPAPI 凭据损坏）。
+ *
+ * 第 3 种是本次导入最可能踩到的：密文从原版搬过来了，但 `decryptString` 抛错。返回 null 会让界面
+ * 显示「没配过密钥」，用户去重填一遍——而实际是解不开，重填能解决，但他永远不知道原因；更糟的是
+ * 请求侧会拿空串去请求，得到的 `401` 被归成「密钥错误」而不是「本地解不开」。
+ *
+ * 三态：
+ *  - `absent`：真没配过。调用方按「无密钥」处理（本地 Ollama 这类可无钥的服务照常继续）；
+ *  - `ok`：取到了明文；
+ *  - `unreadable`：**有密文但解不出来**，或本机压根没有加密能力。调用方必须**明确报错**，不能静默用空值。
+ *
+ * 绝不经 IPC 返回渲染层（明文不出主进程这一条不变）；渲染层要看「配没配」用 `hasSecret`。
  */
-export async function getSecret(key: string): Promise<string | null> {
+export type SecretRead =
+  | { kind: 'absent' }
+  | { kind: 'ok'; value: string }
+  /** `reason` 是给人看的原因，`code` 供调用方分类（`no-encryption` 可指引装 libsecret，`decrypt-failed` 指引重填）。 */
+  | { kind: 'unreadable'; code: 'no-encryption' | 'decrypt-failed'; reason: string }
+
+/**
+ * @param key 键约定：provider 用 providerId；MCP 用 `mcp:<serverId>:<field>`；remote 用 `remote:<botId>:<field>`。
+ */
+export async function readSecret(key: string): Promise<SecretRead> {
   await ensureLoaded()
   const enc = store[key]
-  if (!enc) return null
-  if (!safeStorage.isEncryptionAvailable()) return null
+  // 没这个 key 才是「没配过」。注意 `!enc` 与「配了空值」区分：空值在 setSecret 里已被当作删除。
+  if (!enc) return { kind: 'absent' }
+  if (!safeStorage.isEncryptionAvailable()) {
+    return {
+      kind: 'unreadable',
+      code: 'no-encryption',
+      reason: '本机没有可用的加密存储（Linux 需 libsecret / gnome-keyring），已保存的密文无法解密'
+    }
+  }
   try {
-    return safeStorage.decryptString(Buffer.from(enc, 'base64'))
-  } catch {
-    return null
+    return { kind: 'ok', value: safeStorage.decryptString(Buffer.from(enc, 'base64')) }
+  } catch (e) {
+    /*
+     * 解不开最典型的原因是**换了 OS 用户账户 / 换了机器**：DPAPI 密文绑定账户。
+     * 这条必须让用户看到「是解不开，不是没配」——两者的处置不同（重填 vs 什么都不用做）。
+     */
+    return {
+      kind: 'unreadable',
+      code: 'decrypt-failed',
+      reason: `密钥密文解不开（多半是换了 Windows 账户或换了机器），需要重新填写：${(e as Error)?.message ?? e}`
+    }
   }
 }
+
+/*
+ * ⚠️ 这里原先有一个 `getSecret(): Promise<string | null>` 兼容层（把 `unreadable` 折成 `null`）。
+ * 本轮把所有调用点都迁到 `readSecret` 之后它已无调用者，随即删除——留着它，下一个人会顺手用回那个
+ * 「解不开 = 没配过」的版本，而这正是这次要消灭的静默。凡是要密钥，一律 `readSecret` 并显式处理三态。
+ */
 
 /**
  * 主进程内部使用：写入 / 更新密钥（空串视为删除）。加密不可用时拒绝写入（绝不静默存明文）。
@@ -106,15 +152,40 @@ export async function hasSecret(key: string): Promise<boolean> {
  * 绕开它写盘会让本进程继续用旧内存态，导入的密钥「导了但用不上」，要重启才生效。
  *
  * 加密不可用时拒绝（与 setSecret 同口径：绝不静默存明文）；已有同 key 不覆盖（调用方先 hasSecret 判断）。
+ *
+ * **四种失败各有原因，必须分开报**：以前统一返回 boolean，调用方（导入器）只能把它们一起算成「跳过」——
+ * 于是**写盘失败穿上「已存在」的衣服**，界面「跳过 N」把真失败盖住。这与记忆那条是同一个病：返回值粒度不足。
  */
-export async function importEncryptedSecret(key: string, cipherTextBase64: string): Promise<boolean> {
+export type ImportSecretResult =
+  /** 已写入目标 secrets.json */
+  | { ok: true }
+  /** 目标已有同名 key：保留本地的，属于正常跳过 */
+  | { ok: false; code: 'exists' }
+  /** key / 密文为空：源数据有问题，跳过 */
+  | { ok: false; code: 'invalid' }
+  /** 系统未提供加密（无 DPAPI / keychain）：不能存明文，只能跳过 */
+  | { ok: false; code: 'no-encryption' }
+  /** 内存里写进去了但没落盘：这是**真失败**，重启后密钥就没了 */
+  | { ok: false; code: 'write-failed' }
+
+export async function importEncryptedSecret(
+  key: string,
+  cipherTextBase64: string
+): Promise<ImportSecretResult> {
   await ensureLoaded()
-  if (!key || !cipherTextBase64) return false
-  if (!safeStorage.isEncryptionAvailable()) return false
-  if (key in store) return false
+  if (!key || !cipherTextBase64) return { ok: false, code: 'invalid' }
+  if (!safeStorage.isEncryptionAvailable()) return { ok: false, code: 'no-encryption' }
+  if (key in store) return { ok: false, code: 'exists' }
   store[key] = cipherTextBase64
-  await persist()
-  return true
+  try {
+    await persist()
+  } catch (e) {
+    // 落盘失败：把内存态退回原状再报错，否则本次进程内 getSecret 能取到、重启后消失（最难查的一种）。
+    delete store[key]
+    console.warn('[secrets] 导入的密钥写盘失败：', (e as Error)?.message ?? e)
+    return { ok: false, code: 'write-failed' }
+  }
+  return { ok: true }
 }
 
 /** 删除某密钥（幂等）。 */

@@ -1,5 +1,5 @@
 import { describeNetError, httpFetch } from '../http'
-import { getSecret } from './secrets'
+import { readSecret } from './secrets'
 import { httpError, type ErrorKind, type NormalizedError } from '../providers/types'
 
 /**
@@ -158,7 +158,9 @@ async function decideJev(
   state: DecisionState,
   questions: DecisionQuestion[]
 ): Promise<DecisionResult> {
-  const apiKey = (await getSecret(cfg.providerId)) ?? ''
+  const secret = await readSecret(cfg.providerId)
+  if (secret.kind === 'unreadable') return { ok: false, outcomes: [], kind: 'auth', message: secret.reason }
+  const apiKey = secret.kind === 'ok' ? secret.value : ''
   if (!apiKey) return { ok: false, outcomes: [], kind: 'auth', message: 'no-key' }
   const base = normalizeBase(cfg.baseURL)
   try {

@@ -404,8 +404,17 @@ async function reconcile(id: string, keepRetry = false): Promise<boolean> {
   }
   const missing = await missingSecrets(cfg)
   if (tickets.get(id) !== ticket || shuttingDown) return false
-  if (missing.length) {
-    settle(id, 'needs_secret', null, missing)
+  if (missing.fields.length) {
+    /*
+     * 「缺密钥」与「解不开」分别给不同状态：
+     *  - 有解不开的 → `needs_secret` 但带上原因（界面能提示「换了账户，需重填」）；
+     *  - 纯缺 → `needs_secret`（普通的「待填密钥」）。
+     * 之所以仍然拦住连接：没有可用密钥去起进程只会得到鉴权失败，看不出是本地问题。
+     */
+    if (missing.unreadable.length) {
+      console.warn(`[mcp] ${id} 有 ${missing.unreadable.length} 个字段的密钥解不开：`, JSON.stringify(missing.unreadable))
+    }
+    settle(id, 'needs_secret', null, missing.fields)
     return false
   }
   return connect(id, cfg)

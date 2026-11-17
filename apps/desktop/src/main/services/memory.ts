@@ -1,5 +1,5 @@
 import { ipcMain } from 'electron'
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'fs'
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { dirname, join } from 'path'
 import { getDevaHome } from './config'
@@ -92,14 +92,59 @@ function memoryPath(scope: MemoryScope): string {
   return join(getDevaHome(), 'memory.json')
 }
 
-/** 读取某作用域的全部记忆（按创建时间升序）。文件不存在 / 损坏视为空，绝不抛错。 */
-export function listMemories(scope: MemoryScope = GLOBAL_SCOPE): MemoryEntry[] {
+/**
+ * 读取记忆文件的三态结果。
+ *
+ * 为什么单调的 `MemoryEntry[]` 不够：`[]` 同时表示「确实没有」和「读不出来」两件事，而写入路径是
+ * 「读全量 → 改 → 整份覆盖」。把「读不出来」当成「没有」，一次瞬时占用就会抹掉用户全部记忆。
+ * `unreadable` 必须让写入直接拒绝（并把原因浮到界面 / 工具返回）。
+ */
+export type MemoryRead =
+  /** 文件不存在：这是第一次使用，`entries` 为空且可以安全写入。 */
+  | { kind: 'absent'; entries: MemoryEntry[] }
+  /** 读到了且解析成功。 */
+  | { kind: 'ok'; entries: MemoryEntry[] }
+  /** 存在但读不出来 / 解析不了：**不知道盘上有什么，绝不能覆盖写**。 */
+  | { kind: 'unreadable'; error: string }
+
+/** 读取某作用域的全部记忆（按创建时间升序）。
+ *
+ * ## ⚠️ 为什么不能「读失败就返回空数组」
+ *
+ * 这个函数的结果会被**整体覆盖写回**（writeMemory / deleteMemory 都是「读全量 → 改 → 落盘」）。
+ * 若读失败返回 `[]`，一次瞬时故障就会把用户的全量记忆覆盖成只剩这一条：
+ *
+ *  - 文件被独占（Windows 上杀毒 / 索引服务扫盘）→ readFileSync 抛 EBUSY；
+ *  - 权限被改坏（EACCES）；
+ *  - 文件是半截 JSON（上次写盘中断）→ JSON.parse 抛。
+ *
+ * 三种情况下「盘上其实有内容」，返回 `[]` 就等于宣布「你本来就没有记忆」，随后写入会把它抹掉。
+ * 这是本仓库最危险的一类静默错误：不报错，但数据没了。
+ *
+ * 所以这里把「读不出来」与「确实没有」分开，用 `readMemories` 返回显式的三态；`listMemories` 保留旧签名
+ * （调用方只读展示，读不出来就当没有可以接受），**写入路径必须用 `readMemories` 并拒绝在 `unreadable` 时写**。
+ */
+export function readMemories(scope: MemoryScope = GLOBAL_SCOPE): MemoryRead {
   const p = memoryPath(scope)
-  if (!existsSync(p)) return []
+  let raw: string
   try {
-    const parsed = JSON.parse(readFileSync(p, 'utf8')) as { entries?: unknown }
-    if (!Array.isArray(parsed?.entries)) return []
-    return parsed.entries
+    raw = readFileSync(p, 'utf8')
+  } catch (e) {
+    // ENOENT = 真的还没有（第一次使用）。其它错误是「读不到」，绝不能当成空
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent', entries: [] }
+    return { kind: 'unreadable', error: (e as Error)?.message ?? String(e) }
+  }
+  let parsed: { entries?: unknown }
+  try {
+    parsed = JSON.parse(raw) as { entries?: unknown }
+  } catch (e) {
+    // 解析不了 = 内容坏（半截写入）。写入前必须拦住，否则会拿「只有一条」覆盖掉原本能救回的文件
+    return { kind: 'unreadable', error: `记忆文件解析失败：${(e as Error)?.message ?? String(e)}` }
+  }
+  if (!Array.isArray(parsed?.entries)) return { kind: 'unreadable', error: '记忆文件结构异常（entries 不是数组）' }
+  return {
+    kind: 'ok',
+    entries: parsed.entries
       .filter(
         (e): e is MemoryEntry =>
           !!e &&
@@ -112,19 +157,62 @@ export function listMemories(scope: MemoryScope = GLOBAL_SCOPE): MemoryEntry[] {
         createdAt: Number(e.createdAt) || 0,
         updatedAt: Number(e.updatedAt) || Number(e.createdAt) || 0
       }))
-  } catch {
-    return []
   }
 }
 
-function saveMemories(scope: MemoryScope, entries: MemoryEntry[]): void {
+/**
+ * 只读展示用的便利包装：读不出来就当空（界面显示「还没有记忆」比报错更合适，且它不写盘、不会丢数据）。
+ *
+ * ⚠️ **凡是要落盘的地方都不许用它**——那样读失败会被写成「空」。写入路径见 writeMemory / deleteMemory
+ * 里对 `readMemories` 三态的处理。
+ */
+export function listMemories(scope: MemoryScope = GLOBAL_SCOPE): MemoryEntry[] {
+  const r = readMemories(scope)
+  return r.kind === 'unreadable' ? [] : r.entries
+}
+
+/**
+ * 落盘某作用域的记忆。**返回是否成功，绝不抛**。
+ *
+ * 为什么把异常转成返回值：调用方 `writeMemory` 的契约是 `{ ok:false, code }`（配额满 / 超长都这样表达），
+ * 写盘失败却被抛成异常——于是导入器的「单条失败不中断整轮」承诺在第一条写不进去的记忆上就破产：
+ * 异常一路穿到 runImport 的兜底 catch，⑤技能 ⑥会话 ⑦附件 全部不执行，报告只剩一条 `unknown`。
+ * 界面上看不到「还有 N 条记忆/会话没导」，用户以为导入完整。所以这里统一成 `false`。
+ *
+ * 注意 `writeFileSync` + `renameSync` 是两步：tmp 写成功但 rename 失败（Windows 上目标被杀毒/索引服务占用）
+ * 时，旧文件仍是完整的（原子写的意义），但这次的新内容没落盘——同样按失败上报，且顺手清掉残留 tmp。
+ */
+function saveMemories(scope: MemoryScope, entries: MemoryEntry[]): boolean {
   const p = memoryPath(scope)
-  mkdirSync(dirname(p), { recursive: true })
   const tmp = `${p}.tmp`
   // 项目记忆顺带记下原始路径：只为人工排查「这个哈希目录是哪个项目」，读取时不依赖它。
   const body = scope.kind === 'project' ? { version: 1, root: scope.root, entries } : { version: 1, entries }
-  writeFileSync(tmp, JSON.stringify(body, null, 2), 'utf8')
-  renameSync(tmp, p)
+  const data = JSON.stringify(body, null, 2)
+  try {
+    mkdirSync(dirname(p), { recursive: true })
+    writeFileSync(tmp, data, 'utf8')
+    try {
+      renameSync(tmp, p)
+    } catch (e) {
+      // rename 失败：清掉残留 tmp，别让它被误当成「记忆文件」
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        /* 清理失败无害 */
+      }
+      console.warn('[memory] 记忆文件改名失败：', (e as Error)?.message ?? e)
+      return false
+    }
+    return true
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* 清理失败无害 */
+    }
+    console.warn('[memory] 记忆落盘失败：', (e as Error)?.message ?? e)
+    return false
+  }
 }
 
 function newId(scope: MemoryScope, existing: MemoryEntry[]): string {
@@ -147,7 +235,24 @@ export function memoryUsage(entries: MemoryEntry[]): number {
 }
 
 /** 失败原因码：渲染层据此走 i18n，工具回灌则用 error 文本。 */
-export type MemoryErrorCode = 'empty' | 'tooLong' | 'full' | 'budget' | 'notFound' | 'duplicate'
+export type MemoryErrorCode =
+  | 'empty'
+  | 'tooLong'
+  | 'full'
+  | 'budget'
+  | 'notFound'
+  | 'duplicate'
+  /**
+   * 落盘失败（磁盘满 / 无权限 / 文件被占）。**与上面几个码性质不同**：那些是「输入不合法，改一改就能写」，
+   * 这个是「输入没问题，但这次没存下去」。以前它表现为抛异常，导入器整轮被掀翻；现在作为一种普通失败返回。
+   */
+  | 'writeFailed'
+  /**
+   * **读取**失败（文件被占用 / 无权限 / 半截 JSON）→ 为免覆盖掉盘上原有内容，本次拒绝写入。
+   * 与 `writeFailed` 必须分开：那条是「读了但没写下去，重试就行」，这条是「连盘上有什么都不知道」，
+   * 处置完全不同（要先检查文件，绝不能盲目重试——重试的后果是拿一条覆盖全量）。
+   */
+  | 'readFailed'
 
 export type MemoryWriteResult =
   | { ok: true; entry: MemoryEntry; created: boolean }
@@ -165,6 +270,32 @@ function budgetError(scope: MemoryScope, used: number): MemoryWriteResult {
   }
 }
 
+/**
+ * 落盘失败的统一表达。刻意不写成抛异常：这条路径会经过记忆面板的 IPC、memory_write 工具、以及导入器，
+ * 三处都更愿意拿到一个 `ok:false` 而不是被迫 try/catch（导入器那边的后果是整轮中断）。
+ */
+function writeFailed(scope: MemoryScope): MemoryWriteResult {
+  return {
+    ok: false,
+    code: 'writeFailed',
+    error: `${scopeLabel(scope)}未能写入磁盘（磁盘空间 / 权限 / 文件被占用），本次修改没有保存`
+  }
+}
+
+/**
+ * 「读不出来」的统一表达。与 `writeFailed` 分开：那条是「读到了但没写下去」，这条是「连盘上有什么都不知道」。
+ *
+ * 为什么不能用 `writeFailed`：文案会让用户以为「只是这次没存上，重试即可」，而实际上一次覆盖写会把
+ * 盘上原有内容换成「只有这一条」。两者的处置完全不同（后者要用户先检查文件）。
+ */
+function readFailed(scope: MemoryScope, why: string): MemoryWriteResult {
+  return {
+    ok: false,
+    code: 'readFailed',
+    error: `${scopeLabel(scope)}文件读不出来（${why}），为避免覆盖掉原有内容，本次没有写入`
+  }
+}
+
 /** 新增（无 id）或覆盖更新（有 id）一条记忆。 */
 export function writeMemory(content: string, id?: string, scope: MemoryScope = GLOBAL_SCOPE): MemoryWriteResult {
   const lim = memoryLimits(scope)
@@ -176,7 +307,9 @@ export function writeMemory(content: string, id?: string, scope: MemoryScope = G
       code: 'tooLong',
       error: `单条记忆过长（${text.length} 字，上限 ${lim.maxChars}）：请提炼成一句话事实`
     }
-  const entries = listMemories(scope)
+  const read = readMemories(scope)
+  if (read.kind === 'unreadable') return readFailed(scope, read.error)
+  const entries = read.entries
   const now = Date.now()
   if (id) {
     const hit = entries.find((e) => e.id === id)
@@ -199,7 +332,7 @@ export function writeMemory(content: string, id?: string, scope: MemoryScope = G
     if (used > lim.budget && text.length > hit.content.length) return budgetError(scope, used)
     hit.content = text
     hit.updatedAt = now
-    saveMemories(scope, entries)
+    if (!saveMemories(scope, entries)) return writeFailed(scope)
     return { ok: true, entry: hit, created: false }
   }
   // 与现有条目逐字相同：视为已记住，不重复落盘。
@@ -215,23 +348,33 @@ export function writeMemory(content: string, id?: string, scope: MemoryScope = G
   const used = memoryUsage(entries) + formatMemoryLine(entry).length
   if (used > lim.budget) return budgetError(scope, used)
   entries.push(entry)
-  saveMemories(scope, entries)
+  if (!saveMemories(scope, entries)) return writeFailed(scope)
   return { ok: true, entry, created: true }
 }
 
-/** 删除一条记忆；返回被删条目（不存在则 null）。 */
-export function deleteMemory(id: string, scope: MemoryScope = GLOBAL_SCOPE): MemoryEntry | null {
-  const entries = listMemories(scope)
+/**
+ * 删除一条记忆。返回 `{ removed, written }`：
+ *  - `removed` 为 null 表示没有这条；
+ *  - `written=false` 表示「内存里删了但盘上还在」——界面必须能区分（以前它静默返回被删条目，
+ *    用户以为删掉了，重启后记忆又回来了）。
+ */
+export function deleteMemory(
+  id: string,
+  scope: MemoryScope = GLOBAL_SCOPE
+): { removed: MemoryEntry | null; written: boolean } {
+  const read = readMemories(scope)
+  // 读不出来时删什么都不确定：写成「没删掉」比抹掉全量安全。界面已有「删除失败」文案。
+  if (read.kind === 'unreadable') return { removed: null, written: false }
+  const entries = read.entries
   const idx = entries.findIndex((e) => e.id === id)
-  if (idx < 0) return null
+  if (idx < 0) return { removed: null, written: true }
   const [removed] = entries.splice(idx, 1)
-  saveMemories(scope, entries)
-  return removed
+  return { removed, written: saveMemories(scope, entries) }
 }
 
-/** 清空某作用域的全部记忆（仅用户经面板触发；模型没有对应工具）。 */
-export function clearMemories(scope: MemoryScope = GLOBAL_SCOPE): void {
-  saveMemories(scope, [])
+/** 清空某作用域的全部记忆（仅用户经面板触发；模型没有对应工具）。返回是否落盘成功。 */
+export function clearMemories(scope: MemoryScope = GLOBAL_SCOPE): boolean {
+  return saveMemories(scope, [])
 }
 
 /** 供 memory_read 回灌与记忆清单共用的单行格式。 */
@@ -348,12 +491,14 @@ export function registerMemoryIpc(): void {
   })
   ipcMain.handle('memory:delete', (_e, id: string, root?: string): MemoryIpcResult => {
     const scope = ipcScope(root)
-    deleteMemory(String(id ?? ''), scope)
+    const r = deleteMemory(String(id ?? ''), scope)
+    // 盘上没删掉就别说成功：界面上这条会消失（快照来自内存读），但重启后又回来
+    if (!r.written) return { ok: false, code: 'writeFailed' }
     return { ok: true, snapshot: snapshot(scope) }
   })
   ipcMain.handle('memory:clear', (_e, root?: string): MemoryIpcResult => {
     const scope = ipcScope(root)
-    clearMemories(scope)
+    if (!clearMemories(scope)) return { ok: false, code: 'writeFailed' }
     return { ok: true, snapshot: snapshot(scope) }
   })
 }

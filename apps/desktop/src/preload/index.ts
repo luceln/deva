@@ -37,7 +37,7 @@ import type {
   ModelSwapResult
 } from '../shared/chat-protocol'
 import type { GateResult, ImportProgress, ImportReport } from '../shared/import-protocol'
-import type { ConfigChangedEvent } from '../shared/config-protocol'
+import type { ConfigChangedEvent, ConfigSetResult } from '../shared/config-protocol'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
 export type {
@@ -273,6 +273,8 @@ export interface PersonaRecord {
   /** 正文 = 追加进主智能体系统提示词的内容。 */
   prompt: string
   enabled: boolean
+  /** 仅当角色文件没能写盘时出现（upsert 返回）：提示「重启后会消失」，别当成功。 */
+  writeFailed?: boolean
 }
 
 /** 本机用户资料（与 services/profile.ts 对齐）。 */
@@ -299,7 +301,26 @@ export interface MemorySnapshot {
   maxEntries: number
   maxChars: number
 }
-export type MemoryErrorCode = 'empty' | 'tooLong' | 'full' | 'budget' | 'notFound' | 'duplicate'
+/**
+ * 记忆写入的失败码（主进程 `services/memory.ts` 的 `MemoryErrorCode` 必须与这里一致）。
+ *
+ * `writeFailed` = 输入没问题但**没落盘**（磁盘满 / 无权限 / 文件被占）。与其余几个码性质不同：那些是
+ * 「改一改输入就能写」，这个是「稍后重试」。界面要给它单独文案——漏了它会显示成 `cf.profile.err.writeFailed`
+ * 原文（渲染层对未知码直接 `t(code)`）。
+ */
+export type MemoryErrorCode =
+  | 'empty'
+  | 'tooLong'
+  | 'full'
+  | 'budget'
+  | 'notFound'
+  | 'duplicate'
+  | 'writeFailed'
+  /**
+   * **读取**失败（文件被占用 / 无权限 / 半截 JSON）→ 为免覆盖盘上原有内容，主进程拒绝了本次写入。
+   * 与 `writeFailed` 分开：那条是「重试即可」，这条是「盘上有什么都不知道」，要用户先检查文件。
+   */
+  | 'readFailed'
 export type MemoryIpcResult = { ok: true; snapshot: MemorySnapshot } | { ok: false; code: MemoryErrorCode }
 
 /** Agent 提示词新建/更新入参（有 id 覆盖，无 id 新建）。 */
@@ -665,9 +686,16 @@ const api = {
     /** 同步取整份配置，供首帧读取主题/语言，避免闪烁 */
     getSync: (): Record<string, unknown> => ipcRenderer.sendSync('config:get-sync'),
     get: (): Promise<Record<string, unknown>> => ipcRenderer.invoke('config:get'),
-    /** 顶层浅合并补丁（值为 undefined 删除该键） */
-    set: (patch: Record<string, unknown>): Promise<{ ok: true }> =>
-      ipcRenderer.invoke('config:set', patch),
+    /**
+     * 顶层浅合并补丁（值为 undefined 删除该键）。`models` 段走**合并**语义：渲染层整段回写的是它加载时的快照，
+     * 主进程会以当前配置为基准合并（同 id 覆盖、未知 id 保留、新增追加），所以陈旧快照抹不掉别人后来写的 provider。
+     *
+     * **删除 provider 必须显式列在 `removedProviders` 里**——合并语义下「incoming 里没有」不等于「用户删了」
+     * （也可能只是快照旧）。不传就删不掉。
+     */
+    set: (
+      patch: Record<string, unknown> & { removedProviders?: string[] }
+    ): Promise<ConfigSetResult> => ipcRenderer.invoke('config:set', patch),
     /**
      * 订阅「配置被外部批量改动」（如从原版导入并入服务商 / 角色启用态）。
      * 渲染层据此重载模型、角色列表，不必重启或切页。返回取消订阅函数。

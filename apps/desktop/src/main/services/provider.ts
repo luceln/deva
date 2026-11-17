@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import { describeNetError, httpFetch } from '../http'
-import { getSecret } from './secrets'
+import { readSecret } from './secrets'
 import { opencodeModelsURL, providerHeaders } from '../providers/opencode'
 import { httpError, type ErrorKind, type NormalizedError } from '../providers/types'
 
@@ -72,7 +72,10 @@ function extractModelIds(json: unknown): string[] {
 export function registerProviderIpc(): void {
   // 拉取模型清单：GET /models（OpenAI 风味）或 /v1/models（Anthropic），失败时 UI 退回手动输入。
   ipcMain.handle('provider:list-models', async (_e, cfg: ProbeConfig): Promise<ListModelsResult> => {
-    const apiKey = (await getSecret(cfg.providerId)) ?? ''
+    const secret = await readSecret(cfg.providerId)
+    // 解不开要说清是「本地解不开」而不是「密钥错」：否则用户会去复制粘贴一遍密钥，而问题在账户/加密环境。
+    if (secret.kind === 'unreadable') return { ok: false, kind: 'auth', message: secret.reason }
+    const apiKey = secret.kind === 'ok' ? secret.value : ''
     const base = normalizeBase(cfg.baseURL)
     // 清单地址：opencode 网关只在推理根下给 /v1/models（各 API 路径下没有清单，照常规拼法必 404）；
     // 同一份清单服务三套协议——网关对每个模型都提供了跨协议翻译，故不按适配器筛选。
