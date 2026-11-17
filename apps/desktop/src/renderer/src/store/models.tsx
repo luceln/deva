@@ -1,6 +1,7 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { seedProviders, type Provider, type ModelDef, type ProviderPurpose } from '../mock/models'
 import type { EffortLevel } from '../../../preload'
+import type { ConfigSetResult } from '../../../shared/config-protocol'
 
 /**
  * 模型配置（全局，与项目无关）。
@@ -111,6 +112,17 @@ function normalizeProvider(raw: unknown): Provider | null {
   } as Provider
 }
 
+/**
+ * 写盘成功后，把「本次已声明的删除」从待删清单里减掉，返回剩下的。
+ *
+ * 抽成纯函数是为了让规则可测（`npm test` 之外用一次性脚本也能验）。规则本身很关键：
+ * 只能减掉**本次真正写盘的那些 id**，不能整体清空——见回写 effect 处的注释（并发写盘互踩）。
+ */
+export function settleRemovedProviders(pending: string[], written: string[]): string[] {
+  const done = new Set(written)
+  return pending.filter((x) => !done.has(x))
+}
+
 export function ModelsProvider({ children }: { children: ReactNode }): React.JSX.Element {
   const [providers, setProviders] = useState<Provider[]>(() =>
     seedProviders.map((p) => ({ ...p, purpose: p.purpose ?? 'llm', models: p.models.map((mm) => ({ ...mm })) }))
@@ -127,6 +139,25 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
 
   // 配置载入完成前不回写，避免用默认种子覆盖已存 ~/.deva-plus/config.json
   const [hydrated, setHydrated] = useState(false)
+
+  /**
+   * 已删除、但**尚未确认写盘成功**的服务商 id。
+   *
+   * 为什么不直接用 `providers` 的差集：主进程的 models 写入是「整段替换 + 保留它认识、而本次补丁里没有的
+   * provider」，因为导入可能在这一瞬间并入了新 provider。所以删除必须**显式声明**，主进程才知道「这些是
+   * 用户主动删的，不是它不知道的」。
+   *
+   * 为什么是 ref 而不是 state：只求「回写那一刻的值」，进 state 会让回写 effect 多一次渲染、
+   * 多一轮写盘。它**绝不能进 effect 的 deps**——写成功后清空会再触发一次回写，形成自激循环，
+   * 正好破坏 config.ts 那句「刻意不广播，避免刷新循环」的保护。
+   *
+   * 生命周期：`removeProvider` 里追加 → 回写成功后清掉**本次已声明的那批** → 回写失败/抛错则原样保留，
+   * 下次回写继续声明。清了就等于「这次删除永久放弃」：主进程没删，后续别的路径的合并写会把 provider 带回来。
+   *
+   * ⚠️ 目前只有 `removeProvider`（下方 :282 附近）会产生删除。将来若加「批量清空」「重置为预置」这类入口，
+   * 必须同样往这里记，否则删除不生效（主进程会把它当成「它不知道的 provider」保留下来）。
+   */
+  const removedProvidersRef = useRef<string[]>([])
 
   // 外部批量改动（导入）后递增，用来重跑下面的载入 effect。
   const [reloadNonce, setReloadNonce] = useState(0)
@@ -207,10 +238,47 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
   }, [])
 
   // 变更后回写（仅在 hydrate 之后）。密钥不在此列——始终只在主进程加密存储。
+  //
+  // 补丁里带 `removedProviders`：主进程对 models 段做「整段替换 + 保留它不认识的 provider + 按这里声明删除」，
+  // 不声明删除的话，被删的 provider 会被当成「导入刚并进来的」保留回来。
+  //
+  // 写成 async 并检查返回值：旧契约是 `Promise<{ ok: true }>`，没有失败态，于是写盘失败被默默吞掉——
+  // 用户删了服务商，重启后又回来，界面还提示删成功了。现在主进程回 ConfigSetResult，失败要能看见。
+  //
+  // 回收 ref 的规则（三条都不能动）：
+  //  1. 成功清空，**queued:true 也清**：主进程在导入期间把整个 patch（含 removedProviders）推进队列，
+  //     drain 时照样会用它；不清的话同一次删除会在后续每次回写里重复声明，让「ref 何时清空」变得不可推理。
+  //  2. 失败（ok:false）必须保留：清了等于这次删除永久放弃，而主进程那边没删。
+  //  3. 抛异常/通道不可用同样保留，并留 console 出口。
   useEffect(() => {
     if (!hydrated) return
-    // models 段整块替换（config:set 只做顶层浅合并），新增的兄弟字段必须一并写，漏写即被清掉。
-    void window.deva.config.set({ models: { providers, activeModelId, activeEffort } })
+    void (async () => {
+      const removed = removedProvidersRef.current
+      // models 段整块替换（config:set 只做顶层浅合并），新增的兄弟字段必须一并写，漏写即被清掉。
+      let r: ConfigSetResult
+      try {
+        r = await window.deva.config.set({
+          models: { providers, activeModelId, activeEffort },
+          // 没有待删项时不写这个键：让补丁形态与从前一致，避免给主进程传一个空数组。
+          ...(removed.length ? { removedProviders: removed } : {})
+        })
+      } catch (e) {
+        // 通道异常：保住 ref，下次回写继续声明这批删除。
+        console.warn('[models] config write threw', e)
+        return
+      }
+      // 这里**不加 unmounted 守卫**：ref 的回收不依赖组件还在不在，写成功就该收 ——
+      // 若因为 effect 被新一轮渲染顶掉（用户连点两次）而跳过清空，那批删除会一直被重复声明。
+      //
+      // 清空时**只移除本次真正写盘的那些 id**（不是整个清空）：删 A 的写盘还在路上时用户又删了 B，
+      // 会并发发起第二次写盘（ref 已是 [A,B]）。若 A 先回来就整体清空，B 那次写盘失败时 B 已经丢了——
+      // 而主进程没删成 B。按「从当前 ref 里减去本次已声明的」处理，两个并发写盘互不踩踏。
+      if (r?.ok) {
+        removedProvidersRef.current = settleRemovedProviders(removedProvidersRef.current, removed)
+      } else {
+        console.warn('[models] config write failed', r?.error)
+      }
+    })()
   }, [hydrated, providers, activeModelId, activeEffort])
 
   const patchProvider = (id: string, fn: (p: Provider) => Provider): void =>
@@ -277,6 +345,10 @@ export function ModelsProvider({ children }: { children: ReactNode }): React.JSX
         setActiveModelId((cur) => (cur === `${pid}:${mid}` ? null : cur))
       },
       removeProvider: (id) => {
+        // 先记账：models 段是「整段替换 + 保留主进程不认识的 provider」，不显式声明，主进程会把它当成
+        // 「导入刚并进来的那个」保留下来，用户的删除重启后又回来了。
+        // 记的是 ref，不触发渲染——回写由下面的 setProviders 引起的那一轮负责带上。
+        removedProvidersRef.current = [...new Set([...removedProvidersRef.current, id])]
         // 一并清理密钥、选中项与悬空默认模型；密钥删除交主进程（明文不经渲染层）
         void window.deva.secrets.delete(id)
         setProviders((list) => list.filter((p) => p.id !== id))
