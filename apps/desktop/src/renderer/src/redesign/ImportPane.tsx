@@ -10,8 +10,10 @@ import {
   type GateResult,
   type ImportProgress,
   type ImportReport,
+  type SecretsStat,
   type SourceSummary
 } from './importBridge'
+import type { Failure } from '../../../shared/import-protocol'
 
 /**
  * 设置 › 导入：把原版 Deva 的数据搬过来（服务商 / 角色 / 记忆 / 技能 / 会话 / 附件）。
@@ -32,13 +34,65 @@ import {
  * 结果里的一行对应一个可见步骤。`secrets` 不在进度事件的 step 取值里（密钥补缺发生在 ① 服务商 之内），
  * 它是主进程单独计数的一项，只在结果清单里占一行——密钥和 provider 混在一起数会让「服务商」那行虚高。
  */
-type RowStep = 'providers' | 'secrets' | 'personas' | 'memories' | 'skills' | 'sessions' | 'assoc'
+type RowStep = 'providers' | 'secrets' | 'personas' | 'personaEnabled' | 'memories' | 'skills' | 'sessions' | 'assoc'
 
-/** 记忆拒写的错误码 → 人能看懂的原因。主进程回的是 code，不是文案。 */
+/** 失败原因码 → 人能看懂的原因。主进程回的是 code，不是文案；未知码原样显示，不吞掉。 */
 const FAILURE_REASON_KEY: Record<string, string> = {
   budget: 'settings.import.reason.budget',
   full: 'settings.import.reason.full',
-  tooLong: 'settings.import.reason.tooLong'
+  tooLong: 'settings.import.reason.tooLong',
+  // 项目记忆缺少登记的项目路径，无法确定作用域（主进程只能跳过这一整个项目）。
+  'missing-root': 'settings.import.reason.missingRoot',
+  // 读回断言失败：本次导入的服务商 id 不在磁盘上。主进程只报不补（补一次会制造「成功」的假象），
+  // 用户需要重新导入一次才能补上。
+  'imported-provider-missing': 'settings.import.reason.importedProviderMissing',
+  // 会话 / 附件的目标位置被同名条目占住。以前被误分类成 skipped（「跳过」看着像正常），现在如实进失败。
+  'target-blocked': 'settings.import.reason.targetBlocked',
+  // 这台机器没有可用加密，密钥一个都没写进去。不是写盘失败，是根本没有存储能力。
+  'no-encryption': 'settings.import.reason.noEncryption',
+  // 目标位置有同名条目但读不出来（可能被别的程序占着）。这是**保护**：没敢覆盖它。
+  'target-unreadable': 'settings.import.reason.targetUnreadable',
+  // 复制写完发现字节数与源不一致（copyFileSync 非原子，写到一半被中断）。半截副本已删掉，重导即可补齐。
+  'copy-truncated': 'settings.import.reason.copyTruncated',
+  // secrets.json 写盘失败。与 config-write-failed 分开：那条是 config.json，这条是密钥文件，
+  // 用户按文案去查的位置不一样。
+  'secrets-write-failed': 'settings.import.reason.secretsWriteFailed',
+  // 源里的 secrets.json 内容坏了（半截 JSON）：一个密钥都没读到，逐条 key 无从谈起，用占位 id。
+  'source-secrets-corrupt': 'settings.import.reason.sourceSecretsCorrupt',
+  // 源侧 config.json / memory.json 读不出来或内容坏：整份资产一个都没导入，必须让用户看到。
+  'source-config-unreadable': 'settings.import.reason.sourceConfigUnreadable',
+  'source-config-corrupt': 'settings.import.reason.sourceConfigCorrupt',
+  'source-memory-unreadable': 'settings.import.reason.sourceMemoryUnreadable',
+  'source-memory-corrupt': 'settings.import.reason.sourceMemoryCorrupt',
+  // 源侧目录读不出来（同名文件占位 / ACL 改坏 / 被杀毒锁住）：那一类数据一个都没导入。
+  // 统一一个码、目录身份放 id 里，界面文案表不随导入步骤增长。
+  'source-dir-unreadable': 'settings.import.reason.sourceDirUnreadable',
+  // 角色导进来了，只有头像没复制成功。要让用户知道「角色能用，只是没头像」。
+  'avatar-copy-failed': 'settings.import.reason.avatarCopyFailed',
+  // 记忆文件读不出来 → 主进程拒绝写入（避免「读失败当成空」把全量覆盖掉）。复用 profile 的现成文案，
+  // 不为导入面板再写一条同义句。
+  readFailed: 'cf.profile.err.readFailed',
+  writeFailed: 'cf.profile.err.writeFailed',
+  // 下面两个不限于某一步：config.json 写盘失败出现在服务商 / 角色启用态，link-failed 出现在技能建链接。
+  'config-write-failed': 'settings.import.reason.configWriteFailed',
+  'link-failed': 'settings.import.reason.linkFailed'
+}
+
+/**
+ * 闸门失败原因的显示文案。
+ *
+ * 取值顺序：
+ * 1. `source-running` / `no-source` 这两个「固定句子」走 i18n —— 最常出现的两种，文案与界面同源。
+ * 2. 其余码一律优先用 `gate.message`：`same-home` 的文案里嵌着具体目录（`DEVA_HOME` 指到了哪），
+ *    i18n 模板要额外做插值才能表达；而主进程的 message 本来就按 `config.locale` 生成
+ *    （importer-gate.ts 的 `isEn()` 读的正是渲染层 `setLocale` 写进 config 的那份），中英切换同样正确。
+ *    优先用它，同一句文案只需在主进程维护一处，将来新增错误码也不会在界面上退化成一句通用话。
+ * 3. message 为空（探测本身抛错时的降级结果）才回落到通用文案。
+ */
+function gateText(gate: { code: string; message: string }, t: (k: string) => string): string {
+  if (gate.code === 'source-running') return t('settings.import.gateRunning')
+  if (gate.code === 'no-source') return t('settings.import.gateNoSource')
+  return gate.message || t('settings.import.gateNoSource')
 }
 
 export function ImportPane(): React.JSX.Element {
@@ -124,6 +178,10 @@ export function ImportPane(): React.JSX.Element {
 
   const rows = useMemo(() => (report ? stepRows(report, t) : []), [report, t])
   const failures = useMemo(() => (report ? allFailures(report) : []), [report])
+  /** 失败总数取自报告本身（含被清单省略的 no-encryption 那批），标题用它；清单只是明细。 */
+  const failureTotal = report
+    ? report.failures.length + report.memories.failed.filter((f) => !report.failures.includes(f)).length
+    : 0
   // 第二次跑：一条也没搬、却有跳过 → 「跳过 N 个，无新增」。这是幂等的可见证据，不是错误。
   const noopRun =
     !!report && report.ok && rows.every((r) => r.copied === 0) && rows.some((r) => r.skipped > 0)
@@ -147,7 +205,7 @@ export function ImportPane(): React.JSX.Element {
       {gate && !gate.ok && (
         <div className="cf-imp__gate">
           <ShieldAlert size={14} />
-          <span>{gate.code === 'source-running' ? t('settings.import.gateRunning') : t('settings.import.gateNoSource')}</span>
+          <span>{gateText(gate, t)}</span>
           <button className="cf-imp__link" onClick={probe} disabled={probing}>
             {t('settings.import.recheck')}
           </button>
@@ -227,7 +285,7 @@ export function ImportPane(): React.JSX.Element {
                 ? t('settings.import.noop').replace('{n}', String(skippedTotal))
                 : report.ok
                   ? t('settings.import.done')
-                  : t('settings.import.doneWithFailures').replace('{n}', String(failures.length))}
+                  : t('settings.import.doneWithFailures').replace('{n}', String(failureTotal))}
             </span>
           </div>
 
@@ -238,15 +296,25 @@ export function ImportPane(): React.JSX.Element {
                 <span className="cf-imp__num is-ok">
                   {t('settings.import.countCopied').replace('{n}', String(r.copied))}
                 </span>
-                <span className="cf-imp__num">
-                  {t('settings.import.countSkipped').replace('{n}', String(r.skipped))}
-                </span>
-                {r.failed > 0 && (
+                {/* 「跳过 N」不显示在密钥行：那边用带语义的 note 标签（「已存在，保留本地」），
+                    一个裸数字说不清它是不是失败了。 */}
+                {!r.notes && (
+                  <span className="cf-imp__num">
+                    {t('settings.import.countSkipped').replace('{n}', String(r.skipped))}
+                  </span>
+                )}
+                {r.failed > 0 && !r.notes && (
                   <span className="cf-imp__num is-bad">
                     {t('settings.import.countFailed').replace('{n}', String(r.failed))}
                   </span>
                 )}
-                {r.detail.length > 0 && (
+                {/* 密钥行的附加说明：每种「没进来」的原因各一个标签，颜色区分该不该动手。 */}
+                {r.notes?.map((n) => (
+                  <span key={n.kind} className={`cf-imp__note-tag is-${n.tone}`}>
+                    {secretNoteText(n, t)}
+                  </span>
+                ))}
+                {(r.detail.length > 0 || (r.noteIds?.length ?? 0) > 0) && (
                   <button className="cf-imp__link" onClick={() => toggle(r.step)}>
                     {expanded.has(r.step) ? t('settings.import.hideDetail') : t('settings.import.showDetail')}
                     <ChevronDown size={12} className={expanded.has(r.step) ? 'is-open' : ''} />
@@ -254,10 +322,21 @@ export function ImportPane(): React.JSX.Element {
                 )}
                 {expanded.has(r.step) && (
                   <ul className="cf-imp__sub">
-                    {r.detail.slice(0, DETAIL_LIMIT).map((d) => (
-                      <li key={d}>{d}</li>
-                    ))}
-                    {r.detail.length > DETAIL_LIMIT && (
+                    {/* 密钥行按「没进来的原因」分组列，不是一串平铺 id：用户要知道哪几个该重填、哪几个不用管。 */}
+                    {r.noteIds
+                      ? r.noteIds.map((g) =>
+                          g.ids.length ? (
+                            <li key={g.kind}>
+                              {t(`settings.import.secretGroup.${g.kind}`)}：
+                              {g.ids.slice(0, DETAIL_LIMIT).join('、')}
+                              {g.ids.length > DETAIL_LIMIT
+                                ? t('settings.import.moreDetail').replace('{n}', String(g.ids.length - DETAIL_LIMIT))
+                                : ''}
+                            </li>
+                          ) : null
+                        )
+                      : r.detail.slice(0, DETAIL_LIMIT).map((d) => <li key={d}>{d}</li>)}
+                    {!r.noteIds && r.detail.length > DETAIL_LIMIT && (
                       <li>{t('settings.import.moreDetail').replace('{n}', String(r.detail.length - DETAIL_LIMIT))}</li>
                     )}
                   </ul>
@@ -272,10 +351,10 @@ export function ImportPane(): React.JSX.Element {
               <div className="cf-imp__failhead">{t('settings.import.failures')}</div>
               <ul className="cf-imp__list">
                 {failures.map((f, i) => (
-                  <li key={`${f.step}:${f.id}:${i}`} className="cf-imp__row cf-imp__row--fail">
-                    <span className="cf-imp__step">{f.step}</span>
+                  <li key={`${f.step}:${f.id}:${f.reason}:${i}`} className="cf-imp__row cf-imp__row--fail">
+                    <span className="cf-imp__step">{stepText(f.step, t)}</span>
                     <code className="cf-imp__fid" title={f.id}>
-                      {f.id || '—'}
+                      {idText(f.id, t)}
                     </code>
                     <span className="cf-imp__reason">{reasonText(f.reason, t)}</span>
                   </li>
@@ -318,19 +397,102 @@ interface StepRow {
   failed: number
   /** 明细逐条（跳过的 id / 附件四类计数）；超过 DETAIL_LIMIT 条的截断在渲染处做。 */
   detail: string[]
+  /**
+   * 行内附加说明（密钥这一行专用）：每一条是一个「没进来」的原因分类 + 数量 + 严重度。
+   * 密钥的「没进来」有四种彼此不同的原因，压进 skipped 就是把「这台机器存不了密钥、请手动重填」
+   * 说成「本来就有，不用管」——那正是「密钥不用重输」唯一会无声失效的通道。所以它们单列成小标签。
+   */
+  notes?: SecretNote[]
+  /** notes 的原始 id，展开后逐条显示（按 note.kind 分组）。 */
+  noteIds?: Array<{ kind: string; ids: string[] }>
+}
+
+/** 密钥行的一条附加说明。tone 决定颜色：bad = 用户必须动手，warn = 需要注意，plain = 正常情况。 */
+interface SecretNote {
+  kind: 'noEncryption' | 'invalid' | 'skipped' | 'ignored' | 'failed'
+  count: number
+  tone: 'bad' | 'warn' | 'plain'
 }
 
 /** 明细最多列这么多条（跳过几十个会话时不必把列表摊满整屏），余下的用一句「还有 N 个」带过。 */
 const DETAIL_LIMIT = 12
 
-/** 把 ImportReport 摊成界面的行。附件那一步没有 id 列表，用「四类各多少」当明细。 */
+/**
+ * 密钥行。`report.secrets` 是 `SecretsStat`（不再是 `StepStat` 兼容形状），必须专门摊：
+ *
+ * | 分桶 | 含义 | 界面 |
+ * |---|---|---|
+ * | `copied` | 写进目标 secrets.json | 正常「新增 N」，展开看是哪些 provider |
+ * | `skipped` | 目标已有同名密钥，保留本地 | 中性色。**不是失败**，要说清「不用管」 |
+ * | `noEncryption` | 这台机器没有可用加密，一个都没存进去 | 警示色 + 「请手动重填」 |
+ * | `invalid` | 源里那条本身是空值/坏值 | 警示色：用户该知道有东西没导进来 |
+ * | `ignored` | 不适用（`remote:` / `mcp:` 无主密文） | 最次要位置，正常情况 |
+ * | `failed` | 真失败（写盘失败等） | 危险色，进失败清单 |
+ *
+ * **`no-encryption` 会同时出现在 `noEncryption` 和 `failed` 里**（主进程有意为之：既单列、也压 ok=false，
+ * 因为「密钥全没存进去却报导入完成」用户不会去重填）。所以 failed 的计数与明细都要**排除**这批，
+ * 否则同一个 id 会在界面上报两遍。
+ */
+function secretsRow(stat: SecretsStat): StepRow {
+  // 主进程对 no-encryption 的条目既塞进 noEncryption 也塞进 failed（reason 为 'no-encryption'）。
+  // 这里把它们从 failed 里摘出来，只由 noEncryption 那一条说明来代表，避免重复报。
+  const noEncKeys = new Set(stat.noEncryption)
+  const realFailed = (stat.failed ?? []).filter(
+    (f) => f.reason !== 'no-encryption' && !noEncKeys.has(f.id)
+  )
+  const notes: SecretNote[] = []
+  if (stat.noEncryption.length > 0) notes.push({ kind: 'noEncryption', count: stat.noEncryption.length, tone: 'bad' })
+  if (realFailed.length > 0) notes.push({ kind: 'failed', count: realFailed.length, tone: 'bad' })
+  if (stat.invalid.length > 0) notes.push({ kind: 'invalid', count: stat.invalid.length, tone: 'warn' })
+  if (stat.skipped.length > 0) notes.push({ kind: 'skipped', count: stat.skipped.length, tone: 'plain' })
+  if (stat.ignored.length > 0) notes.push({ kind: 'ignored', count: stat.ignored.length, tone: 'plain' })
+  return {
+    step: 'secrets',
+    copied: stat.copied.length,
+    // 保留真实数字：`noopRun`（第二次跑「跳过 N 个，无新增」）与 skippedTotal 都按这个累加，
+    // 置 0 会让只跳过了密钥的那一轮误报成「导入完成」。展示处对带 notes 的行不显示这一列——
+    // 密钥行用带语义的 note 标签（「已存在，保留本地」），裸数字说不清它是不是失败。
+    skipped: stat.skipped.length,
+    // failed 含两类：真失败 + no-encryption。后者虽然也记进了 failed（主进程有意压 ok=false），
+    // 但它在界面上由 noEncryption 那条说明代表，故这里只累加不重复显示明细。
+    failed: stat.noEncryption.length + realFailed.length,
+    detail: stat.copied,
+    notes,
+    noteIds: [
+      { kind: 'noEncryption', ids: stat.noEncryption },
+      { kind: 'failed', ids: realFailed.map((f) => f.id) },
+      { kind: 'invalid', ids: stat.invalid },
+      { kind: 'skipped', ids: stat.skipped },
+      { kind: 'ignored', ids: stat.ignored }
+    ].filter((g) => g.ids.length > 0)
+  }
+}
+
+/** 密钥行一条说明的文案。 */
+function secretNoteText(n: SecretNote, t: (k: string) => string): string {
+  return t(`settings.import.secretNote.${n.kind}`).replace('{n}', String(n.count))
+}
+
+/**
+ * 把 ImportReport 摊成界面的行。附件那一步没有 id 列表，用「四类各多少」当明细。
+ */
 function stepRows(report: ImportReport, t: (k: string) => string): StepRow[] {
   const memFail = report.memories.failed
-  return [
+  const rows: StepRow[] = [
     row('providers', report.providers),
-    // 密钥补缺单列：导入后「密钥要不要重输」是用户最关心的一件事之一，混在服务商那行里就看不出来了。
-    row('secrets', report.secrets),
+    // 密钥补缺单列（不走通用 row()）：它有自己的五种状态，见 secretsRow。
+    secretsRow(report.secrets),
     row('personas', report.personas),
+    {
+      // 角色启用态（补 config.personas.enabled）：这一步原先只有失败会经 failures 露出，成功数在界面上
+      // 完全不显示，用户不知道「我导入的角色能不能直接选」。它没有独立清单，只有「共启用了几个」的数字。
+      step: 'personaEnabled',
+      copied: report.personaEnabled.length,
+      skipped: 0,
+      // 失败由 report.failures 里 step==='personaEnabled' 的条目给出（主进程 importer.ts:112 汇总）。
+      failed: report.failures.filter((f) => f.step === 'personaEnabled').length,
+      detail: report.personaEnabled
+    },
     {
       step: 'memories',
       copied: report.memories.added.length,
@@ -346,32 +508,58 @@ function stepRows(report: ImportReport, t: (k: string) => string): StepRow[] {
       copied:
         report.assoc.media + report.assoc.checkpoints + report.assoc.subagents + report.assoc.toolResults,
       skipped: 0,
-      failed: 0,
+      // 附件这一步原本只有数字没有失败位，会像「永远不出错」；主进程现在把它的失败也带上了。
+      failed: report.assoc.failed?.length ?? 0,
       detail: (['media', 'checkpoints', 'subagents', 'toolResults'] as const).map(
         (k) => `${t(`settings.import.assoc.${k}`)} ${report.assoc[k]}`
       )
     }
   ]
+  // 完全没动静的行不摆出来：源里没有角色可启用时，多一行「0 新增 0 跳过」只会稀释真正有数字的那几行。
+  // 有失败的行一律保留（failed > 0），失败不能让用户去猜它在哪一步。
+  // 有 notes 的行也保留：密钥行可能三个数字都为 0（比如只导入了 ignored），但它的说明本身就是信息。
+  return rows.filter((r) => r.copied > 0 || r.skipped > 0 || r.failed > 0 || (r.notes?.length ?? 0) > 0)
 }
 
-function row(step: RowStep, stat: { copied: string[]; skipped: string[] }): StepRow {
+/**
+ * 一步的统计摊成界面的一行。failed 取 StepStat 自带的失败清单（可缺省，旧数据没有这一项）；
+ * 五步都靠这里出数，不给某一步写特例。skipped 同时当明细用：跳过的 id 就是「已经存在」的清单。
+ */
+function row(step: RowStep, stat: { copied: string[]; skipped: string[]; failed?: Failure[] }): StepRow {
   return {
     step,
     copied: stat.copied.length,
     skipped: stat.skipped.length,
-    failed: 0,
+    failed: stat.failed?.length ?? 0,
     detail: stat.skipped
   }
 }
 
-/** 全部失败：记忆被拒写的那批（带原因）也在 failures 里，这里只去重，不改写。 */
-function allFailures(report: ImportReport): Array<{ step: string; id: string; reason: string }> {
-  const seen = new Set<string>()
-  const out: Array<{ step: string; id: string; reason: string }> = []
+/**
+ * 全部失败：记忆被拒写的那批在 `report.failures` 里还有一份副本（importer.ts 用 `push(...memories.failed)`
+ * 推的是**同一批对象**，不是复制），这里去重。
+ *
+ * 为什么按对象身份而不是 `step:id:reason` 去重：记忆的 id 取自源文件 `raw.id`，源里某条没写 id 时是空串
+ * （importer-memory.ts:65/80）。两条空 id、同因 budget 被拒的记忆会算出同一个内容键，清单只剩一行，
+ * 而上面那行「失败 2」写着 2——用户看到的数字和条数对不上。按身份去重则两个目标同时满足：
+ * 推了两处的同一条被收敛成一条，两条不同的失败哪怕内容完全相同也都留下。
+ *
+ * 依据：ipcMain.handle 的返回值走 structured clone，同一对象的多次引用在跨进程后仍是同一个对象。
+ * 万一将来这条性质变了（比如主进程改成深拷贝后再推），后果是**多显示一行**重复，而不是吞掉真实失败——
+ * 这个方向是可接受的。
+ *
+ * `no-encryption` 的条目在这里被**排除**：它在密钥行已经由 noEncryption 那条说明（「这台机器存不了密钥，
+ * 请手动重填 N 个」）整体代表过一次，再在失败清单里逐个 id 列一遍就是同一件事报两遍。它们仍计入
+ * 顶部的「有 N 条失败」标题（失败数来自 rows，不受这里影响）——只是不再单独占一行。
+ */
+function allFailures(report: ImportReport): Failure[] {
+  const seen = new Set<Failure>()
+  const out: Failure[] = []
   for (const f of [...report.memories.failed, ...report.failures]) {
-    const k = `${f.step}:${f.id}:${f.reason}`
-    if (seen.has(k)) continue
-    seen.add(k)
+    // 密钥的「无加密可用」交给密钥行统一说明，清单里不重复列。
+    if (f.reason === 'no-encryption') continue
+    if (seen.has(f)) continue
+    seen.add(f)
     out.push(f)
   }
   return out
@@ -382,6 +570,36 @@ function reasonText(reason: string, t: (k: string) => string): string {
   const key = FAILURE_REASON_KEY[reason]
   return key ? t(key) : reason
 }
+
+/**
+ * 失败条目所属步骤的显示名。
+ *
+ * `Failure.step` 是主进程的步骤码，其中 `personaEnabled`（补角色启用态）与 `unknown`（整轮兜底）
+ * 并没有对应的进度条步骤，但会出现在失败清单里——直接渲染原值就是中文界面里冒出英文单词。
+ * 走 i18n，取不到（主进程将来新增步骤码）时回落原文，至少不会显示成 key。
+ */
+function stepText(step: string, t: (k: string) => string): string {
+  const key = `settings.import.steps.${step}`
+  const s = t(key)
+  return s === key ? step : s
+}
+
+/**
+ * 失败条目指向的对象。主进程对「没有具体对象」的失败用尖括号占位（`<whole-run>` / `<dir>` /
+ * `<config.json>`），这些是给日志检索用的，直接摆在界面上用户看不懂。
+ */
+const ID_PLACEHOLDER_KEY: Record<string, string> = {
+  '<whole-run>': 'settings.import.idWholeRun',
+  '<dir>': 'settings.import.idDir',
+  '<config.json>': 'settings.import.idConfig'
+}
+
+function idText(id: string, t: (k: string) => string): string {
+  if (!id) return '—'
+  const key = ID_PLACEHOLDER_KEY[id]
+  return key ? t(key) : id
+}
+
 
 /** 概览的几格：对话 / 服务商 / 角色 / 记忆 / 技能 / 附件（四类合计）。 */
 function statCells(s: SourceSummary, t: (k: string) => string): Array<{ label: string; value: string }> {

@@ -183,6 +183,8 @@ const zhCN: MessageTree = {
     createSkillHint: '在对话中输入 /create-skill，即可在引导下创建你自己的技能。',
     descEmpty: '（无描述）',
     instructionsEmpty: '（无正文）',
+    skillSharedTip:
+      '从原版导入的技能可能是指向原版技能目录的链接。如果是，在这里修改会同时改动原版的技能文件；要独立于原版，请另存一份新的技能。',
     importFailed: '导入技能失败',
     importErrMissingName: '技能缺少 name 字段（SKILL.md 的 frontmatter 必须包含 name）。',
     importErrNoSkillMd: '压缩包内未找到 SKILL.md（应位于根目录，或唯一的顶层目录下）。',
@@ -797,7 +799,7 @@ const zhCN: MessageTree = {
       sourceHint: '只读，不会修改原版任何文件',
       probing: '正在检查…',
       overview: '原版数据',
-      overviewHint: '导入时会按下面的数量补齐本地缺少的部分',
+      overviewHint: '含应用自带的服务商与角色；实际只导入你自己加的那些',
       gateRunning: '原版 Deva 正在运行，请先退出它再导入。',
       gateNoSource: '没有找到原版 Deva 的数据目录，可能还没用过原版。',
       recheck: '重新检查',
@@ -821,7 +823,40 @@ const zhCN: MessageTree = {
       reason: {
         budget: '记忆总量已达上限，拒写',
         full: '记忆条数已达上限，拒写',
-        tooLong: '单条记忆超长，拒写'
+        tooLong: '单条记忆超长，拒写',
+        missingRoot: '这个项目没有记录路径，无法确定归属，已跳过',
+        importedProviderMissing:
+          '导入的服务商没有留在配置里，可能被其他写入覆盖了，请重新导入一次补上',
+        configWriteFailed: '配置写盘失败，权限或磁盘异常',
+        linkFailed: '建立链接失败，可能缺少权限',
+        noEncryption: '这台机器无法保存密钥，需要手动重填',
+        targetBlocked: '目标位置被同名文件夹或文件占住，没有写入',
+        targetUnreadable: '目标位置有个同名条目读不出来（可能被其他程序占用），没有覆盖它',
+        copyTruncated: '文件复制不完整（写入被中断），已丢弃半截副本，请重新导入一次',
+        sourceSecretsCorrupt: '原版密钥文件内容损坏、读不出来，密钥一个都没导入，请检查后重试',
+        sourceConfigUnreadable: '原版配置文件读不出来（可能被占用），服务商一个都没能导入，请稍后重试',
+        sourceConfigCorrupt: '原版配置文件内容损坏、解析不了，服务商一个都没能导入，请检查 config.json',
+        sourceMemoryUnreadable: '原版记忆文件读不出来（可能被占用），这个范围下的记忆没有导入，请稍后重试',
+        sourceMemoryCorrupt: '原版记忆文件内容损坏、解析不了，这个范围下的记忆没有导入，请检查 memory.json',
+        sourceDirUnreadable: '原版这个目录读不出来，里面的数据一个都没有导入。请检查权限，或关掉占用它的程序后重新导入',
+        secretsWriteFailed: '密钥没能写入本地密钥文件（权限或磁盘异常）',
+        avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用'
+      },
+      // 密钥行的附加说明（见 ImportPane 的 secretsRow）。{n} 是条数。
+      secretNote: {
+        noEncryption: '这台机器存不了密钥，请手动重填 {n} 个',
+        invalid: '{n} 个密钥在源里是空值或坏值',
+        skipped: '{n} 个已存在，保留本地',
+        ignored: '{n} 个不适用，已忽略',
+        failed: '{n} 个没能写入'
+      },
+      // 密钥明细里按分类列 id 时的分组标题
+      secretGroup: {
+        noEncryption: '需手动重填',
+        invalid: '源里是空值',
+        skipped: '已存在，保留本地',
+        ignored: '不适用',
+        failed: '写入失败'
       },
       steps: {
         gate: '检查原版状态',
@@ -834,8 +869,15 @@ const zhCN: MessageTree = {
         sessions: '对话记录',
         assoc: '附件',
         cache: '刷新会话列表',
-        done: '收尾'
+        done: '收尾',
+        // 整轮级别的异常：失败发生在哪一步已无法确定，主进程记成 unknown
+        unknown: '整轮导入',
+        // 导入期间暂存的用户配置改动，收尾时回写失败（id 形如 user-patch#1）
+        config: '配置回写'
       },
+      idWholeRun: '整轮导入',
+      idDir: '目标目录',
+      idConfig: '配置文件',
       assoc: {
         media: '图片附件',
         checkpoints: '回滚检查点',
@@ -1471,6 +1513,9 @@ const zhCN: MessageTree = {
         budget: '记忆总量已达 {budget} 字上限，请先精简、合并或删除旧条目',
         notFound: '该记忆已不存在（可能刚被删除），列表已刷新',
         duplicate: '已有内容相同的记忆，无需重复保存',
+        writeFailed: '记忆没能写入磁盘（磁盘空间或权限问题），本次修改未保存',
+        readFailed:
+          '记忆文件读不出来（可能被占用或内容损坏），为避免覆盖原有记忆，本次没有写入。请稍后重试或检查 memory.json',
         failed: '操作失败，请重试'
       }
     },
@@ -1746,6 +1791,8 @@ const en: MessageTree = {
     createSkillHint: 'Type /create-skill in chat to create your own skill with guided help.',
     descEmpty: '(no description)',
     instructionsEmpty: '(no content)',
+    skillSharedTip:
+      'Skills imported from the original Deva may be links into its skills folder. If so, editing here changes the original app’s files too — create a new skill if you want an independent copy.',
     importFailed: 'Skill import failed',
     importErrMissingName: 'The skill is missing a name (SKILL.md frontmatter must include name).',
     importErrNoSkillMd: 'No SKILL.md found in the archive (it must be at the root or under a single top-level folder).',
@@ -2353,7 +2400,7 @@ const en: MessageTree = {
       sourceHint: 'Read-only — the original app’s files are never modified',
       probing: 'Checking…',
       overview: 'In the original app',
-      overviewHint: 'Import fills in whatever is missing locally, based on these counts',
+      overviewHint: 'Built-in providers and personas included; only your own additions are imported',
       gateRunning: 'The original Deva is running — quit it before importing.',
       gateNoSource: 'No original Deva data folder found. Perhaps you never used it.',
       recheck: 'Check again',
@@ -2378,7 +2425,45 @@ const en: MessageTree = {
       reason: {
         budget: 'Memory budget reached — not written',
         full: 'Memory entry limit reached — not written',
-        tooLong: 'Memory entry too long — not written'
+        tooLong: 'Memory entry too long — not written',
+        missingRoot: 'This project has no recorded path, so its memories were skipped',
+        importedProviderMissing:
+          'An imported provider is no longer in the config — something else likely overwrote it. Import again to restore it.',
+        configWriteFailed: 'Couldn’t write config — check permissions or disk space',
+        linkFailed: 'Couldn’t create the link — permission likely denied',
+        noEncryption: 'This machine can’t store keys — add them again by hand',
+        targetBlocked: 'The destination is taken by a folder or file of the same name — nothing written',
+        targetUnreadable:
+          'Something with that name is there but can’t be read (another app may have it open) — it was not overwritten',
+        copyTruncated: 'The copy came out incomplete (the write was interrupted); the partial file was discarded — import again',
+        sourceSecretsCorrupt:
+          'The upstream secrets file is corrupt and couldn’t be read — no keys were imported. Check it and try again',
+        sourceConfigUnreadable:
+          'The upstream config file can’t be read (it may be in use) — no providers were imported. Try again later',
+        sourceConfigCorrupt:
+          'The upstream config file is corrupt and couldn’t be parsed — no providers were imported. Check config.json',
+        sourceMemoryUnreadable:
+          'The upstream memory file can’t be read (it may be in use) — memories in this scope were not imported. Try again later',
+        sourceMemoryCorrupt:
+          'The upstream memory file is corrupt and couldn’t be parsed — memories in this scope were not imported. Check memory.json',
+        sourceDirUnreadable:
+          'This upstream folder can’t be read, so none of its data was imported. Check permissions or close the app using it, then import again',
+        secretsWriteFailed: 'The key couldn’t be written to the local secrets file — check permissions or disk space',
+        avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable'
+      },
+      secretNote: {
+        noEncryption: 'This machine can’t store keys — {n} to add by hand',
+        invalid: '{n} keys were empty or corrupt in the source',
+        skipped: '{n} already present, kept yours',
+        ignored: '{n} not applicable, ignored',
+        failed: '{n} couldn’t be written'
+      },
+      secretGroup: {
+        noEncryption: 'Add by hand',
+        invalid: 'Empty in source',
+        skipped: 'Already present',
+        ignored: 'Not applicable',
+        failed: 'Write failed'
       },
       steps: {
         gate: 'Checking the original app',
@@ -2391,8 +2476,13 @@ const en: MessageTree = {
         sessions: 'Conversations',
         assoc: 'Attachments',
         cache: 'Refreshing the conversation list',
-        done: 'Finishing up'
+        done: 'Finishing up',
+        unknown: 'Whole run',
+        config: 'Config write-back'
       },
+      idWholeRun: 'Whole run',
+      idDir: 'Target folder',
+      idConfig: 'Config file',
       assoc: {
         media: 'Images',
         checkpoints: 'Checkpoints',
@@ -3023,6 +3113,9 @@ const en: MessageTree = {
         budget: 'Memory has reached its {budget}-character limit. Trim, merge or delete old entries first',
         notFound: 'This memory no longer exists (it may have just been deleted); list refreshed',
         duplicate: 'An identical memory already exists — no need to save it again',
+        writeFailed: 'Couldn’t write the memory to disk (disk space or permissions) — this change was not saved',
+        readFailed:
+          'The memory file can’t be read (it may be in use or corrupt). Nothing was written, to avoid overwriting your existing memories — try again later or check memory.json',
         failed: 'Operation failed, please try again'
       }
     },

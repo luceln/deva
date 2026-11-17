@@ -451,6 +451,17 @@ function SkillDetail({ item, onBack }: { item: Skill; onBack: () => void }): Rea
 
       <RolesPicker kind="skill" id={item.id} roles={item.roles} />
 
+      {/*
+        从原版导入的技能有可能是**链接**回原版技能目录的（importer-skills.ts：源条目是符号链接时建成
+        junction/symlink，实体目录才复制）。那种情况下在这里改 SKILL.md，真源同时被改——
+        「二创版不该覆盖原版」的意图在共享真源这件事上是有边界的。
+        渲染层拿不到「本条是否为链接」（SkillRecord 没有该字段），故对所有自建技能给一句通用提醒：
+        宁可多说一句，也不让用户在不知情的情况下改了原版的技能。
+        位置选在详情页而不是导入结果里：导入是一次性动作、结果面板看过就关了，而这里是用户
+        「准备动这个技能」时唯一必然会看到的地方。
+      */}
+      {item.source !== 'builtin' && <p className="ext-detail__shared">{t('extensions.skillSharedTip')}</p>}
+
       <div className="ext-field ext-field--grow">
         <label className="ext-field__label">{t('extensions.instructions')}</label>
         {item.instructions ? (

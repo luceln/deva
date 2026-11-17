@@ -3766,6 +3766,30 @@ button.cf-mask__pill:hover {
 .cf-imp__num.is-bad {
   color: var(--danger);
 }
+/* 密钥行的附加说明：每种「没进来」的原因一个小标签。
+   bad = 用户必须动手（这台机器存不了密钥 / 写盘失败）；warn = 源数据有问题；
+   plain = 正常情况（已存在保留本地 / 不适用），不能看着像失败。 */
+.cf-imp__note-tag {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.cf-imp__note-tag.is-bad {
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
+.cf-imp__note-tag.is-warn {
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--warning);
+}
+.cf-imp__note-tag.is-plain {
+  color: var(--fg-subtle);
+}
 .cf-imp__row .cf-imp__link {
   margin-left: auto;
 }
@@ -3778,13 +3802,20 @@ button.cf-mask__pill:hover {
   list-style: disc;
   overflow-wrap: anywhere;
 }
-/* 失败清单：红边常驻，不给折叠——只写日志的失败等于没告诉用户 */
+/* 失败清单：红边常驻，不给折叠——只写日志的失败等于没告诉用户。
+   但一个会话目录可能几百个文件同时失败，全量铺开会把整页顶穿，故限高 + 滚动；
+   200px 约能同时看 5 行，够判断「是哪一步、什么原因」，需要细看再滚。 */
 .cf-imp__fails {
   margin-top: var(--space-3);
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--danger) 6%, transparent);
+}
+.cf-imp__fails .cf-imp__list {
+  max-height: 200px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .cf-imp__failhead {
   color: var(--danger);

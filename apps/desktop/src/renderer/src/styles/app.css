@@ -5113,6 +5113,18 @@ button.projmenu__item:disabled {
   font-size: 13px;
   font-style: italic;
 }
+/* 技能真源可能与原版共享（导入时是链接）：一句话提醒「在这里改会改到原版」。
+   用警示色而非普通说明色——它是「编辑前该知道」的事，不是装饰性小字。 */
+.ext-detail__shared {
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border));
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.55;
+}
 .ext-detail__md {
   max-width: 720px;
   max-height: 420px;

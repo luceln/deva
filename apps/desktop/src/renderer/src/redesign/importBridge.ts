@@ -22,6 +22,7 @@ export type {
   ImportProgress,
   ImportReport,
   MergeStat,
+  SecretsStat,
   SourceSummary,
   StepStat
 } from '../../../shared/import-protocol'
