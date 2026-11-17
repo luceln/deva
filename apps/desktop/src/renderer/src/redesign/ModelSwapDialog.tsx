@@ -265,13 +265,31 @@ function Result({
   const { t } = useI18n()
   const summary = [
     t('cf.modelSwap.appliedN').replace('{n}', String(result.changed.length)),
-    result.skipped.length ? t('cf.modelSwap.skippedN').replace('{n}', String(result.skipped.length)) : ''
+    result.skipped.length ? t('cf.modelSwap.skippedN').replace('{n}', String(result.skipped.length)) : '',
+    // 写盘失败必须出现在标题里，而不是只在展开列表里：用户在点「完成」前的那一眼就该看到「有几个没换成」
+    result.failed.length ? t('cf.modelSwap.failedN').replace('{n}', String(result.failed.length)) : ''
   ]
     .filter(Boolean)
     .join(' · ')
   return (
     <div className="cf-swap__section">
       <div className="cf-swap__result">{summary}</div>
+      {/*
+        写盘失败的会话单独一组、恒展开：这是「不报错但没生效」类，用户必须当场知道。
+        不用 skipped 的折叠入口——那会被读成「正常保留」，而这些会话其实换不了。
+      */}
+      {result.failed.length > 0 && (
+        <ul className="cf-swap__list">
+          {result.failed.map((b) => (
+            <li key={`failed:${b.sessionId}`} className="cf-swap__row">
+              <span className="cf-swap__name" title={b.name || b.sessionId}>
+                {b.name || b.sessionId}
+              </span>
+              <span className="cf-swap__kind">{t('cf.modelSwap.failed')}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {result.changed.length > 0 && (
         <ul className="cf-swap__list">
           {result.changed.map((b) => (

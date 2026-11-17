@@ -234,12 +234,16 @@ export interface BrokenRef {
 }
 
 /**
- * 一次批量替换的结果：changed = 真被改成目标模型的会话；skipped = 引用与 fromRef 不同而原样保留的
- * （用户单独给它们指定过别的模型，属于正常保留，界面上可展开看是哪些）。
+ * 一次批量替换的结果：
+ * - `changed` = 真被改成目标模型**且已写进磁盘**的会话；
+ * - `skipped` = 引用与 fromRef 不同而原样保留的（用户单独给它们指定过别的模型，属于正常保留，界面上可展开看是哪些）；
+ * - `failed` = 引用匹配、内存已改但**写盘失败**的会话（已回滚内存）。必须单独一栏：混进 `changed` 就是
+ *   「界面说换好了、重启后全部变回」；混进 `skipped` 则会被解释成「它用的是别的模型」，也不是事实。
  */
 export interface ModelSwapResult {
   changed: BrokenRef[]
   skipped: BrokenRef[]
+  failed: BrokenRef[]
 }
 
 /** 扫本对话里模型引用已失效的会话（主对话 + 未移除成员）。只读。见 chat:model-swap-scan。 */

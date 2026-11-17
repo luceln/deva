@@ -77,7 +77,8 @@ export async function scanSessionsByModel(mainId: string): Promise<BrokenRef[]> 
  * 失效模型，不该被顺手钉死）。
  *
  * 先验目标引用：目标不可用就整批拒绝、一个都不改（不做半截替换——那会让用户以为换完了，实际只换了一部分）。
- * 改动的每个会话各自落盘（一对话一文件的写法，见 chat-store.save）。
+ * 改动的每个会话各自落盘（一对话一文件的写法，见 chat-store.save），**并检查落盘结果**：写不进去的会话
+ * 回滚内存态、记进 `failed`，绝不混进 `changed`（否则界面报「已替换 N 个」，重启后全部变回）。
  */
 export async function applyModelSwap(p: {
   mainId: string
@@ -104,6 +105,8 @@ export async function applyModelSwap(p: {
   const fromKind = (await resolveAvailability(from)).kind
   const changed: BrokenRef[] = []
   const skipped: BrokenRef[] = []
+  // 写盘失败的那些：进这里而不是 changed——界面据此说「这几个没换成」，别混进成功数
+  const failed: BrokenRef[] = []
   for (const c of cands) {
     // 空引用 = 尚未定格模型（跟随全局默认）：它根本没引用任何具体模型，替换它只会凭空钉死一个模型，
     // 故既不替换也不计进 skipped（那会让界面上的「跳过 M 个」混进一堆本来就没坏、也没让用户单独指定过的会话）。
@@ -121,7 +124,19 @@ export async function applyModelSwap(p: {
       continue
     }
     session.model = to
-    saveProject(c.id)
+    /*
+     * 写盘结果必须检查：以前无条件 `changed.push()`，磁盘满 / 被占 / 权限错时内存改了、磁盘没改，
+     * 界面报「已替换 N 个」，重启后全部变回，零提示（P1-2，与 setEnabled 那批同形）。
+     *
+     * 失败的会话要**回滚内存**：`getSession` 走 `loadSessionFile`，返回的是缓存里的同一个对象，
+     * 不回滚的话界面刷新一次又会从内存读到新模型，用户以为换成了，实际磁盘还是旧值。
+     */
+    const wrote = saveProject(c.id)
+    if (!wrote) {
+      session.model = from
+      failed.push({ sessionId: c.id, name: c.name, ref: from, kind: fromKind ?? 'missing' })
+      continue
+    }
     // 与用户在输入框里换模型（chat:set-model）走同一套后果，否则这次替换会被下一次活动静默改回去：
     //  · 任务对话：任务也跟着换（否则下一次定时运行又用旧模型，且任务与对话两边不一致）；
     //  · 成员会话：记为「用户亲自定过模型」（modelSet），此后派任务不再按主对话覆盖——否则主智能体下一次派任务就
@@ -131,5 +146,5 @@ export async function applyModelSwap(p: {
     markMemberSetting(session, 'modelSet')
     changed.push({ sessionId: c.id, name: c.name, ref: from, kind: fromKind ?? 'missing' })
   }
-  return { changed, skipped }
+  return { changed, skipped, failed }
 }

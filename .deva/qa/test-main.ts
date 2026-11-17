@@ -1352,6 +1352,64 @@ async function scenarioConfigCorrupt(): Promise<void> {
   }
 }
 
+/**
+ * P1-2：`save` 的写盘结果必须能被调用方看见，`applyModelSwap` 不许把「没写盘」算成「已替换」。
+ *
+ * 以前 `save` 返回 void 且 `catch { return }`，`applyModelSwap` 无条件 `changed.push()`：
+ * 磁盘满 / 被占 / 权限错 → 内存改了、磁盘没改 → 界面报「已替换 N 个」→ 重启后全部变回，零提示。
+ *
+ * 造法：把这轮会话的文件路径换成**同名目录**，`writeFileAtomic` 必然失败（EISDIR）。
+ */
+async function scenarioSwapWriteFail(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const { applyModelSwap } = await import('../../apps/desktop/src/main/services/model-swap')
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        { id: 'p', name: 'P', apiHost: 'https://a.example/v1', enabled: true, models: [{ id: 'm' }] },
+        // 目标服务商走本机地址：不需要密钥，目标是可用的（否则整批拒绝，验不到写盘失败那条路）
+        { id: 'q', name: 'Q', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'n' }] }
+      ]
+    }
+  })
+  // 源模型故意做成「不存在」→ 扫描时判 missing，替换流程才有得换
+  const s = cs.ensureSession('Sw1', { model: 'p:gone' })
+  s.title = 'WriteFail'
+  const okFirst = cs.save('Sw1')
+  info('首次保存（正常路径）', String(okFirst))
+  eq('P1-2：正常路径 save 返回 true', okFirst, true)
+
+  // 会话文件已存在；把它换成同名目录 → 后续 writeFileAtomic 必失败
+  const chatsDir = path.join(DST, 'data', 'chats')
+  const file = path.join(chatsDir, 'Sw1.json')
+  if (!fs.existsSync(file)) {
+    fail('P1-2：前置失败——会话文件没生成', file)
+    return
+  }
+  fs.rmSync(file, { force: true })
+  fs.mkdirSync(file)
+
+  // 直接验 save 的返回值
+  const s2 = cs.getSession('Sw1')!
+  s2.model = 'q:n'
+  eq('P1-2：写盘失败时 save 返回 false（旧实现返回 void，看不出）', cs.save('Sw1'), false)
+
+  // 再验 applyModelSwap 的归类
+  s2.model = 'p:gone'
+  const r = await applyModelSwap({ mainId: 'Sw1', fromRef: 'p:gone', toRef: 'q:n' })
+  if ('error' in r) {
+    fail('P1-2：不该整批拒绝（目标模型可用）', JSON.stringify(r))
+    return
+  }
+  info('applyModelSwap 结果', JSON.stringify(r))
+  eq('P1-2：写盘失败的会话不进 changed（旧实现恒在里面）', r.changed.map((b) => b.sessionId), [])
+  eq('P1-2：写盘失败的会话进 failed', (r.failed ?? []).map((b) => b.sessionId), ['Sw1'])
+  // 内存必须回滚：否则界面刷新一次又从内存读到新模型
+  eq('P1-2：写盘失败后内存态回滚为旧引用', cs.getSession('Sw1')?.model, 'p:gone')
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1367,6 +1425,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   keyless: scenarioKeylessHost,
   keytri: scenarioKeyTriState,
   cfgcorrupt: scenarioConfigCorrupt,
+  swapfail: scenarioSwapWriteFail,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

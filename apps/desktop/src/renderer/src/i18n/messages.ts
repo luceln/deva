@@ -1346,6 +1346,8 @@ const zhCN: MessageTree = {
       changed: '已更换',
       appliedN: '已替换 {n} 个',
       skippedN: '跳过 {n} 个',
+      // 写盘失败的那些：界面必须与「已替换」分开说，否则重启后全部变回且零提示
+      failedN: '{n} 个没能写入',
       skipped: '跳过',
       skippedHint: '以下会话用的是别的模型，未改动：',
       showSkipped: '查看跳过的会话',
@@ -2973,6 +2975,7 @@ const en: MessageTree = {
       changed: 'Switched',
       appliedN: '{n} switched',
       skippedN: '{n} skipped',
+      failedN: '{n} couldn’t be saved',
       skipped: 'Skipped',
       skippedHint: 'These use a different model and were left alone:',
       showSkipped: 'Show skipped conversations',
