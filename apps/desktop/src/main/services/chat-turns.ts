@@ -433,25 +433,48 @@ export async function runTurn(
       const avail = await resolveAvailability(session.model)
       if (!avail.ok) {
         /*
-         * 分三句而不是两句：`nokey`（还没填）与 `keyunreadable`（填过但解不开：换账户 / 换机器 / 无加密存储）
-         * 的处置不同——后者重填一次即可，用户若以为是「没配过」会怀疑自己明明配过。
+         * 每个 kind 给一句**指向动作**的说明，别一句「模型不可用」打发了事：
+         *  - nokey / keyunreadable 的处置不同（还没填 vs 填过但读不出来：换账户 / 换机器 / 无加密存储）；
+         *  - disabled / model-disabled 是**用户自己关掉的**，最省事的解法是去启用，而不是白换一个模型；
+         *  - missing / malformed 才是真的「换一个」。
+         * 以前这里只有「模型不可用」一句，把上面这些全说成同一件事。
          */
-        const why =
-          avail.kind === 'nokey'
-            ? isEn()
-              ? 'its provider is missing an API key'
-              : '所在服务商还没有配置密钥'
-            : avail.kind === 'keyunreadable'
-              ? isEn()
+        const T = isEn()
+        const why = (() => {
+          switch (avail.kind) {
+            case 'nokey':
+              return T ? 'its provider is missing an API key' : '所在服务商还没有配置密钥'
+            case 'keyunreadable':
+              return T
                 ? 'its provider’s key can’t be read (it may have been saved under a different account or machine)'
                 : '所在服务商的密钥读不出来（可能是在别的账户或机器上保存的）'
-              : isEn()
-                ? 'the model is no longer available'
-                : '这个模型已不可用'
+            case 'disabled':
+              return T
+                ? 'its provider is turned off in Settings › Models'
+                : '所在服务商在「设置 › 模型」里被停用了'
+            case 'model-disabled':
+              return T
+                ? 'this model is turned off in Settings › Models'
+                : '这个模型在「设置 › 模型」里被停用了'
+            case 'missing':
+              return T
+                ? 'the model no longer exists in your settings'
+                : '这个模型在配置里已经不存在了'
+            default:
+              return T ? 'the model is no longer available' : '这个模型已不可用'
+          }
+        })()
+        // 只是「被停用」的那两种，收尾该引导去启用（换模型不是唯一出路）
+        const tail =
+          avail.kind === 'disabled' || avail.kind === 'model-disabled'
+            ? T
+              ? 'Turn it back on in Settings › Models (or pick another model above), then send again.'
+              : '请到「设置 › 模型」把它重新启用（也可以在上方换一个模型）后再发送。'
+            : T
+              ? 'Pick another model above (or fill in the key), then send again.'
+              : '请在上方输入框换一个模型（或填好密钥）后再发送。'
         throw new Error(
-          isEn()
-            ? `This chat's model can't be used — ${why}. Pick another model above (or fill in the key), then send again.`
-            : `本对话的模型用不了——${why}。请在上方输入框换一个模型（或填好密钥）后再发送。`
+          T ? `This chat's model can't be used — ${why}. ${tail}` : `本对话的模型用不了——${why}。${tail}`
         )
       }
     }

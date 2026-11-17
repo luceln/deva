@@ -1356,13 +1356,20 @@ const zhCN: MessageTree = {
       scanning: '正在检查…',
       nothing: '没有检测到受影响的会话。',
       close: '完成',
+      /*
+        每个 kind 的文案必须指向**一个具体动作**：用户看完就知道该点哪里。
+        以前 missing / disabled 共用一句「模型不可用，请换一个」——三种处置（换模型 / 启用服务商 / 启用模型）
+        在界面上完全一样，用户只能一个个试。
+      */
       kind: {
-        missing: '模型不可用，请换一个',
-        disabled: '模型不可用，请换一个',
+        missing: '配置里已经没有这个模型了，请在「设置 › 模型」里重新添加，或换一个',
+        disabled: '这个服务商已停用，请在「设置 › 模型」里把它重新启用',
+        // 与服务商停用分开：用户要点的开关不是同一个
+        'model-disabled': '这个模型已停用，请在「设置 › 模型」里把它的开关打开',
         malformed: '模型配置异常，请重新选择',
-        nokey: '这个服务商缺少密钥',
+        nokey: '这个服务商还没填 API 密钥，请在「设置 › 模型」里填上',
         // 与 nokey 分开：不是「还没填」，是「填过但读不出来」（换账户 / 换机器 / 本机无加密存储）
-        keyunreadable: '这个服务商的密钥读不出来，需要重新填写'
+        keyunreadable: '这个服务商的密钥读不出来（可能是在别的账户或机器上保存的），请在「设置 › 模型」里重新填一次'
       }
     },
     git: {
@@ -2984,12 +2991,15 @@ const en: MessageTree = {
       scanning: 'Checking…',
       nothing: 'No affected conversations found.',
       close: 'Done',
+      // Each kind names the one thing the user should do; missing and disabled used to share a sentence.
       kind: {
-        missing: 'Model unavailable — pick another',
-        disabled: 'Model unavailable — pick another',
+        missing: 'That model is no longer in your settings — add it back in Settings › Models, or pick another',
+        disabled: 'This provider is turned off — switch it back on in Settings › Models',
+        'model-disabled': 'This model is turned off — switch it back on in Settings › Models',
         malformed: 'Model settings are broken — pick again',
-        nokey: 'This provider has no API key',
-        keyunreadable: 'This provider’s key can’t be read — enter it again'
+        nokey: 'This provider has no API key yet — add one in Settings › Models',
+        keyunreadable:
+          'This provider’s key can’t be read (it may have been saved under a different account or machine) — enter it again in Settings › Models'
       }
     },
     git: {

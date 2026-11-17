@@ -1410,6 +1410,78 @@ async function scenarioSwapWriteFail(): Promise<void> {
   eq('P1-2：写盘失败后内存态回滚为旧引用', cs.getSession('Sw1')?.model, 'p:gone')
 }
 
+/**
+ * P2-5：五种失效原因各自产出一条，且**文案两两不同**。
+ *
+ * 以前 `!model || model.enabled === false` 共用 `missing`，界面又是 `missing` 与 `disabled` 一字不差，
+ * 于是「换模型 / 启用服务商 / 启用模型」三种完全不同的处置在用户眼里是同一句话。
+ *
+ * 判据就用「文案两两不同」：两条文案相同，用户就区分不出来，别的都白说。
+ */
+async function scenarioKindCopy(): Promise<void> {
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+  const { resolveAvailability } = await import('../../apps/desktop/src/main/services/model-availability')
+  const { messages } = await import('../../apps/desktop/src/renderer/src/i18n/messages')
+
+  setConfig({
+    models: {
+      providers: [
+        // ① 服务商被停用 → disabled
+        { id: 'p-off', name: 'Off', apiHost: 'http://localhost:1/v1', enabled: false, models: [{ id: 'm' }] },
+        // ② 模型被停用 → model-disabled
+        { id: 'p-moff', name: 'MOff', apiHost: 'http://localhost:1/v1', enabled: true, models: [{ id: 'm', enabled: false }] },
+        // ③ 模型被删（服务商在、模型列表里没有）→ missing
+        { id: 'p-gone', name: 'Gone', apiHost: 'http://localhost:1/v1', enabled: true, models: [{ id: 'other' }] },
+        // ④ 缺密钥 → nokey（远端地址才会判密钥）
+        { id: 'p-nokey', name: 'NoKey', apiHost: 'https://a.example/v1', enabled: true, models: [{ id: 'm' }] }
+      ]
+    }
+  })
+
+  const cases: Array<[string, string, string]> = [
+    ['disabled', 'p-off:m', '服务商停用'],
+    ['model-disabled', 'p-moff:m', '模型停用'],
+    ['missing', 'p-gone:m', '模型被删'],
+    ['nokey', 'p-nokey:m', '缺密钥'],
+    ['malformed', 'no-colon-here', '引用非法']
+  ]
+  const kinds: string[] = []
+  for (const [expected, ref, label] of cases) {
+    const r = await resolveAvailability(ref)
+    info(`${label} 判定`, JSON.stringify(r))
+    eq(`P2-5：${label} → kind=${expected}`, r.kind, expected)
+    kinds.push(String(r.kind))
+  }
+  // 五种 kind 必须两两不同
+  eq('P2-5：五种 kind 各不相同', [...new Set(kinds)].length, 5)
+
+  // 文案：中英两侧都要有，且五种两两不同
+  for (const locale of ['zh-CN', 'en'] as const) {
+    const tree = messages[locale] as Record<string, unknown>
+    const kindTree = (tree.cf as Record<string, unknown>)?.modelSwap as Record<string, unknown>
+    const copy = kindTree?.kind as Record<string, string>
+    if (!copy) {
+      fail(`P2-5(${locale})：找不到 cf.modelSwap.kind`, locale)
+      continue
+    }
+    const texts = ['missing', 'disabled', 'model-disabled', 'nokey', 'keyunreadable'].map((k) => copy[k])
+    info(`P2-5(${locale}) 文案`, JSON.stringify(texts))
+    // 缺文案会让界面直接显示 key 原文（t() 取不到返回 key）
+    eq(
+      `P2-5(${locale})：五种 kind 文案都存在`,
+      texts.filter((x) => typeof x === 'string' && x).length,
+      5
+    )
+    eq(`P2-5(${locale})：五种文案两两不同（相同=用户区分不出来）`, [...new Set(texts)].length, 5)
+    // 指向动作：每条都得说出去哪儿做，而不能只说「不可用」
+    check(
+      `P2-5(${locale})：每条文案都指向具体动作（含设置或换/填的指引）`,
+      texts.every((x) => /设置|Settings|pick another|add it back|enter it again|switch it back/i.test(x)),
+      JSON.stringify(texts)
+    )
+  }
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1426,6 +1498,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   keytri: scenarioKeyTriState,
   cfgcorrupt: scenarioConfigCorrupt,
   swapfail: scenarioSwapWriteFail,
+  kindcopy: scenarioKindCopy,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

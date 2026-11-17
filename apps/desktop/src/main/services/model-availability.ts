@@ -137,7 +137,21 @@ export async function resolveAvailability(
     if (provider.enabled === false) return { ok: false, kind: 'disabled', detail: `provider ${pid}` }
     const list = Array.isArray(provider.models) ? (provider.models as StoredModelDef[]) : []
     const model = list.find((m) => m && m.id === mid)
-    if (!model || model.enabled === false) return { ok: false, kind: 'missing', detail: `model ${pid}:${mid}` }
+    /*
+     * 三种情况必须分开报，因为用户的处置完全不同：
+     *  - `!model`（**模型被删**）→ 去换一个模型；
+     *  - `model.enabled === false`（**模型被停用**）→ 去设置里把它重新启用（换模型是白换一次）；
+     *  - 之前这两个共用 `missing`，界面一句「模型不可用，请换一个」把「去启用」也说成「去换」。
+     *
+     * 用独立的 `model-disabled` 而不是给 `disabled` 加 `scope` 字段：kind 是**字符串字面量联合**，
+     * 界面靠 `t(\`cf.modelSwap.kind.${kind}\`)` 取文案、也是 `BrokenRef` 的唯一判定依据。加 scope 等于让
+     * 「怎么显示」与「怎么判定」分居两个字段，每个消费点都得同时看两处，漏一处就退回两套口径；
+     * 而独立 kind 是同一个字段的枚举扩张，所有既有消费点（`=== 'nokey'` 之类）天然不会误命中，
+     * 漏掉的只是文案——那种漏是**响亮**的（界面显示原始 key），不是静默错判。
+     */
+    if (!model) return { ok: false, kind: 'missing', detail: `model ${pid}:${mid}` }
+    if (model.enabled === false)
+      return { ok: false, kind: 'model-disabled', detail: `model ${pid}:${mid}` }
     // 本机服务无需密钥，不能按「没密钥」标红——那会把好好的本地模型（Ollama 等）赶去换模型。
     if (keylessHost(provider.apiHost)) return { ok: true }
     const secret = await readSecret(pid)
