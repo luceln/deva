@@ -161,7 +161,8 @@ export async function resolveAvailability(
      * 就把用户所有会话拦下来）。这时既不能说「没配过」（会全库标红 + 体检拒绝），也不能说「解不开」
      * （那是单条密文的问题，重填这一条就好）——真正的动作是去修 secrets.json。
      *
-     * 这也与 `readSecretsLoadKind()` 同源：那边用于需要「知道整体状态」的判定，这里用单条读取的返回即可。
+     * 这也说明不必另开「整体状态」接口：单条读取的返回值已经能判到整体，而这种接口要么是同步版
+     * （首次载入前返回值不可信）、要么多一个调用点，最后都会有人用错。
      */
     if (secret.kind === 'store-unreadable') return { ok: true }
     if (secret.kind === 'unreadable')
