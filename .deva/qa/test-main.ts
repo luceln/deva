@@ -1202,6 +1202,39 @@ async function scenarioMcpUnsafeId(): Promise<void> {
   eq('P3：目标里只有正常那个', Object.keys(dstMcp.mcpServers ?? {}), ['goodone'])
 }
 
+/**
+ * P1-4：`keylessHost` 的 IPv6 判定。
+ *
+ * `new URL('http://[::1]:11434/v1').hostname` 返回 **`'[::1]'`（带方括号）**，而旧代码比的是 `'::1'`，
+ * 于是 IPv6 本机地址**永远判不出**——用 `http://[::1]:11434` 配 Ollama 的用户被判「缺密钥」，
+ * 红标 + 轮前体检拦截，而服务其实好好的。
+ */
+async function scenarioKeylessHost(): Promise<void> {
+  const { keylessHost } = await import('../../apps/desktop/src/main/services/model-availability')
+  // ① IPv6 环回：这是本 bug 的现场
+  eq('P1-4：http://[::1] 是本机（旧代码判 false）', keylessHost('http://[::1]:11434/v1'), true)
+  eq('P1-4：http://[::1] 无端口也认', keylessHost('http://[::1]'), true)
+  // ② IPv4-mapped 环回：Node 会把 127.0.0.1 规范化成 7f00:1，两个写法都要认
+  eq('P1-4：::ffff:127.0.0.1 是本机', keylessHost('http://[::ffff:127.0.0.1]:11434/v1'), true)
+  eq('P1-4：::ffff:7f00:1（Node 规范化形态）是本机', keylessHost('http://[::ffff:7f00:1]:11434/v1'), true)
+  // ③ 127.0.0.0/8 整段是环回，不只 .1
+  eq('P1-4：127.0.0.2 是本机（整段环回）', keylessHost('http://127.0.0.2:11434/v1'), true)
+  // ④ 既有形态不能回归
+  eq('P1-4：localhost 仍是本机', keylessHost('http://localhost:11434/v1'), true)
+  eq('P1-4：127.0.0.1 仍是本机', keylessHost('http://127.0.0.1:11434/v1'), true)
+  eq('P1-4：0.0.0.0 仍按旧行为认作本机', keylessHost('http://0.0.0.0:11434/v1'), true)
+  eq('P1-4：大写 LOCALHOST 也认（hostname 已小写化）', keylessHost('http://LOCALHOST:11434/v1'), true)
+  eq('P1-4：localhost 带 FQDN 尾点', keylessHost('http://localhost.:11434/v1'), true)
+  // ⑤ Docker Desktop 里的 Ollama：本机服务，但以前被判成远端
+  eq('P1-4：host.docker.internal 是本机', keylessHost('http://host.docker.internal:11434/v1'), true)
+  // ⑥ 反方向：远端必须仍要求密钥，否则真「忘配密钥」会被静默放行
+  eq('P1-4：局域网 IP 不算本机（那是另一台机器）', keylessHost('http://192.168.1.5:11434/v1'), false)
+  eq('P1-4：公网地址不算本机', keylessHost('https://api.openai.com/v1'), false)
+  eq('P1-4：写坏的地址不算本机（宁可多提示一次）', keylessHost('不是个 URL'), false)
+  eq('P1-4：空串不算本机', keylessHost(''), false)
+  eq('P1-4：非字符串不算本机', keylessHost(undefined), false)
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1214,6 +1247,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   mcptgt: scenarioMcpTargetBlocked,
   mcpipc: scenarioMcpIpcWriteResult,
   mcpunsafe: scenarioMcpUnsafeId,
+  keyless: scenarioKeylessHost,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

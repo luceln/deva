@@ -34,16 +34,48 @@ interface StoredProvider {
  * 判据是 apiHost 指向本机：预置目录里 Ollama 就是 `http://localhost:11434/v1`，建模流程对 isLocal 直接跳过
  * 写密钥（见 ModelSetupCard 的 isLocal 分支），而 provider 层无密钥时以空串继续（见 providers/index.ts）。
  * 不按 providerId 白名单判——用户自定义的本机服务同样不该因为没密钥被标红。
+ *
+ * ## 必须按「地址字面量」判，不能拿 hostname 和裸字符串比
+ *
+ * `new URL('http://[::1]:11434/v1').hostname` 返回的是 **`'[::1]'`（带方括号）**，不是 `'::1'`；
+ * `[::ffff:127.0.0.1]` 更会被规范化成 `[::ffff:7f00:1]`。以前直接 `h === '::1'`，IPv6 本机地址
+ * **永远判不出**——用 `http://[::1]:11434` 配 Ollama 的用户被判「缺密钥」红标 + 体检拦截。
+ *
+ * ## 哪些算本机
+ *
+ * - `localhost` / `*.localhost`：RFC 6761 保留给本机，`localhost.` 带尾点也认（FQDN 写法）。
+ * - 环回地址 `127.0.0.0/8`（不只 `127.0.0.1`：整段都是环回，`127.0.0.2` 一样指向本机）、`::1`。
+ * - IPv4-mapped IPv6 环回 `::ffff:127.x.x.x`（Node 会写成 `::ffff:7f00:1`，按前缀 `::ffff:7f` 认）。
+ * - `host.docker.internal` / `gateway.docker.internal`：Docker Desktop 里跑 Ollama 的标准入口，是本机服务，
+ *   但它是**主机名**不是 IP，以前被判成远端、要求密钥。
+ * - `0.0.0.0`：保留旧行为。它是「监听所有接口」的写法，作为连接地址语义不对，但改掉它会让既有配置
+ *   （用户照文档抄的）突然变成缺密钥——保守起见仍认作本机。
+ *
+ * **不认**局域网 IP（`192.168.*` / `10.*`）：那是**另一台机器**上的服务，密钥该配就得配。
+ * 把它当本机放行，等于让真正的「忘配密钥」静默通过——这正是本模块要防的静默。
  */
-function keylessHost(host: unknown): boolean {
+export function keylessHost(host: unknown): boolean {
   if (typeof host !== 'string' || !host) return false
+  let raw: string
   try {
-    const h = new URL(host).hostname
-    return h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '0.0.0.0'
+    raw = new URL(host).hostname.toLowerCase()
   } catch {
     // 地址写得不像 URL（用户手填的残缺值）→ 不当作本机，照常要求密钥：宁可多提示一次，也不放过真缺密钥的。
     return false
   }
+  // IPv6 字面量在 URL 里带方括号：剥掉再比，否则 '::1' 这类比较永不成立
+  const h = raw.startsWith('[') && raw.endsWith(']') ? raw.slice(1, -1) : raw
+  // localhost 与 *.localhost，容忍 FQDN 的尾点
+  const bare = h.endsWith('.') ? h.slice(0, -1) : h
+  if (bare === 'localhost' || bare.endsWith('.localhost')) return true
+  if (bare === 'host.docker.internal' || bare === 'gateway.docker.internal') return true
+  if (bare === '0.0.0.0') return true
+  // IPv6 环回与 IPv4-mapped 环回（Node 把 127.0.0.1 规范化成 7f00:1）
+  if (bare === '::1' || bare === '0:0:0:0:0:0:0:1') return true
+  if (bare.startsWith('::ffff:7f') || bare.startsWith('::ffff:127.')) return true
+  // IPv4 环回整段 127.0.0.0/8
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare)) return true
+  return false
 }
 
 /**
