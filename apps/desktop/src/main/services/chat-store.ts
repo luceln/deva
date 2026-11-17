@@ -339,7 +339,16 @@ function persistIndex(): void {
 }
 
 /**
- * 丢掉内存缓存并删掉索引文件，让下次 listSessions() 重新扫盘（导入器收尾用，只给主进程内部调，不开放 IPC）。
+ * 丢掉**两个**缓存并删掉索引文件，让下次 listSessions() 重新扫盘。
+ *
+ * ## ⚠️ 当前生产代码没有任何调用点（只被测试用）
+ *
+ * 它和 `invalidateIndexOnly` 只差一个后缀，但语义差别是**会不会丢数据**：
+ * 清 `sessionCache` 会让「导入期间正在跑的那一轮对话」此后所有 `save()` 静默 return（见 `invalidateIndexOnly`
+ * 的注释）。导入器已改用窄版本，别处也没有依赖「清空会话缓存」的路径——审查已全仓确认过。
+ *
+ * 留着它是给「整份数据目录被换掉」这类将来可能出现的场景（那时清会话缓存才是对的）。**用之前先确认
+ * 当前场景真的需要丢掉会话缓存**，只是想刷新列表就用 `invalidateIndexOnly`。
  *
  * 为什么两个缓存都要清：`sessionCache` 与 `indexCache` 是模块私有、进程内常驻，`ensureIndex()` 第一行就是
  * 「有缓存就直接返回」。只删 `_index.json` 根本没用——内存里那份 Map 还在，界面照旧看不到新会话。
@@ -354,6 +363,37 @@ export function invalidateIndex(): void {
     rmSync(indexPath(), { force: true })
   } catch {
     /* 删不掉也无妨：缓存已清，下次 ensureIndex 会重扫并覆盖写 */
+  }
+}
+
+/**
+ * **只**清索引缓存并删 `_index.json`，**不动 `sessionCache`**（导入收尾专用）。
+ *
+ * ## 为什么必须留一个不动 sessionCache 的版本（P0-1，确定性数据丢失）
+ *
+ * `save(id)` 第一行是 `sessionCache.get(id); if (!s) return`——**缓存里没有就静默不写**。而一轮正在跑的对话
+ * （`chat-turns.ts` 的 `ensureSession()` 返回值）全程持有**对象引用**，中途不会重新 `getSession`。导入要跑几十秒，
+ * 用户「中途点开另一个对话继续说几句」是最常见动作；收尾若清空 `sessionCache`，那一轮之后的所有 `saveProject()`
+ * （`onStep`、`finally` 各一处）全部静默 return：消息留在内存里，进程一退就没了，界面还显示得好好的。
+ *
+ * 导入真正需要刷新的是**索引**（让新会话出现在列表里）。会话文件本身的缓存反而必须保住，否则就是在给「正在
+ * 写入的对话」挖坑。
+ *
+ * ## 为什么删文件、不在这里立刻重建
+ *
+ * `ensureIndex()` 在索引缺失时会扫目录重建并回写——那是**读取时**的自愈路径（`listSessions()` 调它）。这里若
+ * 主动调一次重建，等于每次导入收尾都重写 `_index.json`：内容虽然一样，但目录与文件的 mtime 每次都变，
+ * 「重复导入目标零变化」这条幂等性就破了。让重建留到下次读，收尾只做「让缓存失效」这一件事。
+ *
+ * `invalidateIndex()` 保持原语义（两个缓存都清）——它是通用函数，别的调用路径（如「数据目录换了」）依赖它
+ * 把会话缓存也丢掉。导入这种「只加了文件」的场景用这个窄版本。
+ */
+export function invalidateIndexOnly(): void {
+  indexCache = null
+  try {
+    rmSync(indexPath(), { force: true })
+  } catch {
+    /* 删不掉也无妨：索引缓存已清，下次 ensureIndex 会重扫并覆盖写 */
   }
 }
 

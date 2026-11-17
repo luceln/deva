@@ -68,6 +68,11 @@ export interface PersonaRecord {
   /** .md 正文 = 要追加进系统提示词的内容。 */
   prompt: string
   enabled: boolean
+  /**
+   * 仅在**角色文件没能写盘**时出现（upsert 的内存态返回，供界面提示；不落盘、读盘路径不填）。
+   * 有它说明「你看到的这条角色重启后会消失」，界面该提示而不是当成功。
+   */
+  writeFailed?: boolean
 }
 
 export interface PersonaUpsertInput {
@@ -109,7 +114,15 @@ function writeAvatarImage(id: string, dataUri: string): string {
   return isSafeId(id) ? writeAvatarImageFile(avatarsDir(), id, dataUri) : ''
 }
 
-/** 读取 config.json 的 personas.enabled 映射（不存在则空）。 */
+/**
+ * 读取 config.json 的 personas.enabled 映射（不存在则空）。
+ *
+ * ⚠️ **返回的是 `config.personas.enabled` 对象本身，不是副本**。因此对返回值做的原地修改（`map[id] = true`）
+ * 立刻生效在内存态上，**不需要**等 `writeEnabledMap` 落盘。这个语义有两面：
+ *  - 好处：写盘失败时内存态仍是新的（本次进程内看着正确），不会出现「点一下开关界面没反应」；
+ *  - 陷阱：调用方以为「没落盘就等于没改」，或以为 `writeEnabledMap` 才是改内存的地方。判断「磁盘上到底成没成」
+ *    只能看 `writeEnabledMap` 的返回值，不能看内存态。
+ */
 function enabledMap(): Record<string, boolean> {
   const personas = getConfig().personas
   const enabled = (personas as { enabled?: unknown })?.enabled
@@ -117,10 +130,15 @@ function enabledMap(): Record<string, boolean> {
   return {}
 }
 
-function writeEnabledMap(map: Record<string, boolean>): void {
+/**
+ * 写回 personas 段（读-改-写整段）并落盘。**返回是否落盘成功**：`setConfig` 会先改内存态再写文件，
+ * 磁盘满 / 文件被占 / 无权限时内存看着成功、重启后失效。调用方若需要「真的写进去了」就必须看这个返回值
+ * （导入器的第 ③ 步就是这么用的——以前丢掉它，于是「角色文件在、角色停用、界面说导入完成」）。
+ */
+function writeEnabledMap(map: Record<string, boolean>): boolean {
   const personas = getConfig().personas
   const base = personas && typeof personas === 'object' ? (personas as Record<string, unknown>) : {}
-  setConfig({ personas: { ...base, enabled: map } })
+  return setConfig({ personas: { ...base, enabled: map } })
 }
 
 /**
@@ -135,10 +153,10 @@ function orderList(): string[] {
   return []
 }
 
-function writeOrderList(order: string[]): void {
+function writeOrderList(order: string[]): boolean {
   const personas = getConfig().personas
   const base = personas && typeof personas === 'object' ? (personas as Record<string, unknown>) : {}
-  setConfig({ personas: { ...base, order } })
+  return setConfig({ personas: { ...base, order } })
 }
 
 /** 校验文件名安全（防 `..` / 分隔符逃逸）。 */
@@ -271,11 +289,18 @@ export function upsertPersona(input: PersonaUpsertInput): PersonaRecord {
     prompt: input.prompt ?? ''
   })
 
+  /**
+   * 角色 md 落盘失败：仍然返回内存态记录（界面要能继续编辑、下次可重试），但**在记录上带 `writeFailed`**
+   * 让界面能提示。以前这里是空 catch，用户新建的角色看着好好的、重启后消失——「看到的东西与实际不符」。
+   * 返回记录本身必须有值（渲染层整项替换列表要用），所以不方便改成 `{ok:false}`；加一个可选字段最省破坏。
+   */
+  let mdWritten = true
   try {
     mkdirSync(personasDir(), { recursive: true })
     writeFileAtomic(personaFile(id), md)
-  } catch {
-    /* 写失败：返回内存态记录，UI 仍可用（下次可重试） */
+  } catch (e) {
+    mdWritten = false
+    console.warn('[personas] 角色文件写盘失败：', (e as Error)?.message ?? e)
   }
 
   // 启用态：新建默认关；显式传入则以传入为准。
@@ -283,7 +308,7 @@ export function upsertPersona(input: PersonaUpsertInput): PersonaRecord {
   else if (isNew) setPersonaEnabled(id, false)
 
   // 带图返回：渲染层用它整项替换列表，少了图会把已存头像「擦掉」到下次 refresh 才回来。
-  return (
+  const rec =
     getPersona(id, true) ?? {
       id,
       name,
@@ -294,7 +319,8 @@ export function upsertPersona(input: PersonaUpsertInput): PersonaRecord {
       prompt: input.prompt ?? '',
       enabled: input.enabled === true
     }
-  )
+  // `writeFailed` 只在写盘失败时出现，不写进 md 也不参与比较；界面据此提示「未能保存，重启后会丢失」。
+  return mdWritten ? rec : { ...rec, writeFailed: true }
 }
 
 /**
@@ -365,8 +391,12 @@ export function deletePersona(id: string): void {
  * 覆盖手动排序：以传入 id 列表为准（去重、过滤非法 id）。花名册整表重排（拖拽落定 / 置顶）走此路径。
  * 只记录顺序，不校验角色是否仍存在——陈旧项对 listPersonas 无害（见其排序注释）。
  */
-export function reorderPersonas(ids: string[]): void {
-  if (!Array.isArray(ids)) return
+/**
+ * 覆盖手动排序。返回是否落盘成功——**排序是纯视觉信息，写盘失败时用户看到的是新顺序、重启后变回旧顺序**，
+ * 属于「看到的东西与实际不符」，所以要能让调用方上报（IPC 回 ok:false）。
+ */
+export function reorderPersonas(ids: string[]): boolean {
+  if (!Array.isArray(ids)) return true
   const seen = new Set<string>()
   const clean: string[] = []
   for (const id of ids) {
@@ -375,14 +405,62 @@ export function reorderPersonas(ids: string[]): void {
       clean.push(id)
     }
   }
-  writeOrderList(clean)
+  return writeOrderList(clean)
 }
 
+/**
+ * 置某个角色的启用态。签名保持 `void`（3 个内部调用点 + `personas:set-enabled` IPC 都只看「操作完成」）：
+ * 渲染层的启停失败不该让界面抛错。需要「是否真落盘」的调用方用 `setPersonaEnabledChecked` / `enablePersonas`
+ * （导入器用后者；IPC 用 Checked 版回 ok）。
+ */
 export function setPersonaEnabled(id: string, enabled: boolean): void {
-  if (!isSafeId(id)) return
+  setPersonaEnabledChecked(id, enabled)
+}
+
+/**
+ * 同 `setPersonaEnabled`，但**返回是否真的落盘成功**。
+ *
+ * 为什么要有两个：内存态与磁盘可能不一致（config.json 不可写时 setConfig 仍返回内存态成功），
+ * 而绝大多数调用方（IPC 启停、首启种子）只关心「状态已更新」，不该被迫处理这个布尔；
+ * 导入器则必须知道——它的报告要说「这些角色已启用」，而启用态没写进磁盘等于没启用。
+ *
+ * ⚠️ 非法 id 返回 false 而不是「成功了但什么也没做」：调用方是在问「这个 id 现在启用了吗」。
+ */
+export function setPersonaEnabledChecked(id: string, enabled: boolean): boolean {
+  if (!isSafeId(id)) return false
   const map = enabledMap()
   map[id] = enabled === true
-  writeEnabledMap(map)
+  return writeEnabledMap(map)
+}
+
+/**
+ * 批量置启用态，**只写一次盘**（导入器第 ③ 步用）。
+ *
+ * 为什么不循环调上面的单条版本：每条都要读-改-写整段 personas 段 + 一次原子写盘。导入几十个角色就是
+ * 几十次全量写 config.json；中途任一次写失败会让前后状态不一致，而且耗时无谓。这里合并成一次写。
+ *
+ * 返回 `{ done, failed }`：failed 里的 id 是「磁盘上并没有变成启用」的那些，reason 统一为
+ * `config-write-failed`（只有这一种可能：写盘失败）。调用方负责汇总进 ImportReport.failures——
+ * 这正是 P0-A：以前返回值被丢弃、异常被 catch 吞掉，于是「文件在、角色停用、界面说导入完成」。
+ */
+export function enablePersonas(ids: string[]): { done: string[]; failed: Array<{ id: string; reason: string }> } {
+  const clean: string[] = []
+  const seen = new Set<string>()
+  for (const id of ids) {
+    if (typeof id !== 'string' || !isSafeId(id) || seen.has(id)) continue
+    seen.add(id)
+    clean.push(id)
+  }
+  if (!clean.length) return { done: [], failed: [] }
+  const map = enabledMap()
+  for (const id of clean) map[id] = true
+  if (writeEnabledMap(map)) return { done: clean, failed: [] }
+  /**
+   * 写盘失败：**内存态已经是启用**，但不是上面 `map[id] = true` 那一步改的——`enabledMap()` 返回的是
+   * `config.personas.enabled` 这个对象**本身**（见其注释），上面的赋值就是原地改内存态。
+   * 所以「本次进程内看着是启用的、重启后没了」，如实报失败。
+   */
+  return { done: [], failed: clean.map((id) => ({ id, reason: 'config-write-failed' })) }
 }
 
 /**
@@ -450,6 +528,13 @@ export function ensureSeededPersonas(): void {
   const after = getConfig().personas
   const merged = after && typeof after === 'object' ? (after as Record<string, unknown>) : {}
   delete merged.seededGeneral // 迁移后去掉历史键（已并入 seeded）
+  /**
+   * 这里**刻意不检查 setConfig 的返回值**（与同文件其它落盘点不同，不是遗漏）：
+   * 守卫位只是「下次启动别再种一遍」的备忘。写失败的最坏后果是下次启动重跑一遍种子——而种子本身按内容幂等
+   * （`seededPrompt` 与磁盘哈希不符就不会改），用户看到的东西不会有任何差异。按「用户会不会看到的东西与实际
+   * 不符」这个标准，它不该占用一条失败条目去打扰用户（启动路径上也没人能把这条失败显示出来）。
+   * 磁盘真写不进去时，同一时刻的 `upsertPersona`（写角色 md）会各自失败并各自上报，不会被这条静默掩盖。
+   */
   setConfig({ personas: { ...merged, seeded, seededPrompt } })
 }
 
@@ -495,14 +580,13 @@ export function registerPersonasIpc(): void {
     deletePersona(id)
     return { ok: true }
   })
-  ipcMain.handle('personas:set-enabled', (_e, id: string, enabled: boolean): { ok: true } => {
-    setPersonaEnabled(id, Boolean(enabled))
-    return { ok: true }
-  })
-  ipcMain.handle('personas:reorder', (_e, ids: string[]): { ok: true } => {
-    reorderPersonas(Array.isArray(ids) ? ids : [])
-    return { ok: true }
-  })
+  ipcMain.handle('personas:set-enabled', (_e, id: string, enabled: boolean): { ok: boolean } => ({
+    ok: setPersonaEnabledChecked(id, Boolean(enabled))
+  }))
+  // 拖拽排序写盘失败要能回 ok:false：界面上顺序已经是新的，重启后变回去属于「看到的东西与实际不符」
+  ipcMain.handle('personas:reorder', (_e, ids: string[]): { ok: boolean } => ({
+    ok: reorderPersonas(Array.isArray(ids) ? ids : [])
+  }))
   // 自定义头像：与 upsert 分开，因为它不入 frontmatter，且新建角色要等 upsert 返回 id 后才能落图。
   ipcMain.handle('personas:set-avatar-image', (_e, id: string, dataUri: string): string =>
     writeAvatarImage(String(id ?? ''), String(dataUri ?? ''))
