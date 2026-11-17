@@ -475,6 +475,10 @@ if (gap > 0) {
   2. 删冗余 —— 上列 REDUNDANT 条目直接移除，豁免越少越好。
   3. 补运行时断言 —— 在 repro-accept 里造出该失败并断言进了 failed（真正验「有通道」的地方）。
 `)
+  console.log(`注：本脚本因 GAP>0 以退出码 1 收尾。这是**如实报告现状**，不是脚本坏了 ——`)
+  console.log(`    GAP 是「扫描器还没覆盖的形状」，它的处置要人来做（补形状或补运行时断言）。`)
+  console.log(`    CI 里只跑 scan-same-class.cjs（那条门禁只禁止**新增**的静默形状）；`)
+  console.log(`    本脚本是复查工具，不进门禁，否则已知的 10 条会让 CI 一直红。`)
 }
 if (problems.length) {
   console.log(`另有 ${problems.length} 条探针自身失效（源码结构变了，需更新样本）：`)
