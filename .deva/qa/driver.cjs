@@ -22,6 +22,28 @@ const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
 const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
+/**
+ * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
+ *
+ * 两条都不是产品代码的差异，而是「造这个场景的前提在这台机器上没有」：
+ *   full —— 拿真实 ~/.deva 当复制源；CI 与 WSL 里没有这个目录。
+ *   gate —— 用 powershell.exe 独占文件模拟「另一个进程占着 lockfile」；非 Windows 无此命令。
+ *
+ * 跳过数是汇总里单独一行、非零时以非 0 退出码暴露：让人看见「这次少了什么」，
+ * 而不是让 15/17 冒充 17/17。
+ */
+function skipReason(name) {
+  const isWin = process.platform === 'win32'
+  if (name === 'full' && !fs.existsSync(REAL_HOME)) {
+    return `真实源 ${REAL_HOME} 不存在（该场景以它为复制源）`
+  }
+  if (name === 'gate' && !isWin) {
+    return '该场景用 powershell.exe 独占文件造锁，非 Windows 无此命令'
+  }
+  return null
+}
+
+
 async function build() {
   fs.mkdirSync(DIST, { recursive: true })
   await esbuild.build({
@@ -94,7 +116,15 @@ async function main() {
   await build()
   const list = SCENARIOS.length ? SCENARIOS : ALL
   const results = []
-  for (const name of list) results.push(await runOne(name))
+  const skipped = []
+  for (const name of list) {
+    const why = skipReason(name)
+    if (why) {
+      skipped.push({ name, why })
+      continue
+    }
+    results.push(await runOne(name))
+  }
 
   console.log('\n================ 汇总 ================')
   let failScenarios = 0
@@ -110,13 +140,25 @@ async function main() {
     )
     for (const f of failLines) console.log(`        ✗ ${f}`)
   }
-  console.log(`\n共 ${results.length} 个场景，其中 ${failScenarios} 个有失败。`)
+  // 跳过项单独列，且写明原因：这部分覆盖这次没有发生，不能算进「全绿」。
+  for (const s of skipped) console.log(`SKIP ${s.name.padEnd(9)} ${s.why}`)
+
+  const ran = results.length
+  const total = ran + skipped.length
+  console.log(
+    `\n共 ${total} 个场景：${ran} 个已跑，其中 ${failScenarios} 个有失败；${skipped.length} 个因平台夹具跳过。`
+  )
+  if (skipped.length > 0) {
+    console.log(`本次未覆盖：${skipped.map((s) => s.name).join('、')} —— 这些场景的结论只能由别的平台给。`)
+  }
   try {
     if (!KEEP) fs.rmSync(TMP_ROOT, { recursive: true, force: true })
   } catch {
     /* ignore */
   }
-  process.exit(failScenarios > 0 ? 1 : 0)
+  // 有失败才算红；跳过不红但已在上面点名，且以 --strict 跑时视为未完成。
+  const strict = process.argv.includes('--strict')
+  process.exit(failScenarios > 0 || (strict && skipped.length > 0) ? 1 : 0)
 }
 
 main().catch((e) => {

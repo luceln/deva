@@ -44,3 +44,9 @@ jobs:
       # 它只读源码、跨平台，脚本自己带退出码（待确认项或问题数非 0 即 exit 1）。
       - name: 同类扫描
         run: node .deva/qa/scan-same-class.cjs
+
+      # 导入功能的 17 个行为场景（esbuild 打包后逐个独立进程跑）。
+      # Linux 上有 2 个场景的夹具不成立（full 要真实 ~/.deva、gate 要 powershell.exe），
+      # 它们会被显式 SKIP 并在汇总里点名，不算通过；其余 15 个必须全绿。
+      - name: 导入场景
+        run: node .deva/qa/driver.cjs
