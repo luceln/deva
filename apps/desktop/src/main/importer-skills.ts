@@ -62,6 +62,7 @@ function makeLink(target: string, dest: string): LinkKind | 'unreadable' | null 
   const isWin = process.platform === 'win32'
   let isDir: boolean
   try {
+    // silent-ok: 读失败是有意的三态处理——catch 里返回 'unreadable'，调用方据此记 link-failed
     isDir = statSync(target).isDirectory()
   } catch (e) {
     /*
@@ -162,6 +163,7 @@ export function importSkills(
         if (!builtin) stat.skipped.push(name)
         continue
       }
+      // silent-ok: 在 try 内，抛错由本循环的 catch 接住并记 writeFailureReason（见下方 catch）
       const st = lstatSync(from)
       if (st.isSymbolicLink()) {
         // 链接目标按**源链接所在目录**解析成绝对路径：readlinkSync 可能给相对路径，照抄到新目录会指向别处（断链且不报错）

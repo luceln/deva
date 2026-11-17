@@ -49,16 +49,22 @@ function isTempLeftover(name: string): boolean {
 }
 
 /**
- * 一条失败记录（step 固定为 assoc，kind 区分是哪一类附件）。
+ * 一条失败记录（`kind` 区分是哪一类附件）。
  *
- * 文件名类失败的 id 拼成 `${kind}:${name}`，便于在同一条失败清单里看出是哪一类附件的哪个文件。
- * 但**占位符 id（`<dir>` 这类）必须裸用**：界面 `ID_PLACEHOLDER_KEY` 是按完整 id 精确查文案表的，
- * 拼成 `media:<dir>` 就匹配不到，用户会直接看到 `<dir>` 这个内部占位符。占位符场景的 kind 移到 reason
- * 文本里（那里本来就是给人看的说明文字）。
+ * 三个约束同时成立，改动前务必都保住：
+ *
+ * 1. **`id` 保持裸用**（占位符 `<dir>` 不许拼前缀）：界面 `ID_PLACEHOLDER_KEY` 按完整 id 精确查文案，
+ *    拼成 `media:<dir>` 就匹配不到，用户会直接看到 `<dir>` 这个内部占位符。
+ * 2. **`reason` 必须是纯原因码**：界面 `FAILURE_REASON_KEY` 同样按完整字符串查表，以前占位符分支拼成
+ *    `media: target-write-failed`，查不到 → 界面原样渲染这句英文（验收在 397 条里就抓到了这一条）。
+ * 3. **`kind` 不能丢**：用户要知道是媒体还是回滚面板出的错。
+ *
+ * 所以 kind 移到 `step`：`assoc:media` / `assoc:checkpoints` / …。`step` 本来就是「哪一步」的字段，
+ * 界面按 `settings.import.steps.<step>` 查文案（取不到回落原文），分组也用它当 key
+ * ——顺带把失败清单按附件类型分得更细，比原来全归在 `assoc` 一组更准。
  */
 function fail(kind: string, id: string, reason: string): Failure {
-  if (id.startsWith('<')) return { step: 'assoc', id, reason: `${kind}: ${reason}` }
-  return { step: 'assoc', id: `${kind}:${id}`, reason }
+  return { step: `assoc:${kind}`, id, reason }
 }
 
 /**
@@ -176,7 +182,11 @@ function mergeDir(srcDir: string, dstDir: string, kind: string, failures: Failur
      * id 用目录身份：depth 0 是类别名（checkpoints / subagents / toolResults）；内层用末段目录名
      * （会话 id），用户能对上「哪个会话的附件没搬」。reason 统一 source-dir-unreadable，界面一条文案。
      */
-    failures.push({ step: kind, id: depth === 0 ? `<${kind}>` : basename(srcDir), reason: SOURCE_DIR_UNREADABLE })
+    failures.push({
+      step: `assoc:${kind}`,
+      id: depth === 0 ? `<${kind}>` : basename(srcDir),
+      reason: SOURCE_DIR_UNREADABLE
+    })
     return 0
   }
   if (srcList.kind === 'absent') return 0 // 真的没有这个目录：ENOENT
@@ -196,11 +206,11 @@ function mergeDir(srcDir: string, dstDir: string, kind: string, failures: Failur
         // 用户看到的是一条原始 ENOTDIR/EEXIST 消息而不是可解释的「位置被占」。
         const ds = inspectDirTarget(to)
         if (ds === 'blocked') {
-          failures.push({ step: kind, id: name, reason: 'target-blocked' })
+          failures.push({ step: `assoc:${kind}`, id: name, reason: 'target-blocked' })
           continue
         }
         if (ds === 'unreadable') {
-          failures.push({ step: kind, id: name, reason: 'target-unreadable' })
+          failures.push({ step: `assoc:${kind}`, id: name, reason: 'target-unreadable' })
           continue
         }
         if (ds === 'absent') {
@@ -213,12 +223,12 @@ function mergeDir(srcDir: string, dstDir: string, kind: string, failures: Failur
         const probe = inspectTarget(to)
         if (probe.kind === 'blocked') {
           // 同名目录占了文件的位置：写不进去，也不能算「跳过」（它压根不是这个文件）
-          failures.push({ step: kind, id: name, reason: 'target-blocked' })
+          failures.push({ step: `assoc:${kind}`, id: name, reason: 'target-blocked' })
           continue
         }
         if (probe.kind === 'unreadable') {
           // 打不开 = 不知道里面是什么。不覆盖，如实上报（覆盖可能毁掉一份好文件）
-          failures.push({ step: kind, id: name, reason: 'target-unreadable' })
+          failures.push({ step: `assoc:${kind}`, id: name, reason: 'target-unreadable' })
           continue
         }
         if (probe.kind === 'usable' && probe.size === st.size) {
@@ -248,7 +258,7 @@ function mergeDir(srcDir: string, dstDir: string, kind: string, failures: Failur
          *
          * 记 failed 而不是 skipped：skipped 的含义是「目标已有 / 不该搬」，而这是源里有、我们搬不了。
          */
-        failures.push({ step: kind, id: name, reason: 'source-not-a-file' })
+        failures.push({ step: `assoc:${kind}`, id: name, reason: 'source-not-a-file' })
       }
     } catch (e) {
       // 单条失败不影响其它，但必须上报：否则「导入完成」会盖住磁盘满/权限问题
@@ -284,7 +294,7 @@ export function copyAssoc(
    */
   const mediaList = readSourceDir(srcMedia)
   if (mediaList.kind === 'unreadable') {
-    failures.push({ step: 'assoc', id: '<data/media>', reason: SOURCE_DIR_UNREADABLE })
+    failures.push({ step: 'assoc:media', id: '<data/media>', reason: SOURCE_DIR_UNREADABLE })
   }
   const mediaNames = mediaList.kind === 'ok' ? mediaList.names : []
   if (mediaNames.length) {
@@ -304,11 +314,11 @@ export function copyAssoc(
       try {
         const probe = inspectTarget(to)
         if (probe.kind === 'blocked') {
-          failures.push({ step: 'assoc', id: `media:${name}`, reason: 'target-blocked' })
+          failures.push({ step: 'assoc:media', id: `media:${name}`, reason: 'target-blocked' })
           continue
         }
         if (probe.kind === 'unreadable') {
-          failures.push({ step: 'assoc', id: `media:${name}`, reason: 'target-unreadable' })
+          failures.push({ step: 'assoc:media', id: `media:${name}`, reason: 'target-unreadable' })
           continue
         }
         if (probe.kind === 'usable') {

@@ -466,19 +466,31 @@ async function scenarioReason(): Promise<void> {
     (r.secrets?.failed ?? []).map((f: any) => [f.id, f.reason]),
     [['imp-a', 'secrets-write-failed']]
   )
-  const assocIds = (r.assoc?.failed ?? []).map((f: any) => f.id)
+  const assocFails = (r.assoc?.failed ?? []) as Array<{ step: string; id: string; reason: string }>
+  const assocIds = assocFails.map((f) => f.id)
   info('assoc 失败 id', JSON.stringify(assocIds))
+  info('assoc 失败 step', JSON.stringify(assocFails.map((f) => f.step)))
   check('P2-12：附件占位符 id 是裸 `<dir>`（界面文案表能匹配）', assocIds.includes('<dir>'), JSON.stringify(assocIds))
   check(
     'P2-12：占位符没有被拼成 `media:<dir>`',
     !assocIds.some((id: string) => id.includes(':<')),
     JSON.stringify(assocIds)
   )
-  // 文件名类失败仍要带类别前缀（否则同类名冲突时看不出是哪一类附件）
+  /*
+   * 类别信息必须在（否则同类名冲突时看不出是媒体还是回滚面板），但**不能再拼进 id**
+   * ——那会让 `ID_PLACEHOLDER_KEY` 精确查表匹配不到占位符。现在它在 `step` 里（`assoc:media`）。
+   * 同时 `reason` 必须是纯码：以前占位符分支拼成 `media: target-write-failed`，
+   * 界面 `FAILURE_REASON_KEY` 查不到 → 原样渲染这句英文（验收在 397 条里就抓到了）。
+   */
   check(
-    'P2-12：文件名类失败仍带类别前缀（media:<hash>）',
-    assocIds.some((id: string) => id.startsWith('media:') && !id.includes('<')),
-    JSON.stringify(assocIds)
+    'P2-12：文件名类失败的类别在 step 里（assoc:media）',
+    assocFails.some((f) => f.step === 'assoc:media' && !f.id.includes('<')),
+    JSON.stringify(assocFails.map((f) => f.step))
+  )
+  eq(
+    'P2-12：每一条 reason 都是纯码（无 `kind: reason` 拼接）',
+    assocFails.map((f) => f.reason).filter((x) => x.includes(':')),
+    []
   )
   process.exit(fails ? 1 : 0)
 }
@@ -523,7 +535,7 @@ async function scenarioAssocBlocked(): Promise<void> {
   info('mergeDir 结果', JSON.stringify(r2.assoc.failed ?? r2.failures))
   check(
     'assocblk：mergeDir 的目录位置被文件占住 → target-blocked',
-    r2.failures.some((f: any) => f.step === 'checkpoints' && f.reason === 'target-blocked'),
+    r2.failures.some((f: any) => f.step === 'assoc:checkpoints' && f.reason === 'target-blocked'),
     JSON.stringify(r2.failures)
   )
   process.exit(fails ? 1 : 0)
