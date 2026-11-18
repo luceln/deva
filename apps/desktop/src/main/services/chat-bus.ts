@@ -83,12 +83,27 @@ export function onWorktreeChanged(listener: () => void): () => void {
   return subscribe<void>('worktree', listener)
 }
 
-/** worktree 长操作的进度（目前只有「正在等 Git 锁」一种）。 */
-export interface WorktreeProgress {
-  phase: 'waiting-lock'
-  /** 占着锁的那一头；拿不到（刚释放）时为 null。 */
-  holder: { label: string; since: number } | null
-}
+/**
+ * worktree 长操作的进度。
+ *
+ * - `waiting-lock`：等 Git 锁超过 5 秒（spec §5.1 第 7 条 / B6）——界面说「正在等另一个会话的 git 操作完成」。
+ * - `install-deps`：依赖安装进行中（spec §3.6 / B4）——界面显示当前命令与已用时长。
+ */
+export type WorktreeProgress =
+  | {
+      phase: 'waiting-lock'
+      /** 占着锁的那一头；拿不到（刚释放）时为 null。 */
+      holder: { label: string; since: number } | null
+    }
+  | {
+      phase: 'install-deps'
+      /** 哪个工作区在装。 */
+      path: string
+      /** 当前动作（命令名）。 */
+      step: string
+      /** 已用毫秒。 */
+      elapsedMs: number
+    }
 
 /**
  * 发一条 worktree 进度。用于「等锁超过 5 秒」这类场景（spec §5.1 第 7 条 / B6）：
