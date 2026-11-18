@@ -1,0 +1,246 @@
+
+/**
+ * 模型选择器。复用 app.css 的既有类
+ * （model-pick / chip / model-pick__backdrop / model-pick__menu），零新增 CSS。
+ * 只列「已启用服务商 × 已启用模型」，按服务商分组。
+ * 切换时做两件事：① 写当前对话覆盖层并立即落库到会话属性（setSessionModel，切了不发重启也不丢），
+ * 故同角色的多个对话可各用不同模型；② 把这次选择记为「最近使用模型」（setActiveModel）——本应用不设
+ * 显式「默认模型」，最近一次在此切换的模型即充当**新对话未选时的默认**（见 store/models.tsx activeModelId）。
+ * 显示的是**本对话生效模型**：本对话已选则显示所选；未选 → 回落最近使用模型 activeModel 显示
+ * （与主进程 resolveModelRef 的兜底一致）。
+ *
+ * **失效标红**：解析不到（模型被删 / 服务商被禁用 / 缺密钥 / 引用本身坏了）不再静默回落——胶囊标红、
+ * 文案换成「模型不可用」、右侧挂本对话受影响的会话数，点它直接打开批量替换对话框（用户此刻唯一的意图
+ * 就是修它，再弹普通模型菜单只会让人再点一层）。是否失效一处都不在这里算：结论来自主进程的 scan
+ * （store 的 brokenModels），渲染层自己按 providers 推一遍必然与主进程漂移。
+ * 菜单向上弹出（.model-pick__menu 的 bottom:calc(100%+8px)），锚在输入区工具条恰在屏内。
+ */
+function ModelPicker(): React.JSX.Element {
+  const { t } = useI18n()
+  const { activeModel, providers, setActiveModel } = useModels()
+  const { currentBinding, currentSessionId, brokenModels, sessions } = useChatState()
+  const { setSessionModel } = useChatActions()
+  const [open, setOpen] = useState(false)
+  const [swapOpen, setSwapOpen] = useState(false)
+  // 只列对话模型（purpose==='llm'）：决策模型（如 Jev）不生成文本，绝不可被选为对话模型。
+  const groups = providers
+    .filter((p) => p.enabled && (p.purpose ?? 'llm') === 'llm')
+    .map((p) => ({ p, models: p.models.filter((m) => m.enabled) }))
+    .filter((g) => g.models.length > 0)
+  // 本对话生效模型：解析对话覆盖层的 model 引用 `"pid:mid"`；空/非法/已删除 → 回落全局 activeModel。
+  const selected = useMemo(() => {
+    const ref = currentBinding.model
+    if (ref) {
+      const idx = ref.indexOf(':')
+      if (idx > 0) {
+        const pid = ref.slice(0, idx)
+        const mid = ref.slice(idx + 1)
+        const p = providers.find((x) => x.id === pid)
+        const m = p?.models.find((x) => x.id === mid)
+        if (p && m) return { pid, mid, name: m.name, accent: p.accent }
+      }
+    }
+    if (activeModel)
+      return {
+        pid: activeModel.provider.id,
+        mid: activeModel.model.id,
+        name: activeModel.model.name,
+        accent: activeModel.provider.accent
+      }
+    return null
+  }, [currentBinding.model, providers, activeModel])
+
+  // 本会话的模型是否已失效：只认主进程 scan 的结论（store 的 brokenModels），不在渲染层按 providers 复算。
+  // 悬空的引用可能没人登记在本会话上（缓存里没有本会话的 sessionId 时也不标红），此时宁可保持原样——
+  // 拿不到结论就标红，会把用户赶去换一个本来好好的模型。
+  // 看成员会话时用它的主对话（批量替换的范围是「主对话 + 成员」，与主进程 scan 的口径一致）。
+  // 成员会话的归属由主对话的 members 名单反查——成员会话本身不进 sessions，与 ChatFirstShell 的 memberOf 同法。
+  const mainId = useMemo(
+    () => sessions.find((s) => s.members?.some((m) => m.sessionId === currentSessionId))?.id ?? currentSessionId,
+    [sessions, currentSessionId]
+  )
+  const brokenHere = useMemo(
+    () => (brokenModels[mainId] ?? []).filter((b) => b.sessionId === currentSessionId),
+    [brokenModels, mainId, currentSessionId]
+  )
+  const broken = brokenHere.length > 0
+  // 本对话的失效原因全都只是「密钥的事」时，胶囊用警示色而非危险色：填上密钥就好，不该被读成「得换模型」。
+  // 只要有一处是真坏（被删 / 服务商或模型被停用 / 引用非法），就按严重处理（危险色）——停用虽说也是
+  // 「去设置里点一下就好」，但用户点头像框上面的胶囊时最想知道的仍是「这对话现在坏了」。
+  // keyunreadable（密文在但解不开）同属「密钥的事」：换模型解决不了，仍要引导去重填。
+  const onlyNoKey =
+    brokenHere.length > 0 &&
+    (brokenModels[mainId] ?? []).every((b) => b.kind === 'nokey' || b.kind === 'keyunreadable')
+  // 受影响的会话数（本对话 + 名下成员）：红色胶囊右侧的徽标，告诉用户这不是一处的问题。
+  const brokenCount = (brokenModels[mainId] ?? []).length
+  // 本次要换掉的引用：优先本会话自己指向的那个（覆盖层 / 已落库值），对不上再退回扫描结果里的第一条。
+  // 比较前 trim：主进程 apply 的匹配规则是归一后相等（见 model-swap.ts 的 normalizeRef），界面得跟它一致，
+  // 否则带空格的会话会「界面认为不匹配、主进程却换了」（A24 的界面侧同形）。
+  const boundModel = currentBinding.model
+  const boundNorm = boundModel ? boundModel.trim() : ''
+  const swapFromRef =
+    boundModel && brokenHere.some((b) => b.ref.trim() === boundNorm)
+      ? boundModel
+      : (brokenHere[0]?.ref ?? '')
+
+  // 失效胶囊：不弹模型菜单，直接打开批量替换对话框——用户此刻要处理的就是它，再弹普通菜单只会多一层。
+  // 只有缺密钥时文案改成「缺少密钥」并保留可选的换模型入口（对话框里主操作是「去填密钥」）。
+  if (broken) {
+    return (
+      <div className="model-pick">
+        <button
+          className={`chip is-broken${onlyNoKey ? ' is-nokey' : ''}`}
+          type="button"
+          title={t('cf.modelSwap.brokenHint').replace('{n}', String(brokenCount))}
+          onClick={() => setSwapOpen(true)}
+        >
+          <span className="chip__label">
+            {onlyNoKey ? t('cf.modelSwap.noKey') : t('cf.modelSwap.broken')}
+          </span>
+          {/* 徽标恒显示：一个会话也不受影响时不会走到这里，有红标就说明至少一处，数字让用户知道范围。 */}
+          <span className="chip__badge">{brokenCount}</span>
+        </button>
+        {swapOpen && (
+          <ModelSwapDialog
+            // 换掉的正是本会话指向的那个失效引用；同一对话里别的失效引用换完会重新亮红标。
+            mainId={mainId}
+            fromRef={swapFromRef}
+            onClose={() => setSwapOpen(false)}
+          />
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="model-pick">
+      <button
+        className={`chip${open ? ' is-open' : ''}`}
+        type="button"
+        title={t('chat.selectModel')}
+        onClick={() => setOpen((v) => !v)}
+      >
+        {selected && <span className="chip__dot" style={{ background: selected.accent }} />}
+        <span className="chip__label">{selected ? selected.name : t('chat.selectModel')}</span>
+        <ChevronDown size={13} className="chip__caret" />
+      </button>
+      {open && (
+        <>
+          <div className="model-pick__backdrop" onClick={() => setOpen(false)} />
+          <div className="model-pick__menu" role="menu">
+            {groups.length === 0 && <div className="model-pick__empty">{t('chat.noModel')}</div>}
+            {groups.map(({ p, models }) => (
+              <div key={p.id} className="model-pick__group">
+                <div className="model-pick__group-head">
+                  <span className="model-pick__dot" style={{ background: p.accent }} />
+                  <span className="model-pick__group-name">{p.name}</span>
+                </div>
+                {models.map((m) => {
+                  const active = selected?.pid === p.id && selected?.mid === m.id
+                  return (
+                    <button
+                      key={m.id}
+                      role="menuitemradio"
+                      aria-checked={active}
+                      className={`model-pick__item${active ? ' is-active' : ''}`}
+                      title={m.name === m.id ? m.id : `${m.name} · ${m.id}`}
+                      onClick={() => {
+                        // ① 记入本对话属性；② 记为「最近使用」，充当后续新对话未选时的默认。
+                        setSessionModel(`${p.id}:${m.id}`)
+                        setActiveModel(p.id, m.id)
+                        setOpen(false)
+                      }}
+                    >
+                      <span className="model-pick__name">{m.name}</span>
+                      {active && <Check size={14} className="model-pick__check" />}
+                    </button>
+                  )
+                })}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 思考等级选择器（紧挨模型选择器，复用其 model-pick / chip 类）。与模型同一套语义：切换只改本对话并立即
+ * 落库（setSessionEffort），同时记为「最近使用」（setActiveEffort），尚未定格的对话（新对话）沿用它。
+ * 只列本对话生效模型支持的档（模型能力内置表，见 shared/effort.ts）；模型不支持思考等级则整个隐藏。
+ * 「默认」= 不发任何思考参数；各档如何映射到各家协议、不支持时如何自愈，见主进程 providers/* 与 chat.ts。
+ */
+function EffortPicker(): React.JSX.Element | null {
+  const { t } = useI18n()
+  const { activeEffort, setActiveEffort, activeModel, providers } = useModels()
+  const { currentBinding } = useChatState()
+  const { setSessionEffort } = useChatActions()
+  const [open, setOpen] = useState(false)
+  // 本对话生效模型（同 ModelPicker：本对话已选 → 否则回落最近使用）。选择器只列对话模型，adapter 必属三协议之一。
+  const active = findActive(providers, currentBinding.model ?? null) ?? activeModel
+  const adapter = active?.provider.adapter as EffortAdapter | undefined
+  const modelId = active?.model.id
+  const levels = adapter && modelId ? supportedEffortLevels(adapter, modelId) : []
+  if (!adapter || !modelId || levels.length === 0) return null
+  // 只能开、不能调档的模型（如通义 qwen-plus、Kimi K2）：唯一的一档显示为「开启」。
+  const toggle = isToggleEffort(adapter, modelId)
+  const nameOf = (lv: EffortLevel): string =>
+    toggle && lv !== 'default' ? t('chat.effort.on') : t(`chat.effort.levels.${lv}`)
+  const hintOf = (lv: EffortLevel): string =>
+    toggle && lv !== 'default' ? t('chat.effort.onHint') : t(`chat.effort.hints.${lv}`)
+  // 本对话存的档位（尚未定格时为「最近使用」）收敛到该模型支持的档来显示——与主进程实际发送的一致；
+  // 存值本身不改，换回支持该档的模型即恢复。
+  const current = clampEffort(adapter, modelId, currentBinding.effort ?? activeEffort)
+  const label = nameOf(current)
+  const options: EffortLevel[] = ['default', ...levels]
+  return (
+    <div className="model-pick">
+      <button
+        className={`chip${open ? ' is-open' : ''}`}
+        type="button"
+        title={`${t('chat.effort.title')}：${label}`}
+        aria-label={`${t('chat.effort.title')}：${label}`}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Lightbulb size={13} />
+        <span className="chip__label">{label}</span>
+        <ChevronDown size={13} className="chip__caret" />
+      </button>
+      {open && (
+        <>
+          <div className="model-pick__backdrop" onClick={() => setOpen(false)} />
+          <div className="model-pick__menu" role="menu">
+            <div className="model-pick__group">
+              <div className="model-pick__group-head">
+                <span className="model-pick__group-name">{t('chat.effort.title')}</span>
+              </div>
+              {options.map((lv) => {
+                const active = lv === current
+                return (
+                  <button
+                    key={lv}
+                    role="menuitemradio"
+                    aria-checked={active}
+                    className={`model-pick__item${active ? ' is-active' : ''}`}
+                    onClick={() => {
+                      // ① 记入本对话属性；② 记为「最近使用」，充当后续新对话的默认。
+                      setSessionEffort(lv)
+                      setActiveEffort(lv)
+                      setOpen(false)
+                    }}
+                  >
+                    <span className="model-pick__name cf-effort__text">
+                      <span>{nameOf(lv)}</span>
+                      <span className="cf-effort__hint">{hintOf(lv)}</span>
+                    </span>
+                    {active && <Check size={14} className="model-pick__check" />}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
