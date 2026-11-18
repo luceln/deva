@@ -3082,6 +3082,96 @@ async function scenarioWorktree(): Promise<void> {
   const instHandler = stub.__test.ipcHandlers.get('worktree:install-deps')
   check('IPC：worktree:install-deps 已注册', typeof instHandler === 'function', typeof instHandler)
 
+  // ══ 列表并发化（性能修复）：坏条目不影响其它条，且 headBranch 不再单独跑 git ══
+  /*
+   * 这段守的是并行化最容易引入的两种回归：
+   * ① 一条坏记录把整张列表拖垮（串行时抛错会中断，并行时若不 catch 会变成 unhandled rejection）；
+   * ② 为了提速把 `headBranch` 从 worktree list 的条目里读之后，detached / 切分支的判定变了。
+   */
+  const P = await import('../../apps/desktop/src/main/services/worktree/paths')
+  const badPath = path.join(DST, 'wts', 'no-such-dir')
+  S.upsertRecord({
+    schemaVersion: 1,
+    path: badPath,
+    compareKey: '',
+    repoRoot: repo,
+    repoKey: 'k2',
+    branch: 'wt/ghost',
+    baseSha: 'b'.repeat(40),
+    baseLabel: 'my/dev',
+    targetBranch: 'my/dev',
+    createdAt: Date.now() + 1,
+    phase: 'active',
+    intent: { branchExistedAtStart: false, pathExistedAtStart: false },
+    deps: 'skipped'
+  })
+  const snapBad = await L.listWorktrees()
+  const normBad = P.normalizeWorktreePath(badPath)
+  const recBad = snapBad.items.find((i) => i.compareKey === normBad.compareKey)
+  check(
+    '并发：目录不存在的那条 → dir-missing 或 prunable',
+    recBad?.state === 'dir-missing' || recBad?.state === 'prunable',
+    recBad?.state
+  )
+  eq('并发：目录不存在的那条 dirtyCount 为 null（不去跑必失败的 git）', recBad?.dirtyCount, null)
+  eq('并发：目录不存在的那条 mergeInProgress 为 null', recBad?.mergeInProgress, null)
+  check(
+    '并发：坏条目不拖垮列表——其余条目照样拿到 sizeBytes/sessionCount/state',
+    snapBad.items.filter((i) => i !== recBad).every((i) => typeof i.state === 'string' && typeof i.sessionCount === 'number' && 'sizeBytes' in i),
+    JSON.stringify(snapBad.items.map((i) => i.state))
+  )
+  check('并发：所有条目都返回了（没有因为异常被丢掉）', snapBad.items.length >= 2, String(snapBad.items.length))
+  S.removeRecord(badPath)
+
+  /*
+   * `headBranch` 现在从 `git worktree list --porcelain` 的条目读（省掉每条一次 rev-parse）。
+   * 必须证明两种情形都还对：切到别的分支、detached。
+   */
+  gitOut(wt3, 'checkout', '-q', '-b', 'wt/perf-other')
+  const snapBranch = await L.listWorktrees()
+  eq(
+    '并发优化后：切到别的分支仍判 branch-mismatch（headBranch 从 porcelain 读到的是新分支）',
+    snapBranch.items.find((i) => i.compareKey === rec3.compareKey)?.state,
+    'branch-mismatch'
+  )
+  const perfHead = gitOut(wt3, 'rev-parse', 'HEAD')
+  gitOut(wt3, 'checkout', '-q', '--detach', perfHead)
+  const snapDetached = await L.listWorktrees()
+  eq(
+    '并发优化后：detached 仍判 branch-mismatch（porcelain 无 branch 行 → 等价于 rev-parse 的 "HEAD"）',
+    snapDetached.items.find((i) => i.compareKey === rec3.compareKey)?.state,
+    'branch-mismatch'
+  )
+  gitOut(wt3, 'checkout', '-q', rec3.branch)
+
+  // ══ sizeBytes 回填走增量事件（不发 worktree:changed，避免整表重拉）══
+  {
+    const bus = await import('../../apps/desktop/src/main/services/chat-bus')
+    const sizeEvents: Array<{ compareKey: string; sizeBytes: number }> = []
+    let changedCount = 0
+    const offSize = bus.onWorktreeSize((u) => sizeEvents.push(u))
+    const offChanged = bus.onWorktreeChanged(() => {
+      changedCount++
+    })
+    L.clearSizeCacheForTest()
+    await L.listWorktrees() // 触发后台统计
+    await new Promise((r) => setTimeout(r, 800))
+    offSize()
+    offChanged()
+    info('sizeBytes 增量事件', JSON.stringify(sizeEvents.map((e) => e.sizeBytes)))
+    info('同期 worktree:changed 次数', String(changedCount))
+    check(
+      'T1.4b：体积算完发**增量** worktree:size（带 compareKey + sizeBytes）',
+      sizeEvents.length > 0 && sizeEvents.every((e) => typeof e.compareKey === 'string' && typeof e.sizeBytes === 'number'),
+      JSON.stringify(sizeEvents)
+    )
+    eq(
+      'T1.4b：体积回填**不**发 worktree:changed（否则界面整表重拉，4N+1 次 git）',
+      changedCount,
+      0
+    )
+  }
+
   // ══ mergeGate 四个 blocker（spec §7.5）══
   /*
    * `mergeGate` 是「按钮能不能点」的唯一依据（A48：渲染层不复算）。四个 blocker 各构造一次：
