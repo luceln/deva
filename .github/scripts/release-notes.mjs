@@ -56,7 +56,12 @@ function previousTag() {
   try {
     // 取 ref 之前最近的、本仓自己的 tag。用 describe 而不是按版本号排序：
     // 上游升版后我们的 plus 号可能小于上游号，排序会选错基准。
-    const all = git('tag', '--list', 'v*', '--merged', `${ref}^`).split('\n').filter(Boolean)
+    const all = git('tag', '--list', 'v*', '--merged', `${ref}^`)
+      .split('\n')
+      .filter(Boolean)
+      // 排除当前正在生成的这个 tag 自身：tag 已打上后再重跑（如修正说明）时，
+      // `${ref}^` 上能到达它，不排除会得到空范围
+      .filter((t) => t !== tag)
     const own = all.filter(isOwnTag)
     if (own.length === 0) return null
 
