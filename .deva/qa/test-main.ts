@@ -2697,19 +2697,45 @@ async function scenarioWorktreeLock(): Promise<void> {
   )
 
   // ── ③ 同一路径的不同写法要命中同一把锁（归一化后判等）──
-  const order3: string[] = []
-  const task3 = (name: string, p: string) =>
+  //
+  // 这里**必须按平台分支**，与 `97ffcb5` 同一类问题：Linux 文件系统大小写敏感，
+  // `/a` 与 `/A` 是两个不同目录，`paths.ts:78` 也只对 win32/darwin 折叠。
+  // 若一律断言「大写写法命中同一把锁」，Windows 绿、Linux 红——而产品代码是对的，
+  // 是断言把「我所在平台的习惯」当成了「普适规则」。
+  const foldCase = process.platform === 'win32' || process.platform === 'darwin'
+
+  // ③a 尾斜杠：任何平台都该归一，与大小写无关
+  const orderSlash: string[] = []
+  const taskSlash = (name: string, p: string) =>
     L.withGitLock([p], 'remove', async () => {
-      order3.push(`${name}:in`)
+      orderSlash.push(`${name}:in`)
       await t(20)
-      order3.push(`${name}:out`)
+      orderSlash.push(`${name}:out`)
     })
-  await Promise.all([task3('P', p1), task3('Q', p1.toUpperCase() + '/')])
-  info('大小写/尾斜杠变体的顺序', JSON.stringify(order3))
+  await Promise.all([taskSlash('P', p1), taskSlash('Q', p1 + '/')])
+  info('尾斜杠变体的顺序', JSON.stringify(orderSlash))
   eq(
-    '§5.1：同一路径的不同写法命中同一把锁（归一化后才比较）',
-    order3,
+    '§5.1：尾斜杠写法命中同一把锁（归一化后才比较）',
+    orderSlash,
     ['P:in', 'P:out', 'Q:in', 'Q:out']
+  )
+
+  // ③b 大小写：只在折叠大小写的平台（win32/darwin）上要求命中同一把锁
+  const orderCase: string[] = []
+  const taskCase = (name: string, p: string) =>
+    L.withGitLock([p], 'remove', async () => {
+      orderCase.push(`${name}:in`)
+      await t(20)
+      orderCase.push(`${name}:out`)
+    })
+  await Promise.all([taskCase('P', p1), taskCase('Q', p1.toUpperCase())])
+  info(`大小写变体的顺序（本平台折叠大小写=${foldCase}）`, JSON.stringify(orderCase))
+  eq(
+    foldCase
+      ? '§5.1：大小写变体命中同一把锁（本平台大小写不敏感）'
+      : '§5.1：大小写变体是两把锁（本平台大小写敏感，Linux 不折叠）',
+    orderCase,
+    foldCase ? ['P:in', 'P:out', 'Q:in', 'Q:out'] : ['P:in', 'Q:in', 'P:out', 'Q:out']
   )
 
   // ── ④ 多路径一次全传：两条路径都锁上 ──
