@@ -67,3 +67,17 @@ export function publishSessionsChanged(): void {
 export function onSessionsChanged(listener: () => void): () => void {
   return subscribe<void>('sessions', listener)
 }
+
+/**
+ * 工作区（git worktree）清单变了：创建成功、删除、状态变化。
+ *
+ * 与 `sessions` 分开一个 topic 而不是复用它：两个清单的生命周期与订阅方不同——worktree 列表只在
+ * 工作区相关界面用，没必要让每个会话列表的订阅者也跟着重渲染。
+ */
+export function publishWorktreeChanged(): void {
+  bus.emit('worktree')
+}
+
+export function onWorktreeChanged(listener: () => void): () => void {
+  return subscribe<void>('worktree', listener)
+}

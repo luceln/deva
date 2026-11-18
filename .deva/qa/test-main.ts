@@ -2163,6 +2163,241 @@ async function scenarioWorktreePrecheck(): Promise<void> {
   )
 }
 
+/**
+ * Step 1-3 创建主流程：成功路径、A7（n 层树）、A4（失败路径）、A25（孤儿分支）、A22（不误删）。
+ *
+ * A7 与 A4 是清单里明确要求「必须显式构造场景，不能靠代码走查」的两条，这里逐条造。
+ */
+async function scenarioWorktreeCreate(): Promise<void> {
+  const CR = await import('../../apps/desktop/src/main/services/worktree/create')
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+  const GW = await import('../../apps/desktop/src/main/services/worktree/git-worktree')
+  const child = require('node:child_process') as typeof import('node:child_process')
+
+  const repo = makeRepo(path.join(DST, 'repo'), {
+    'a.txt': 'a\n',
+    'only-dev.txt': 'dev only\n',
+    'src/x.txt': 'x\n'
+  })
+  const head0 = gitOut(repo, 'rev-parse', 'HEAD')
+
+  // ══════════ 成功路径 ══════════
+  const wtA = path.join(DST, 'wts', 'a')
+  const rA = await CR.createWorktree({ repoRoot: repo, branch: 'wt/a', path: wtA })
+  if (!rA.ok) {
+    fail('create：正常创建不该失败', JSON.stringify(rA))
+    return
+  }
+  info('创建 A 的记录', JSON.stringify({ branch: rA.record.branch, baseSha: rA.record.baseSha, phase: rA.record.phase }))
+  eq('create：phase 定稿为 active', rA.record.phase, 'active')
+  eq('create：baseSha 等于创建时的主目录 HEAD（A5）', rA.record.baseSha, head0)
+  eq('create：目录已建出来', fs.existsSync(wtA), true)
+  eq('create：worktree 里 HEAD 就是 baseSha（Step 3 校验）', gitOut(wtA, 'rev-parse', 'HEAD'), head0)
+  eq('create：worktree 检出的分支正确', gitOut(wtA, 'rev-parse', '--abbrev-ref', 'HEAD'), 'wt/a')
+  eq('create：记录已落盘', S.listRecords().length, 1)
+
+  // A6：新 worktree 里有 my/dev 有而 main 没有的文件（证明不是从上游镜像切的）
+  eq('A6：新 worktree 里有 my/dev 独有的文件', fs.existsSync(path.join(wtA, 'only-dev.txt')), true)
+  eq(
+    'A6：内容也对（换行按平台归一后比较）',
+    fs.readFileSync(path.join(wtA, 'only-dev.txt'), 'utf8').replace(/\r\n/g, '\n'),
+    'dev only\n'
+  )
+
+  // A4b：git worktree list 只比之前多一条，primary 仍是主目录
+  const listAfter = gitOut(repo, 'worktree', 'list', '--porcelain')
+  const entries = GW.parseWorktreeList(listAfter)
+  info('worktree list', JSON.stringify(entries.map((e) => [path.basename(e.path), e.branch])))
+  eq('A4b：worktree 数量比之前多一条', entries.length, 2)
+  eq('A4b：第一条是主检出', path.basename(entries[0].path), 'repo')
+
+  // ══════════ A7：n 层单分支树 —— 必须从主检出取 HEAD ══════════
+  /*
+   * 场景：在 worktree-A 里做一次提交，让 A 的 HEAD 前进；
+   * 然后「从 A 的会话里」新建工作区（模拟：repoRoot 仍传主目录，但当前 focusRoot 是 A）。
+   * 新 worktree 的 baseSha 必须 === 主检出 HEAD，且 **A 那个提交带来的文件不存在**。
+   */
+  fs.writeFileSync(path.join(wtA, 'from-worktree-a.txt'), 'A only\n')
+  gitOut(wtA, 'add', '-A')
+  const commitA = child.spawnSync('git', ['commit', '-qm', 'commit in A'], {
+    cwd: wtA,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'q',
+      GIT_AUTHOR_EMAIL: 'q@q',
+      GIT_COMMITTER_NAME: 'q',
+      GIT_COMMITTER_EMAIL: 'q@q'
+    }
+  })
+  if (commitA.status !== 0) info('A7 前置：commit 失败', String(commitA.stderr ?? '').slice(0, 200))
+  const headA = gitOut(wtA, 'rev-parse', 'HEAD')
+  const headMainStill = gitOut(repo, 'rev-parse', 'HEAD')
+  info('A 的 HEAD vs 主目录 HEAD', JSON.stringify({ headA, headMainStill }))
+  eq('A7 前置：worktree-A 的 HEAD 已前进', headA !== headMainStill, true)
+
+  const wtB = path.join(DST, 'wts', 'b')
+  const rB = await CR.createWorktree({ repoRoot: repo, branch: 'wt/b', path: wtB })
+  if (!rB.ok) {
+    fail('A7：第二个工作区创建失败', JSON.stringify(rB))
+    return
+  }
+  info('B 的 baseSha', rB.record.baseSha)
+  eq('A7：新 worktree 的 baseSha 等于主检出的 HEAD（不是 A 的）', rB.record.baseSha, headMainStill)
+  check('A7：新 worktree 的 baseSha 不等于 worktree-A 的 HEAD', rB.record.baseSha !== headA, rB.record.baseSha)
+  eq(
+    'A7：A 那个提交带来的文件在新 worktree 里不存在（没有 n 层树）',
+    fs.existsSync(path.join(wtB, 'from-worktree-a.txt')),
+    false
+  )
+
+  // ══════════ A9/A10：隔离生效 ══════════
+  fs.writeFileSync(path.join(wtB, 'b-only.txt'), 'B\n')
+  eq('A9：B 里新建的文件，主目录看不到', fs.existsSync(path.join(repo, 'b-only.txt')), false)
+  eq('A9：B 里新建的文件，A 也看不到', fs.existsSync(path.join(wtA, 'b-only.txt')), false)
+  gitOut(wtB, 'add', '-A')
+  child.spawnSync('git', ['commit', '-qm', 'commit in B'], {
+    cwd: wtB,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'q',
+      GIT_AUTHOR_EMAIL: 'q@q',
+      GIT_COMMITTER_NAME: 'q',
+      GIT_COMMITTER_EMAIL: 'q@q'
+    }
+  })
+  eq('A10：B 提交后主目录 HEAD 不变', gitOut(repo, 'rev-parse', 'HEAD'), headMainStill)
+  eq('A10：B 提交后 A 的 HEAD 不变', gitOut(wtA, 'rev-parse', 'HEAD'), headA)
+
+  // ══════════ A4：失败路径 —— 主目录 status / stash / 分支不变 ══════════
+  /*
+   * 造失败：给 add 一个**已存在的路径**（0.7 会先拦，所以这里绕过 precheck 直接调 addWorktree +
+   * cleanupFailedCreate，模拟「precheck 通过但 add 那一刻路径被占了」的竞态）。
+   */
+  const statusBefore = gitOut(repo, 'status', '--porcelain')
+  const stashBefore = gitOut(repo, 'stash', 'list')
+  const branchesBefore = gitOut(repo, 'branch', '--format=%(refname:short)')
+  const headBeforeFail = gitOut(repo, 'rev-parse', 'HEAD')
+
+  // 制造一个「已被占用的目标路径」
+  const blockedPath = path.join(DST, 'wts', 'blocked')
+  fs.mkdirSync(blockedPath, { recursive: true })
+  fs.writeFileSync(path.join(blockedPath, 'user-file.txt'), 'user data\n')
+
+  const addFail = await GW.addWorktree(repo, blockedPath, 'wt/fail', headBeforeFail)
+  info('add 到已存在路径的结果', JSON.stringify({ ok: addFail.ok, stderr: addFail.stderr.slice(0, 80) }))
+  eq('A4：add 到已存在路径会失败', addFail.ok, false)
+
+  const cleanup = await GW.cleanupFailedCreate({
+    repoRoot: repo,
+    path: blockedPath,
+    branch: 'wt/fail',
+    intent: { branchExistedAtStart: false, pathExistedAtStart: false }
+  })
+  info('清理结果', JSON.stringify(cleanup))
+
+  // A25：孤儿分支必须被删掉（用 -D，不是 -d）
+  eq('A25：失败后不留孤儿分支', gitOut(repo, 'branch', '--list', 'wt/fail'), '')
+  eq('A25：清理报告 branchRemoved', cleanup.branchRemoved, true)
+
+  /*
+   * A25 的关键补测：**未合并分支**也必须删得掉。
+   *
+   * 上面那个 wt/fail 是从 HEAD 切出、零提交，等于「已合并」——用 `-d` 也能成功，验不出 spec §19
+   * 警告的那个坑（`-d` 在未合并时拒绝，而实现通常只判 code === 0 之后继续，于是孤儿分支永留）。
+   * 这里造一个**真的未合并**的分支：建 worktree → 里面提交 → 删登记保留分支 → 再走清理。
+   */
+  const wtU = path.join(DST, 'wts', 'unmerged')
+  const rU = await CR.createWorktree({ repoRoot: repo, branch: 'wt/unmerged', path: wtU })
+  if (!rU.ok) {
+    fail('A25：未合并分支场景的前置创建失败', JSON.stringify(rU))
+    return
+  }
+  fs.writeFileSync(path.join(wtU, 'u.txt'), 'u\n')
+  gitOut(wtU, 'add', '-A')
+  child.spawnSync('git', ['commit', '-qm', 'unmerged work'], {
+    cwd: wtU,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_AUTHOR_NAME: 'q', GIT_AUTHOR_EMAIL: 'q@q', GIT_COMMITTER_NAME: 'q', GIT_COMMITTER_EMAIL: 'q@q' }
+  })
+  // 解登记但保留分支，模拟「add 之后失败」的状态
+  gitOut(repo, 'worktree', 'remove', '--force', wtU)
+  eq('A25 前置：分支存在且未合并', gitOut(repo, 'branch', '--list', 'wt/unmerged').includes('wt/unmerged'), true)
+  const mergedCheck = child.spawnSync('git', ['branch', '--merged', 'HEAD', '--format=%(refname:short)'], {
+    cwd: repo,
+    encoding: 'utf8'
+  })
+  check(
+    'A25 前置：该分支确实「未合并」（所以 -d 会拒绝）',
+    !String(mergedCheck.stdout ?? '').split('\n').includes('wt/unmerged'),
+    String(mergedCheck.stdout ?? '').trim()
+  )
+  // 只清分支这一半（目录已不在）
+  const cleanupU = await GW.cleanupFailedCreate({
+    repoRoot: repo,
+    path: wtU,
+    branch: 'wt/unmerged',
+    intent: { branchExistedAtStart: false, pathExistedAtStart: false }
+  })
+  info('未合并分支的清理结果', JSON.stringify(cleanupU))
+  eq('A25：未合并的孤儿分支也被删掉（必须 -D，-d 会拒绝）', gitOut(repo, 'branch', '--list', 'wt/unmerged'), '')
+  eq('A25：清理报告 branchRemoved（未合并情形）', cleanupU.branchRemoved, true)
+
+  // A22/R9：用户已有的目录与文件绝对不能删
+  eq('A22：用户已有目录仍在', fs.existsSync(blockedPath), true)
+  eq('A22：用户文件内容没变', fs.readFileSync(path.join(blockedPath, 'user-file.txt'), 'utf8'), 'user data\n')
+  check('A22：清理报告说明目录被保留', cleanup.warnings.some((w) => w.includes('保留')), JSON.stringify(cleanup.warnings))
+
+  // A4：主目录完全没被动过
+  eq('A4：主目录 status 逐字符一致', gitOut(repo, 'status', '--porcelain'), statusBefore)
+  eq('A4：stash list 仍为空（没靠 stash 实现）', gitOut(repo, 'stash', 'list'), stashBefore)
+  eq('A4：分支列表一致（孤儿分支已清掉）', gitOut(repo, 'branch', '--format=%(refname:short)'), branchesBefore)
+  eq('A4：主目录 HEAD 不变', gitOut(repo, 'rev-parse', 'HEAD'), headBeforeFail)
+
+  // ══════════ 混脏状态下的完整创建（A1/A2/A3）══════════
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'staged\n')
+  gitOut(repo, 'add', 'a.txt')
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'staged+modified\n')
+  fs.writeFileSync(path.join(repo, 'untracked.txt'), 'untracked\n')
+  fs.writeFileSync(path.join(repo, 'src', 'x.txt'), 'x modified\n')
+  const dirtyStatus = gitOut(repo, 'status', '--porcelain')
+  const dirtyStash = gitOut(repo, 'stash', 'list')
+  const dirtyBranch = gitOut(repo, 'rev-parse', '--abbrev-ref', 'HEAD')
+  const dirtyLsFiles = gitOut(repo, 'ls-files', '-s')
+  const contentA = fs.readFileSync(path.join(repo, 'a.txt'), 'utf8')
+  const contentX = fs.readFileSync(path.join(repo, 'src', 'x.txt'), 'utf8')
+  const contentU = fs.readFileSync(path.join(repo, 'untracked.txt'), 'utf8')
+  info('混脏状态', JSON.stringify(dirtyStatus.split('\n')))
+
+  const wtC = path.join(DST, 'wts', 'c')
+  const rC = await CR.createWorktree({
+    repoRoot: repo,
+    branch: 'wt/c',
+    path: wtC,
+    confirmedDirty: true
+  })
+  if (!rC.ok) {
+    fail('A1：混脏状态下应能创建（已确认脏改动）', JSON.stringify(rC))
+    return
+  }
+  eq('A1：创建后 status 逐字符一致', gitOut(repo, 'status', '--porcelain'), dirtyStatus)
+  eq('A2：创建后 stash 仍为空', gitOut(repo, 'stash', 'list'), dirtyStash)
+  eq('A2：当前分支不变', gitOut(repo, 'rev-parse', '--abbrev-ref', 'HEAD'), dirtyBranch)
+  eq('A2：索引（ls-files -s）一致', gitOut(repo, 'ls-files', '-s'), dirtyLsFiles)
+  eq('A3：已跟踪文件的改动内容没变', fs.readFileSync(path.join(repo, 'a.txt'), 'utf8'), contentA)
+  eq('A3：另一个已跟踪文件没变', fs.readFileSync(path.join(repo, 'src', 'x.txt'), 'utf8'), contentX)
+  eq('A3：未跟踪文件没变', fs.readFileSync(path.join(repo, 'untracked.txt'), 'utf8'), contentU)
+
+  // 新 worktree 拿到的是**已提交**的内容，不含未提交改动（这正是隔离的含义）
+  eq(
+    'A3：新 worktree 里的 a.txt 是已提交版本（换行按平台归一）',
+    fs.readFileSync(path.join(wtC, 'a.txt'), 'utf8').replace(/\r\n/g, '\n'),
+    'a\n'
+  )
+  eq('A3：新 worktree 里没有未跟踪文件', fs.existsSync(path.join(wtC, 'untracked.txt')), false)
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -2188,6 +2423,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtpaths: scenarioWorktreePaths,
   wtstore: scenarioWorktreeStore,
   wtprecheck: scenarioWorktreePrecheck,
+  wtcreate: scenarioWorktreeCreate,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,
