@@ -593,6 +593,16 @@ export function toolCategory(name: string): ToolCategory {
 
 export interface ToolContext {
   workspaceRoot: string | null
+  /**
+   * **项目记忆根**（spec §1.4 的 M1）。
+   *
+   * worktree 会话里它是 `record.repoRoot`（与主仓库共享同一份项目记忆），其余情况恒等于 `workspaceRoot`。
+   * 为什么必填而不是可选：可选的话每个构造点都能悄悄漏掉，而漏掉的表现是**静默**的
+   * ——「在 worktree 里读不到主仓库记忆」，没人会报错。必填逼编译器把漏改的地方全指出来。
+   *
+   * 解析只用 `worktree/scope.ts` 的 `projectMemoryRootOf`，不要在这里自己查记录。
+   */
+  memoryScopeRoot: string | null
   /** run_command 与 browser 使用：随 chat:abort 中止正在跑的子进程（杀树）/ 正在等待的浏览器操作。 */
   signal?: AbortSignal
   /** 当前对话：browser 按对话管理标签。 */
@@ -1872,12 +1882,17 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
     const globals = listMemories(GLOBAL_SCOPE)
     const out = ['【全局记忆】', ...(globals.length ? globals.map(formatMemoryLine) : ['（当前尚无全局记忆）'])]
     let total = globals.length
-    if (ctx.workspaceRoot) {
-      const projects = listMemories({ kind: 'project', root: ctx.workspaceRoot })
+    if (ctx.memoryScopeRoot) {
+      const projects = listMemories({ kind: 'project', root: ctx.memoryScopeRoot })
       total += projects.length
       out.push(
         '',
-        `【项目私有记忆】（${ctx.workspaceRoot}）`,
+        `【项目私有记忆】（${ctx.memoryScopeRoot}）`,
+        // 与主仓库共享时点明一句：否则模型会以为「项目记忆是按目录分家的」，
+        // 于是不敢在这里写、或以为主仓库记的那些在这里不存在。
+        ...(ctx.memoryScopeRoot !== ctx.workspaceRoot
+          ? [`（当前工作区 ${ctx.workspaceRoot} 与主仓库共享这一份记忆）`]
+          : []),
         ...(projects.length ? projects.map(formatMemoryLine) : ['（当前项目尚无私有记忆）'])
       )
     } else {
@@ -1899,7 +1914,8 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
         summary: '未写入',
         isError: true
       }
-    if (kind === 'project' && !ctx.workspaceRoot)
+    // M5：判据用 memoryScopeRoot（同 memory_write 的理由）
+    if (kind === 'project' && !ctx.memoryScopeRoot)
       return {
         content: id
           ? `${id} 是项目私有记忆，但当前未挂载工作区，无法定位`
@@ -1914,7 +1930,7 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
         isError: true
       }
     const scope: MemoryScope =
-      kind === 'project' ? { kind: 'project', root: ctx.workspaceRoot as string } : GLOBAL_SCOPE
+      kind === 'project' ? { kind: 'project', root: ctx.memoryScopeRoot as string } : GLOBAL_SCOPE
     // 直调主进程 memory 服务（去重 + 总量预算在服务内校验）。
     const r = writeMemory(content, id, scope)
     if (!r.ok) return { content: r.error, summary: '未写入', isError: true }
@@ -1935,10 +1951,11 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
         summary: '未删除',
         isError: true
       }
-    if (kind === 'project' && !ctx.workspaceRoot)
+    // M7：判据用 memoryScopeRoot
+    if (kind === 'project' && !ctx.memoryScopeRoot)
       return { content: `${id} 是项目私有记忆，但当前未挂载工作区，无法定位`, summary: '未找到', isError: true }
     const scope: MemoryScope =
-      kind === 'project' ? { kind: 'project', root: ctx.workspaceRoot as string } : GLOBAL_SCOPE
+      kind === 'project' ? { kind: 'project', root: ctx.memoryScopeRoot as string } : GLOBAL_SCOPE
     const r = deleteMemory(id, scope)
     if (!r.removed)
       return { content: `不存在 id 为 ${id} 的记忆（可先用 memory_read 查看）`, summary: '未找到', isError: true }

@@ -157,13 +157,19 @@ function withinBudget(entries: MemoryEntry[], budget: number): { kept: MemoryEnt
 }
 
 /**
- * 当前记忆（全局 + 已挂载工作区的项目私有记忆）与历史里已告知的差异，生成一块记忆清单；一致则返回 null。
- * root 取工具上下文的实时工作区：轮中挂载 / 切换后，新工作区的项目记忆随下一步附上，旧工作区的记作不再适用。
+ * 当前记忆（全局 + 项目私有记忆）与历史里已告知的差异，生成一块记忆清单；一致则返回 null。
+ *
+ * `memoryRoot` 是**项目记忆根**（不是工作目录）：worktree 会话里它是主仓库根（spec §1.4 的 M8/M9）。
+ * 参数从 `root` 改名为 `memoryRoot` 是**刻意的**——原名会让人顺手传 `ctx.workspaceRoot`，
+ * 而在 worktree 会话里那会指向一份空记忆，表现是「提示词说有记忆，每轮下发的清单里没有」，
+ * 两个自相矛盾的信号，agent 会认定记忆不存在。
+ *
+ * 为什么要实时传：轮中挂载 / 切换后，新根的记忆随下一步附上，旧根的记作不再适用。
  */
-export function memoryListingPart(history: Message[], root: string | null): TextPart | null {
+export function memoryListingPart(history: Message[], memoryRoot: string | null): TextPart | null {
   const g = withinBudget(listMemories(GLOBAL_SCOPE), MEMORY_BUDGET_CHARS)
-  const p = root
-    ? withinBudget(listMemories({ kind: 'project', root }), PROJECT_MEMORY_BUDGET_CHARS)
+  const p = memoryRoot
+    ? withinBudget(listMemories({ kind: 'project', root: memoryRoot }), PROJECT_MEMORY_BUDGET_CHARS)
     : { kept: [], omitted: 0 }
   const items = [
     ...g.kept.map((entry) => ({ entry, project: false })),
@@ -181,7 +187,8 @@ export function memoryListingPart(history: Message[], root: string | null): Text
   const globals = d.listed.filter((i) => !i.project)
   const projects = d.listed.filter((i) => i.project)
   if (globals.length) lines.push(`全局记忆${tag}：`, ...globals.map((i) => formatMemoryLine(i.entry)))
-  if (projects.length) lines.push(`项目私有记忆${tag}（${root}）：`, ...projects.map((i) => formatMemoryLine(i.entry)))
+  if (projects.length)
+    lines.push(`项目私有记忆${tag}（${memoryRoot}）：`, ...projects.map((i) => formatMemoryLine(i.entry)))
   if (d.removed.length) lines.push(`以下记忆已删除或不再适用于当前工作区，不要再遵循：${d.removed.join('、')}`)
   const omitted = g.omitted + p.omitted
   if (omitted) lines.push(`（另有 ${omitted} 条超出预算未列出，可用 memory_read 查看全部；记忆偏多时请合并或清理过时条目。）`)

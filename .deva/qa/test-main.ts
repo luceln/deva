@@ -2398,6 +2398,113 @@ async function scenarioWorktreeCreate(): Promise<void> {
   eq('A3：新 worktree 里没有未跟踪文件', fs.existsSync(path.join(wtC, 'untracked.txt')), false)
 }
 
+/**
+ * A36：系统提示词的【环境】段必须含 5 项内容，且负面约束必须在。
+ * A13 的另一半：会话的 focusRoot 与终端 cwd 必须**两处一致**（都指向 worktree）。
+ */
+async function scenarioWorktreeBrief(): Promise<void> {
+  const CR = await import('../../apps/desktop/src/main/services/worktree/create')
+  const B = await import('../../apps/desktop/src/main/services/worktree/brief')
+  const P = await import('../../apps/desktop/src/main/services/chat-prompts')
+
+  const repo = makeRepo(path.join(DST, 'repo'), { 'a.txt': 'a\n' })
+  const wt = path.join(DST, 'wts', 'one')
+  const r = await CR.createWorktree({ repoRoot: repo, branch: 'wt/one', path: wt })
+  if (!r.ok) {
+    fail('A36：前置创建失败', JSON.stringify(r))
+    return
+  }
+
+  // ── briefForFocusRoot 按 focusRoot 反查（spec §1.6 的关联口径）──
+  const brief = await B.briefForFocusRoot(wt)
+  if (!brief) {
+    fail('A36：briefForFocusRoot 没认出已登记的工作区', wt)
+    return
+  }
+  info('brief', JSON.stringify({ branch: brief.branch, target: brief.targetBranch, dirty: brief.primaryDirtyCount }))
+  eq('A36：brief 的分支正确', brief.branch, 'wt/one')
+  eq('A36：brief 的 targetBranch 是创建时主目录分支', brief.targetBranch, 'my/dev')
+  eq('A36：不是工作区的路径返回 null', await B.briefForFocusRoot(path.join(DST, 'random')), null)
+  eq('A36：null 入参返回 null', await B.briefForFocusRoot(null), null)
+
+  // ── 提示词 5 项内容 ──
+  const text = B.worktreeBoundaryText(brief)
+  info('边界说明原文', JSON.stringify(text.slice(0, 120)))
+  check('A36-1：含「独立工作区（git worktree）」', /独立工作区/.test(text), '')
+  check('A36-2：含工作目录路径', text.includes(wt.replace(/\\/g, '\\')) || text.includes(wt), '')
+  check('A36-3：含检出分支名', text.includes('wt/one'), '')
+  check('A36-4：含起点 baseLabel', text.includes('my/dev'), '')
+  check('A36-5：含合回目标 branch', /手动合回/.test(text) && text.includes('my/dev'), '')
+  check('A36-6：含项目记忆共享说明', /项目记忆/.test(text) && /共享/.test(text), '')
+  // 第 2 条硬要求：负面约束必须在（**这是立项的根本动机**）
+  check(
+    'A36-7：负面约束保留（不要假设你看到的就是主目录的当前状态…读文件而不是凭记忆）',
+    /不要假设你看到的就是主目录的当前状态/.test(text) && /读文件而不是凭记忆/.test(text),
+    ''
+  )
+  // 重复写「历史目录作废」会和既有那句撞车（spec 要求不重复）
+  check('A36-8：不重复既有那句「历史消息里出现过的其它目录一律作废」', !/其它目录一律作废/.test(text), '')
+
+  // 主目录有脏改动时那一行必须有数字
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'dirty\n')
+  const brief2 = await B.briefForFocusRoot(wt)
+  const text2 = B.worktreeBoundaryText(brief2!)
+  info('有脏改动时的「不在本区」行', JSON.stringify(text2.split('\n').find((l) => l.includes('不在本区')) ?? '（无）'))
+  check('A36-9：主目录有未提交改动时出现「不在本区」且带数字', /不在本区.*\d+/.test(text2), '')
+  eq('A36-10：brief 报出的数字与 precheck 同源', brief2!.primaryDirtyCount, 1)
+  // 0 时整行省略（spec：`0` 时省略此行）
+  require('node:child_process').spawnSync('git', ['checkout', '--', 'a.txt'], { cwd: repo })
+  const brief3 = await B.briefForFocusRoot(wt)
+  const text3 = B.worktreeBoundaryText(brief3!)
+  check('A36-11：主目录干净时整行省略', !/不在本区/.test(text3), '')
+
+  // ── targetBranch === null（主目录 detached）时的措辞 ──
+  const nullTargetText = B.worktreeBoundaryText({ ...brief, targetBranch: null })
+  info('未指定合回目标时的措辞', JSON.stringify(nullTargetText.split('\n').find((l) => l.includes('合回')) ?? ''))
+  check(
+    'A36-12：targetBranch=null 时改成「尚未指定 / 需要选一次」',
+    /还没指定|尚未指定/.test(nullTargetText) && /合并面板/.test(nullTargetText),
+    ''
+  )
+  check('A36-13：null 时不出现「手动合回 <branch>」的具体分支指引', !/手动合回 `/.test(nullTargetText), '')
+
+  // ── 三段提示词都真的带上它（不是只有一处）──
+  const sys = P.systemPrompt(wt, [], [], [], brief)
+  check('A36-14：systemPrompt 带上了边界说明', /独立工作区/.test(sys), '')
+  const sealed = P.sealedSystemPrompt(wt, [], [], [], undefined, brief)
+  check('A36-15：sealedSystemPrompt 带上了边界说明', /独立工作区/.test(sealed), '')
+  const member = P.memberSystemPrompt({
+    member: { sessionId: 's', name: 'm', origin: 'created', personaId: 'general', root: null, duty: '', addedAt: 0 },
+    owner: 'Deva',
+    workspaceRoot: wt,
+    folder: 'x',
+    personas: [],
+    memory: [],
+    projectDoc: [],
+    worktree: brief
+  })
+  check('A36-16：memberSystemPrompt 带上了边界说明', /独立工作区/.test(member), '')
+  // 不传 worktree 时不该出现（普通目录行为不变）
+  const plain = P.systemPrompt(wt, [], [], [])
+  check('A36-17：普通目录（不传 worktree）不含边界说明', !/独立工作区/.test(plain), '')
+  // 既有那句仍在（spec：保留在前，追加在后）
+  check('A36-18：既有「历史目录作废」那句仍在', /历史消息里出现过的其它目录一律作废/.test(sys), '')
+
+  /*
+   * ── A13：focusRoot 与终端 cwd 必须两处一致 ──
+   *
+   * 会话的 focusRoot 由 ensureSession 存；终端 cwd 由渲染层在 terminal:create 时传。
+   * 本步只做「主进程侧能证明的部分」：worktree 路径能从记录反查出会话该用的 focusRoot，
+   * 且它等于终端应传的同一个值。渲染层的终端面板尚未实现（全仓无 terminal.create 调用点），
+   * 所以「渲染层真的传了」这一半本步验不了——交付说明里如实写。
+   */
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+  const rec = S.getRecord(wt)
+  eq('A13：记录里的 path 就是会话该用的 focusRoot（绝对路径）', rec?.path, wt)
+  check('A13：该路径是绝对路径', path.isAbsolute(rec!.path), rec!.path)
+  eq('A13：终端 cwd 与 focusRoot 同源（同一个记录路径）', rec!.path, brief.path)
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -2424,6 +2531,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtstore: scenarioWorktreeStore,
   wtprecheck: scenarioWorktreePrecheck,
   wtcreate: scenarioWorktreeCreate,
+  wtbrief: scenarioWorktreeBrief,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

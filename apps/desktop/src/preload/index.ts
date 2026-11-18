@@ -39,6 +39,15 @@ import type {
 } from '../shared/chat-protocol'
 import type { GateResult, ImportProgress, ImportReport } from '../shared/import-protocol'
 import type { ConfigChangedEvent, ConfigSetResult } from '../shared/config-protocol'
+import type {
+  WorktreeBriefView,
+  WorktreeCreateFail,
+  WorktreeCreateOk,
+  WorktreeCreateReq,
+  WorktreePrecheckFail,
+  WorktreePrecheckOk,
+  WorktreePrecheckReq
+} from '../shared/worktree-protocol'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
 export type {
@@ -977,6 +986,25 @@ const api = {
       ipcRenderer.on('chat:sessions-changed', listener)
       return () => ipcRenderer.removeListener('chat:sessions-changed', listener)
     }
+  },
+  /**
+   * git worktree 并行工作区。
+   *
+   * 判定一律在主进程（`main/services/worktree/`），渲染层只消费结果——两套规则迟早漂移，
+   * 而漂移的后果是静默的：界面说能建、主进程拒绝，或反过来。
+   */
+  worktree: {
+    /** 创建前探测（**无副作用**：不建目录、不建分支、不写记录）。 */
+    precheck: (req: WorktreePrecheckReq): Promise<WorktreePrecheckOk | WorktreePrecheckFail> =>
+      ipcRenderer.invoke('worktree:precheck', req),
+    /** 创建（Step 1 写意图 → Step 2 add → 失败清理 → Step 3 校验定稿）。 */
+    create: (req: WorktreeCreateReq): Promise<WorktreeCreateOk | WorktreeCreateFail> =>
+      ipcRenderer.invoke('worktree:create', req),
+    /** 全部已登记的工作区记录。 */
+    list: (): Promise<unknown[]> => ipcRenderer.invoke('worktree:list'),
+    /** 某个 focusRoot 对应的边界信息；不是工作区则 null。只用于显示标签。 */
+    brief: (focusRoot: string | null): Promise<WorktreeBriefView | null> =>
+      ipcRenderer.invoke('worktree:brief', focusRoot)
   },
   /** 集成终端：列出已装 shell、建 PTY、写输入、改尺寸、销毁；订阅数据/退出事件。 */
   terminal: {

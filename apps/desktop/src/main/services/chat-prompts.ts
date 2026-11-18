@@ -8,6 +8,7 @@ import {
   toolSpecs
 } from './tools'
 import { skillsDir } from './skills'
+import { worktreeBoundaryText, type WorktreeBrief } from './worktree/brief'
 import {
   buildToolSearchTool,
   deferTool,
@@ -36,12 +37,16 @@ export function systemPrompt(
   workspaceRoot: string | null,
   personas: { name: string; prompt: string }[] = [],
   memory: string[] = [],
-  projectDoc: string[] = []
+  projectDoc: string[] = [],
+  /** 会话挂在 git worktree 里时的边界说明（spec §1.5 / A36）。null / 省略 = 普通目录。 */
+  worktree?: WorktreeBrief | null
 ): string {
   // 挂载态那句的「历史目录一律作废」不是废话：工作区可在同一对话中途切换，而历史里的工具结果、
   // 旧的挂载提示、模型自己的行文全是旧根的绝对路径。本行每轮重建，必须被声明为唯一权威。
   const loc = workspaceRoot
-    ? `当前工作目录：${workspaceRoot}。用户可随时切换工作区——历史消息里出现过的其它目录一律作废，恒以本行为准。`
+    ? `当前工作目录：${workspaceRoot}。用户可随时切换工作区——历史消息里出现过的其它目录一律作废，恒以本行为准。${worktree ? `
+
+${worktreeBoundaryText(worktree)}` : ''}`
     : '当前未挂载工作区（全机通用助手）：文件与命令工具照常可用。涉及某个项目的读写与扫描请直接按**相对路径**发起——系统会自动弹出「挂载工作区」卡片请用户一键选定目录，选定后该目录即成为本对话的相对路径基准（不必用文字索要路径，也不必先问「要不要挂载」）；用户若选择「暂不挂载」，再改用绝对路径继续。run_command 的工作目录为用户主目录。不要因「未打开项目」而拒绝执行。'
   // 技能目录写实际路径而非 ~/.deva-plus：DEVA_HOME 可覆盖；路径进程内恒定，不破坏提示缓存前缀。
   const skillsRoot = skillsDir()
@@ -100,10 +105,14 @@ export function sealedSystemPrompt(
    * 在会话中运行的任务：owner = 那个会话的主角色名（见 handoff.ts）。asked = 这一轮不是按时运行，是主角色用 member_send
    * 转来的用户追问（见 askTask）：回答原文发回那个会话，不用交接工具。
    */
-  handoff?: { owner: string; asked?: boolean }
+  handoff?: { owner: string; asked?: boolean },
+  /** 会话挂在 git worktree 里时的边界说明（spec §1.5 / A36）。 */
+  worktree?: WorktreeBrief | null
 ): string {
   const loc = workspaceRoot
-    ? `当前工作目录：${workspaceRoot}。路径可用相对该目录的写法。`
+    ? `当前工作目录：${workspaceRoot}。路径可用相对该目录的写法。${worktree ? `
+
+${worktreeBoundaryText(worktree)}` : ''}`
     : '本任务无固定工作目录；如需读写文件请使用**绝对路径**。'
   const asked = handoff?.asked ? handoff.owner : null
   const doing = asked
@@ -159,9 +168,13 @@ export function memberSystemPrompt(p: {
   personas: { name: string; prompt: string }[]
   memory: string[]
   projectDoc: string[]
+  /** 会话挂在 git worktree 里时的边界说明（spec §1.5 / A36）。 */
+  worktree?: WorktreeBrief | null
 }): string {
   const loc = p.workspaceRoot
-    ? `当前工作目录：${p.workspaceRoot}。路径可用相对该目录的写法。`
+    ? `当前工作目录：${p.workspaceRoot}。路径可用相对该目录的写法。${p.worktree ? `
+
+${worktreeBoundaryText(p.worktree)}` : ''}`
     : '没有固定的工作目录；读写文件请使用**绝对路径**。'
   const skillsRoot = skillsDir()
   const lines = [

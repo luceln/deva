@@ -229,7 +229,12 @@ async function runSubagentLoop(
       // 子智能体恒跟随主对话（继承本轮模型与思考等级）。
       model,
       effort,
-      ctx: bg ?{ workspaceRoot: ctx.workspaceRoot, signal: bg.signal } : ctx,
+      /*
+       * 后台子智能体换了一个精简 ctx（signal 换成 bg 的，其余不传）。`memoryScopeRoot` 必须原样继承：
+       * 子智能体与父会话在同一个工作区里干活，记忆根也该是同一个；漏掉它，子智能体读不到项目记忆，
+       * 而且不会有任何报错——正是这个字段设成必填的原因（见 ToolContext.memoryScopeRoot 的注释）。
+       */
+      ctx: bg ? { workspaceRoot: ctx.workspaceRoot, memoryScopeRoot: ctx.memoryScopeRoot, signal: bg.signal } : ctx,
       controller: bg ?? controller,
       // 定时任务里派出的子智能体同受步数上限（主对话里为 undefined = 不限）。
       maxSteps,

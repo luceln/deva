@@ -37,6 +37,8 @@ import {
   resolveModelRefOrNull
 } from './model-resolve'
 import { resolveAvailability } from './model-availability'
+import { briefForFocusRoot } from './worktree/brief'
+import { projectMemoryRootOf } from './worktree/scope'
 import {
   findTaskBySession
 } from './tasks'
@@ -506,12 +508,21 @@ export async function runTurn(
     // 聚焦工作区：本对话若挂载文件夹，用它作有效根（受信/在工作区内判定、终端 cwd、系统提示词聚焦、
     // 权限模式键均据此）；未挂载 → 回落 workspaceRoot（对话优先外壳恒 null，即全机通用助手）。
     const effectiveRoot = session.focusRoot ?? workspaceRoot
+    /*
+     * **项目记忆根**（spec §1.4 的 M2）：worktree 会话里是主仓库根，其余情况恒等于 effectiveRoot。
+     *
+     * 不新增 `runTurn` 参数（M16）：在这里由 effectiveRoot 现算，避免穿透 4 层签名。
+     * 解析只用 `projectMemoryRootOf`（同步查内存表，不读盘）。
+     */
+    const memoryScopeRoot = projectMemoryRootOf(effectiveRoot)
     // signal 随 chat:abort 触发 → run_command 中止并杀掉子进程树。
     // canPromptUser：手机端发起的对话与定时任务，用户不在电脑前，不能弹窗请他在网页上亲自操作（browser 的 handoff）。
     // 成员会话可以请（同成员提问）：不弹浏览器窗口，主对话输入框上方出一行「前端 需要你登录 · 去处理」，用户没在看
     // Deva 时弹系统通知（点开主对话）。
     const ctx: ToolContext = {
       workspaceRoot: effectiveRoot,
+      // 项目记忆根：worktree 会话下是主仓库（spec §1.4，G5 那条 P1）
+      memoryScopeRoot,
       signal: controller.signal,
       sessionId,
       canPromptUser: !taskAsk && (trigger === 'desktop' || trigger === 'member'),
@@ -613,6 +624,12 @@ export async function runTurn(
       ...projectDocPromptSection(loadProjectDoc(effectiveRoot))
     ]
 
+    /*
+     * 会话是否挂在独立工作区（git worktree）里 —— 按 `focusRoot` 反查已登记记录（spec §1.6 的关联口径）。
+     * 查不到就是普通目录，行为完全不变；命中则把边界说明追加到三处【环境】段后面（A36）。
+     */
+    const wtBrief = await briefForFocusRoot(effectiveRoot)
+
     // 主轮 = depth 0：可问询（定时任务除外）、可派生子智能体、由本封装发终态 done（嵌套调用不发 done）。
     const { stopReason, errorMessage, text } = await runAgentLoop({
       turnId,
@@ -636,26 +653,43 @@ export async function runTurn(
             folder: effectiveRoot ? rootLabel(effectiveRoot, mainRoot) : '未指定（需要时用户会为你选择，或使用绝对路径）',
             personas,
             // 全局记忆只读；有文件夹时可读写该文件夹的项目私有记忆。
-            memory: memoryPromptSection({ writable: false, projectWritable: true, root: effectiveRoot }),
-            projectDoc
+            memory: memoryPromptSection({
+              writable: false,
+              projectWritable: true,
+              root: effectiveRoot,
+              memoryRoot: memoryScopeRoot
+            }),
+            projectDoc,
+            // 会话挂在独立工作区里时，把边界交代给成员（A36）
+            worktree: wtBrief
           })
         : unattended
         ? sealedSystemPrompt(
             effectiveRoot,
             personas,
-            memoryPromptSection({ writable: false, root: effectiveRoot }),
+            memoryPromptSection({
+              writable: false,
+              root: effectiveRoot,
+              memoryRoot: memoryScopeRoot
+            }),
             projectDoc,
             handoffOwner
               ? { owner: handoffOwner }
               : taskAsk
                 ? { owner: askOwner ? personaName(askOwner) : 'Deva', asked: true }
-                : undefined
+                : undefined,
+            wtBrief
           )
         : systemPrompt(
             effectiveRoot,
             personas,
-            memoryPromptSection({ writable: true, root: effectiveRoot }),
-            projectDoc
+            memoryPromptSection({
+              writable: true,
+              root: effectiveRoot,
+              memoryRoot: memoryScopeRoot
+            }),
+            projectDoc,
+            wtBrief
           ),
       tools,
       personaId: rolePersonaId,

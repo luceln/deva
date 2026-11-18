@@ -24,6 +24,7 @@ import {
 } from './services/mcp'
 import { registerAttachmentsIpc } from './services/attachments'
 import { registerTerminalIpc } from './services/terminal'
+import { registerWorktreeIpc } from './services/worktree/ipc'
 import { registerGitIpc } from './services/git'
 import { registerClipboardIpc } from './services/clipboard'
 import { registerDeliverablesIpc } from './services/deliverables'
@@ -377,6 +378,7 @@ if (!app.requestSingleInstanceLock()) {
 
   // 集成终端（node-pty 跑在独立 Utility Process，主进程仅中继）
   registerTerminalIpc(() => mainWindow)
+  registerWorktreeIpc()
 
   // Git 源代码管理（调用系统 git，对标 VS Code；凭据交系统 GCM）
   registerGitIpc()
