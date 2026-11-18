@@ -180,6 +180,19 @@ export interface ChatSetEffortRequest {
   effort: EffortLevel
 }
 
+/**
+ * 本对话的上下文占用（见 chat:context-usage），供输入框模型面板显示。
+ * used：发给模型的提示 token——回合进行中取最近一步的真实读数，回合结束后取最后一次请求的读数；
+ * 没有读数（刚压缩完、删过轮、旧对话）时为字符估算，estimated=true；对话还没有任何消息时为 null。
+ * window：该模型生效的上下文窗口。trigger：自动压缩线；关闭了自动压缩为 null。
+ */
+export interface ContextUsage {
+  used: number | null
+  estimated: boolean
+  window: number
+  trigger: number | null
+}
+
 /** 挂载 / 卸载本对话的聚焦工作区（立即落库，不等下一次发送）。见 chat:set-focus。 */
 export interface ChatSetFocusRequest {
   sessionId: string
@@ -280,6 +293,16 @@ export interface ChatModelSwapApplyRequest {
   mainId: string
   fromRef: string
   toRef: string
+}
+
+/**
+ * 手机等别的设备对对话做的改动，主进程转给渲染层同步（chat:remote-change）：
+ * read = 已在别处看过（清掉未读红点）；deleted / archived = 已删除 / 归档（正开着就离开）；
+ * model = 模型已改（撤掉本地记的模型，以对话里存的为准）。
+ */
+export interface ChatRemoteChange {
+  sessionId: string
+  kind: 'read' | 'deleted' | 'archived' | 'model'
 }
 
 /**

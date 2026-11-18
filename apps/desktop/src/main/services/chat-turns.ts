@@ -27,6 +27,7 @@ import { buildToolSearchTool, fitToolSearch, skillToolUsages, unknownUsages } fr
 import { readMainTool, replyTaskTool, reportToMainTool, rootLabel } from './members'
 import { MEMBER_EXCLUDED, MEMBER_FOLDER_ONLY, UNATTENDED_EXCLUDED } from './tool-catalog'
 import { slashTokens } from '../../shared/slash'
+import { skillInvocationText } from './skill-invoke'
 import { memoryPromptSection } from './memory'
 import { loadProjectDoc, projectDocPromptSection } from './project-doc'
 import { DEFAULT_PERSONA_ID, getPersona, resolvePersonaId } from './personas'
@@ -58,6 +59,7 @@ import {
   type StoredSession
 } from './chat-store'
 import {
+  ATTACHMENTS_ONLY_QUESTION,
   buildAttachmentPart
 } from './attachments'
 import { isEn } from '../locale'
@@ -128,6 +130,7 @@ import {
   handleMentions
 } from './chat-members'
 import { runAgentLoop } from './agent-loop'
+import { publishStepSaved } from './chat-bus'
 
 /**
  * 回合进行中用户插入、还没交给模型的消息（键 = sessionId，按插入先后）。去向：
@@ -526,6 +529,8 @@ export async function runTurn(
       signal: controller.signal,
       sessionId,
       canPromptUser: !taskAsk && (trigger === 'desktop' || trigger === 'member'),
+      // memory_write 撞上限时用本轮模型归纳旧记忆（定时任务记忆只读，用不到）。
+      memoryModel: turnModel,
       // 成员会话：全局记忆只读（用户本人的通用偏好由主角色记），项目私有记忆可写。
       ...(isMember
         ? {
@@ -759,7 +764,11 @@ export async function runTurn(
       // 用户在本轮进行中插入的消息：同样随下一步的工具结果交给模型。
       takeInserts: () => takeInserts(sessionId),
       // 逐步落盘：长回合中途崩溃 / 强退，已完成的步骤仍在磁盘上。
-      onStep: () => saveProject(sessionId),
+      // 落盘后通知远程端（手机按对话记录补拉这一轮新写完的回复）。
+      onStep: () => {
+        saveProject(sessionId)
+        publishStepSaved(sessionId)
+      },
       // 轮中压缩：旧读数作废（别让 finally 把压缩前的大数存成下轮触发依据）；轮起点重新定位到本轮请求之后
       // （摘要插在本轮中间，不是轮起点；被并入摘要的步骤都带工具调用，不影响「是否产出可见回复」的判定）。
       compact: midTurnCompactor(turnId, sessionId, session, turnModel, controller, () => {
@@ -1061,16 +1070,11 @@ async function startTurn(
   if (activated.length) {
     const lead = activated.find((x) => x.start === text.length - text.trimStart().length)
     const rest = (lead ? text.slice(0, lead.start) + text.slice(lead.end) : text).trim()
-    const names = activated.map((x) => x.loaded.name)
-    effectiveText =
-      `（用户通过 ${names.map((n) => `/${n}`).join('、')} 显式激活了技能${names.map((n) => `「${n}」`).join('')}，请严格据下述指令完成本次任务）\n` +
-      activated
-        .map(
-          ({ loaded }) =>
-            `===== 技能指令：${loaded.name} =====\n${skillDirNote(loaded.dir)}${loaded.instructions}\n===== 指令结束 =====`
-        )
-        .join('\n') +
-      (rest ? `\n\n${lead ? '用户补充' : '用户的消息'}：${rest}` : '')
+    effectiveText = skillInvocationText(
+      activated.map(({ loaded }) => ({ name: loaded.name, body: skillDirNote(loaded.dir) + loaded.instructions })),
+      rest,
+      !!lead
+    )
     // 成员会话不提供创建类工具，那几个的用法不附。
     const usable = [...new Set(activated.flatMap((x) => x.loaded.allowedTools))].filter(
       (n) => !session.parentId || !MEMBER_EXCLUDED.has(n)
@@ -1090,8 +1094,11 @@ async function startTurn(
   }
   // 读附件期间另一端可能抢先起了一轮：落历史前再确认一次。
   if (historyLocked(sessionId)) throw busyError()
-  const question = effectiveText.trim() || (parts.length ? '请理解并处理上述附件。' : '')
-  const questionText = notes.length ? `${question}\n（${notes.join('；')}）` : question
+  const question = effectiveText.trim() || (parts.length ? ATTACHMENTS_ONLY_QUESTION : '')
+  const withNotes = (s: string): string => (notes.length ? `${s}\n（${notes.join('；')}）` : s)
+  const questionText = withNotes(question)
+  // 技能展开改写了正文：气泡仍显示用户的原话（重开对话、手机端、成员读主对话都按它），技能全文只给模型。
+  const shown = effectiveText !== text ? withNotes(text.trim()) : undefined
   // 「仅恢复代码」后的首条消息：把回滚说明作为**第一个**独立 text 块带给模型（展示层只取最后一个
   // text 块作气泡正文，故用户看不到它），用一次即清。
   if (session.restoreNote) {
@@ -1117,8 +1124,8 @@ async function startTurn(
   // 用户直接在成员会话里交代事情：名单上记下它在做什么（成员卡片显示任务标题）。派来的上一项任务还没做完的，
   // 这一轮算接着做它（任务标题不变，完成后交回主对话，见 resumeMemberTask）。
   if (session.parentId && !resumeMemberTask(session, model)) noteMemberDirectTask(session, text)
-  if (parts.length) {
-    parts.push({ type: 'text', text: questionText })
+  if (parts.length || shown !== undefined) {
+    parts.push(shown !== undefined ? { type: 'text', text: questionText, display: shown } : { type: 'text', text: questionText })
     history.push({ role: 'user', content: parts })
   } else {
     history.push({ role: 'user', content: questionText })

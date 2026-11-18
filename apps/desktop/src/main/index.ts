@@ -9,6 +9,8 @@ import { registerSecretsIpc } from './services/secrets'
 import { registerProviderIpc } from './services/provider'
 import { registerImportIpc } from './importer-ipc'
 import { hasActiveTurns, registerChatIpc, settleActiveTurns } from './services/chat'
+import { registerContextUsageIpc } from './services/context-usage'
+import { registerReadSyncIpc } from './services/read-sync'
 import { listSessions } from './services/chat-store'
 import { sweepCheckpoints } from './services/checkpoints'
 import { sweepSubagents } from './services/subagent-store'
@@ -381,6 +383,9 @@ if (!app.requestSingleInstanceLock()) {
 
   // 会话编排（Agent 主循环：流式 → 工具 → 权限 → 回灌）
   registerChatIpc(() => mainWindow)
+  // 上下文占用（输入框模型面板）：订阅会话总线记下回合中的读数，须在 chat 之后。
+  registerContextUsageIpc()
+  registerReadSyncIpc(() => mainWindow)
 
   // 远程通道 / 手机端（飞书等 IM 机器人；默认关闭，需在设置里开启并配对）。订阅会话总线，须在 chat 之后。
   registerRemoteIpc(() => mainWindow)

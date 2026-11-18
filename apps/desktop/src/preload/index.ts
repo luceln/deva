@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { EffortLevel } from '../shared/effort'
 import type { UpdateState } from '../shared/update'
 import type { DeliverableInfo } from '../shared/deliverables'
+import type { PhoneLinkResult, PhonePairedEvent, PhoneQrResult, PhoneState, PhoneVia } from '../shared/phone'
 import type { AgentDraft, AutotaskDraft } from '../shared/drafts'
 import type { BrowserLiveFrame, BrowserUiState } from '../shared/browser'
 import type {
@@ -17,6 +18,7 @@ import type {
   ChatModelSwapApplyRequest,
   ChatModelSwapScanRequest,
   ChatRenameSessionRequest,
+  ChatRemoteChange,
   AttachmentChip,
   HandoffInfo,
   MemberTask,
@@ -35,7 +37,8 @@ import type {
   MemberProgressGroup,
   BlockedProviderRef,
   BrokenRef,
-  ModelSwapResult
+  ModelSwapResult,
+  ContextUsage
 } from '../shared/chat-protocol'
 import type { GateResult, ImportProgress, ImportReport } from '../shared/import-protocol'
 import type { ConfigChangedEvent, ConfigSetResult } from '../shared/config-protocol'
@@ -63,6 +66,7 @@ export type {
   ChatModelSwapApplyRequest,
   ChatModelSwapScanRequest,
   ChatRenameSessionRequest,
+  ChatRemoteChange,
   AttachmentChip,
   HandoffInfo,
   MemberTask,
@@ -81,7 +85,8 @@ export type {
   MemberProgressGroup,
   BlockedProviderRef,
   BrokenRef,
-  ModelSwapResult
+  ModelSwapResult,
+  ContextUsage
 }
 
 /** 目录项（单层）。 */
@@ -597,7 +602,7 @@ export interface ProviderListModelsResult {
 }
 
 /** IM 机器人（远程通道）状态，与 services/remote/index.ts 的 BotView / ScanEvent 对齐。 */
-export type BotPlatform = 'feishu' | 'telegram'
+export type BotPlatform = 'feishu' | 'telegram' | 'web'
 export type BotReplyMode = 'stream' | 'final'
 /** 回复范围：all 全部 / personas 选中角色的对话 / sessions 选中的对话（两份清单都保留，切模式不丢）。 */
 export interface BotReplyScope {
@@ -931,6 +936,9 @@ const api = {
       ipcRenderer.invoke('chat:delete-turns', sessionId, workspaceRoot, turnIndices),
     /** 待办清单：某会话的当前状态（切到该会话时拉取，此后的变化走 todos 事件）。 */
     todos: (sessionId: string): Promise<TodoState> => ipcRenderer.invoke('chat:todos', sessionId),
+    /** 上下文占用：按 modelRef（本对话生效模型）算窗口与压缩线；模型解析不了回 null。 */
+    contextUsage: (sessionId: string, modelRef: string): Promise<ContextUsage | null> =>
+      ipcRenderer.invoke('chat:context-usage', sessionId, modelRef),
     /** 手动取消当前清单（回合进行中不受理）：胶囊收起，下一条消息告知模型。返回取消后的状态。 */
     cancelTodoList: (sessionId: string): Promise<TodoState> =>
       ipcRenderer.invoke('chat:todo-cancel', sessionId),
@@ -985,6 +993,14 @@ const api = {
       const listener = (): void => cb()
       ipcRenderer.on('chat:sessions-changed', listener)
       return () => ipcRenderer.removeListener('chat:sessions-changed', listener)
+    },
+    /** 正在看这个对话：记为已读（与手机共用，手机上的红点随之消掉）。 */
+    markRead: (sessionId: string): Promise<{ ok: true }> => ipcRenderer.invoke('chat:mark-read', sessionId),
+    /** 手机等别的设备改了对话（看过 / 删除 / 归档 / 改模型）；返回取消订阅函数 */
+    onRemoteChange: (cb: (c: ChatRemoteChange) => void): (() => void) => {
+      const listener = (_e: unknown, c: ChatRemoteChange): void => cb(c)
+      ipcRenderer.on('chat:remote-change', listener)
+      return () => ipcRenderer.removeListener('chat:remote-change', listener)
     }
   },
   /**
@@ -1281,6 +1297,34 @@ const api = {
       const listener = (_e: unknown, ev: BotScanEvent): void => cb(ev)
       ipcRenderer.on('remote:scan', listener)
       return () => ipcRenderer.removeListener('remote:scan', listener)
+    }
+  },
+  /** Deva 手机版（「手机」面板里，用户添加后才有，最多一个）。 */
+  phone: {
+    getState: (): Promise<PhoneState> => ipcRenderer.invoke('phone:get-state'),
+    /** 添加 Deva 手机版（默认没有，最多一个；已有就返回现状）。 */
+    add: (): Promise<PhoneState> => ipcRenderer.invoke('phone:add'),
+    /** 删除 Deva 手机版：已连接的手机全部断开。 */
+    remove: (): Promise<PhoneState> => ipcRenderer.invoke('phone:remove'),
+    setEnabled: (enabled: boolean): Promise<PhoneState> => ipcRenderer.invoke('phone:set-enabled', enabled),
+    /** 重连出错的通道（不等自动重试）。 */
+    retry: (): Promise<{ ok: true }> => ipcRenderer.invoke('phone:retry'),
+    /** 新的配对二维码（一次性票据，2 分钟有效）：via = 扫码后手机走哪条路，对应的通道随之开启。 */
+    qr: (via: PhoneVia): Promise<PhoneQrResult> => ipcRenderer.invoke('phone:qr', via),
+    /** 网页版的一次性链接（复制链接；10 分钟内有效）。 */
+    link: (via: PhoneVia): Promise<PhoneLinkResult> => ipcRenderer.invoke('phone:link', via),
+    /** 二维码收起：作废还挂着的配对票据。 */
+    qrCancel: (): Promise<{ ok: true }> => ipcRenderer.invoke('phone:qr-cancel'),
+    removeDevice: (id: string): Promise<{ ok: true }> => ipcRenderer.invoke('phone:remove-device', id),
+    onChanged: (cb: (state: PhoneState) => void): (() => void) => {
+      const listener = (_e: unknown, state: PhoneState): void => cb(state)
+      ipcRenderer.on('phone:changed', listener)
+      return () => ipcRenderer.removeListener('phone:changed', listener)
+    },
+    onPaired: (cb: (ev: PhonePairedEvent) => void): (() => void) => {
+      const listener = (_e: unknown, ev: PhonePairedEvent): void => cb(ev)
+      ipcRenderer.on('phone:paired', listener)
+      return () => ipcRenderer.removeListener('phone:paired', listener)
     }
   }
 }

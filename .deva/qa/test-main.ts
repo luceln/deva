@@ -429,14 +429,23 @@ async function scenarioFull(): Promise<void> {
   const dstProviderIds = new Set(
     ((cfg1.models?.providers ?? []) as { id?: string }[]).map((p) => p.id).filter((id): id is string => typeof id === 'string')
   )
-  info('activeModelId', `src=${srcActive} dst=${cfg1.models.activeModelId}`)
+  // 源里的 activeModelId 可能是**悬空**的：它指向的 provider 在源配置里已经被删掉
+  // （真实数据里就有——`~/.deva` 的 activeModelId 指向一个 custom-* 而 providers 里没有它）。
+  // 产品代码对这种源的处理是「不导入，因为导进去就是个死引用」，这是对的；
+  // 所以这里不能一律要求 dst === src，要先问「源头自己指得着吗」。
+  const srcActiveDangling = typeof srcActive === 'string' && !srcProviderIds.has(String(srcActive).split(':')[0])
+  info('activeModelId', `src=${srcActive} dst=${cfg1.models.activeModelId} srcDangling=${srcActiveDangling}`)
   // 最近使用模型属于「不用重配」的一部分，要跟着 providers 一起过来；但只在不制造悬空引用的前提下
   // （它指向的 provider 必须在目标里真的存在，否则界面显示已选、发消息才报模型不可用）。
   check(
-    '产物：activeModelId 随 providers 导入，且指向的 provider 在目标里存在',
-    cfg1.models.activeModelId === (srcActive ?? null) &&
-      (srcActive == null || dstProviderIds.has(String(srcActive).split(':')[0])),
-    `src=${JSON.stringify(srcActive)} dst=${JSON.stringify(cfg1.models.activeModelId)}`
+    srcActiveDangling
+      ? '产物：源 activeModelId 悬空（指向已删的 provider）→ 不导入，目标保持为空'
+      : '产物：activeModelId 随 providers 导入，且指向的 provider 在目标里存在',
+    srcActiveDangling
+      ? (cfg1.models.activeModelId ?? null) === null
+      : cfg1.models.activeModelId === (srcActive ?? null) &&
+          (srcActive == null || dstProviderIds.has(String(srcActive).split(':')[0])),
+    `src=${JSON.stringify(srcActive)} dst=${JSON.stringify(cfg1.models.activeModelId)} dangling=${srcActiveDangling}`
   )
   if (seeded) {
     eq('已装目标：本地改过的 general.md 未被覆盖', fs.readFileSync(path.join(DST, 'personas', 'general.md'), 'utf8'), '# 我在二开版里改过的 general\n')
