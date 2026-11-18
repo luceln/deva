@@ -112,6 +112,33 @@ export interface WorktreeBriefView {
  */
 export type WorktreeState = 'ok' | 'branch-mismatch' | 'dir-missing' | 'prunable'
 
+/**
+ * 合并可用性的阻塞原因（spec §7.5）。
+ *
+ * 前三个对应 §4.2 的检查，`'installing'` **不是** C1~C6 里的一项：它是 UI 层的
+ * 「依赖没装完不能合并」——安装期间文件系统不稳定，git 会看到半装的文件。
+ * 所以它由主进程在 `mergeGate` 里给，不走检查表。
+ */
+export type MergeBlocker =
+  | 'target-not-set'
+  | 'source-missing'
+  | 'source-branch-changed'
+  | 'installing'
+
+/**
+ * 轻量合并可用性门（`worktree:list` 一并返回，spec §7.5）。
+ *
+ * **只看 `state` / `deps` / `targetBranch`，不跑 `status --porcelain`**：列表要对每个工作区算一次，
+ * 跑重活就是 5 个工作区 5 次 git 调用。真正的四项检查在用户点开合并面板时由
+ * `worktree:merge-dryrun` 做（那时才跑 C1~C6）。
+ *
+ * 渲染层**不得**自己从 `state` 推禁用：状态只由主进程算（A48）。
+ */
+export interface MergeGate {
+  mayMerge: boolean
+  blocker?: MergeBlocker
+}
+
 export interface WorktreeListItem {
   path: string
   compareKey: string
@@ -132,6 +159,23 @@ export interface WorktreeListItem {
   sizeBytes: number | null
   /** 当前持锁者（另一个会话正在这个目录上跑 git 操作）。 */
   lockHolder: { label: string; since: number } | null
+  /**
+   * 该工作区未提交改动数；目录不存在时为 null（无法统计）。列表显示「N 个未提交改动」用（§7.7）。
+   *
+   * 与 `mergeGate` 的区别：这个数字要**显示给用户**，只能真跑 `status --porcelain`；
+   * `mergeGate` 只判「能不能点」，不跑 status（§7.5）。
+   */
+  dirtyCount: number | null
+  /**
+   * target 检出里是否有未收尾的合并（§13.10）。**每次从 git 现算，不落盘。**
+   *
+   * 非空时卡片显示「合并进行中」，并可打开冲突处理窗口。
+   * 不能落盘的理由：用户在终端手跑 `git merge --abort` 后，落盘状态立刻过期，
+   * 界面会一直显示「合并中」，用户以为卡死。
+   */
+  mergeInProgress: { targetPath: string; unmergedCount: number } | null
+  /** 合并可用性：主进程算好的门（不看 dirty，只做轻量判定）。见 §7.5 与 A48。 */
+  mergeGate: MergeGate
 }
 
 /** 不受本功能管理的 git 登记项：只读展示，不参与任何操作。 */

@@ -35,13 +35,16 @@ export type {
   WorktreeState,
   WorktreeListItem,
   UnmanagedWorktree,
-  WorktreeSnapshot
+  WorktreeSnapshot,
+  MergeGate,
+  MergeBlocker
 } from '../../../shared/worktree-protocol'
 import type {
   WorktreeState,
   WorktreeListItem,
   UnmanagedWorktree,
-  WorktreeSnapshot
+  WorktreeSnapshot,
+  MergeGate
 } from '../../../shared/worktree-protocol'
 
 /** 一次 `git worktree list` 的结果，按 repoRoot 复用（同仓库的多条记录只查一次）。 */
@@ -182,6 +185,83 @@ function dirSizeSync(path: string, budget = { files: 0 }): number {
 }
 
 /**
+ * 该工作区的未提交改动数（spec §7.7 的「N 个未提交改动」）。
+ *
+ * ## 为什么这里要跑 `git status`，而 `mergeGate` 不跑
+ *
+ * 两者目的不同：`mergeGate` 只判「能不能点合并」，轻量三判据就够（§7.5 明确不许跑 status，
+ * 否则 5 个工作区就是 5 次调用）；而 `dirtyCount` 是**要显示给用户看的数字**，没有捷径——
+ * 不跑 git 就不知道有几个改动。所以这里如实跑一次，用 `-z` 只要条目数不解析路径。
+ *
+ * 目录不在时返回 null（无法统计），不去对不存在的路径跑 git。
+ */
+async function dirtyCountOf(path: string): Promise<number | null> {
+  const r = await runGitRaw(path, ['status', '--porcelain', '-z'])
+  if (r.code !== 0) return null
+  if (!r.stdout) return 0
+  // `-z` 用 \0 分隔条目；末尾可能有一个多余的 \0
+  return r.stdout.split('\0').filter((s) => s.length > 0).length
+}
+
+/**
+ * 轻量合并可用性门（spec §7.5）。
+ *
+ * **只看三样：`state` / `deps` / `targetBranch`。** 不跑 `status`，不做 C1~C6——
+ * 那些在用户点开合并面板时由 `worktree:merge-dryrun` 做（那时跑 6 次 git 只为一个面板，值得）。
+ *
+ * 判据顺序有理由（先说最根本的）：
+ * 1. `targetBranch` 为空 → 没目标分支，合并无从谈起（C-1，§4.2）；
+ * 2. `state` 不可用 → source 不能作为合并源（目录没了 / 被切到别的分支）；
+ * 3. `deps === 'installing'` → 文件系统正在被动，git 会看到半装的文件（不是 C1~C6 的项，是 UI 层判断）。
+ */
+export function computeMergeGate(input: {
+  state: WorktreeState
+  deps: string
+  targetBranch: string | null
+}): MergeGate {
+  if (!input.targetBranch) return { mayMerge: false, blocker: 'target-not-set' }
+  // dir-missing / prunable 对用户都是「这个工作区用不了」
+  if (input.state === 'dir-missing' || input.state === 'prunable')
+    return { mayMerge: false, blocker: 'source-missing' }
+  // branch-mismatch 是「能用，但不在自己的分支上」——另一个出口（先切回）
+  if (input.state === 'branch-mismatch')
+    return { mayMerge: false, blocker: 'source-branch-changed' }
+  if (input.deps === 'installing') return { mayMerge: false, blocker: 'installing' }
+  return { mayMerge: true }
+}
+
+/**
+ * target 检出里是否有未收尾的合并（spec §13.10）。**每次从 git 现算，不落盘。**
+ *
+ * 为什么不能落盘：用户在终端里手跑 `git merge --abort` 后，落盘状态立刻过期，
+ * 界面会一直显示「合并中」，用户以为卡死。
+ *
+ * 找 target 检出与 C4 同源（§4.2）：`git worktree list --porcelain` 里
+ * `branch refs/heads/<targetBranch>` **恰好一条**。0 条（没检出）或多条（有歧义，C4 会拒）
+ * 都不算「合并进行中」。
+ */
+async function mergeInProgressOf(
+  targetBranch: string | null,
+  entries: WorktreeEntry[]
+): Promise<{ targetPath: string; unmergedCount: number } | null> {
+  if (!targetBranch) return null
+  const matches = entries.filter((e) => e.branch === targetBranch)
+  if (matches.length !== 1) return null
+  const targetPath = matches[0].path
+  // MERGE_HEAD 存在 = 有未收尾的 merge（`-q --verify`：不存在时不往 stderr 写 fatal）
+  const head = await runGitRaw(targetPath, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'])
+  if (head.code !== 0) return null
+  /*
+   * 未合并文件数用 `diff --diff-filter=U` 而不是解析 `status`：
+   * 前者输出就是纯路径列表，不受 porcelain 格式变化影响（后者要区分 XY 两列语义）。
+   */
+  const unmerged = await runGitRaw(targetPath, ['diff', '--name-only', '--diff-filter=U'])
+  const unmergedCount =
+    unmerged.code === 0 ? unmerged.stdout.split('\n').filter((l) => l.trim()).length : 0
+  return { targetPath, unmergedCount }
+}
+
+/**
  * 取体积：命中缓存直接给；否则返回 null 并在后台算，算完发 `worktree:changed` 让界面重取。
  *
  * 这就是 T1.4b 的判据：首次 `null`（界面显示「统计中…」），算完发事件再刷新。
@@ -249,8 +329,10 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
     const exists = dirExists(rec.path)
     let entry: WorktreeEntry | undefined
     let prunable = false
+    // 该记录所属仓库的 git 状态（算 state 与 mergeInProgress 都要用它）
+    let repoState: RepoGitState | undefined
     try {
-      const repoState = perRepo.get(repoKeyOf(rec.repoRoot))
+      repoState = perRepo.get(repoKeyOf(rec.repoRoot))
       entry = repoState?.entries.find((e) => {
         try {
           return compareKeyOfPath(e.path) === rec.compareKey
@@ -286,7 +368,10 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
       ...(rec.depsDetail !== undefined ? { depsDetail: rec.depsDetail } : {}),
       sessionCount: counts.get(rec.compareKey) ?? 0,
       sizeBytes: exists ? sizeBytesOf(rec.path, rec.compareKey) : 0,
-      lockHolder: gitLockHolder(rec.path)
+      lockHolder: gitLockHolder(rec.path),
+      dirtyCount: exists ? await dirtyCountOf(rec.path) : null,
+      mergeInProgress: await mergeInProgressOf(rec.targetBranch, repoState?.entries ?? []),
+      mergeGate: computeMergeGate({ state, deps: rec.deps, targetBranch: rec.targetBranch })
     })
   }
 
