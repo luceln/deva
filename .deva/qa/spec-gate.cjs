@@ -94,9 +94,9 @@ const TASKS = [
       { kind: 'grep', file: `${WT}/git-worktree.ts`, pattern: 'verifyWorktree', why: '缺少 HEAD 校验 verifyWorktree' },
       { kind: 'grep', file: QA, pattern: 'wtcreate', why: 'wtcreate 场景不存在' },
       // A1/A2/A4 是「不碰用户改动」的三条硬断言
-      { kind: 'grep', file: QA, pattern: 'A4：主目录 status 逐字符一致', why: '缺 A4 的 status 逐字符断言' },
-      { kind: 'grep', file: QA, pattern: 'A4：stash list 仍为空', why: '缺「没靠 stash」断言' },
-      { kind: 'grep', file: QA, pattern: 'A7：新 worktree 的 baseSha 等于主检出的 HEAD', why: '缺 A7（n 层树）断言' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A4：主目录 status 逐字符一致', why: '缺 A4 的 status 逐字符断言' },
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A4：stash list 仍为空', why: '缺「没靠 stash」断言' },
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A7：新 worktree 的 baseSha 等于主检出的 HEAD', why: '缺 A7（n 层树）断言' }
     ]
   },
   {
@@ -140,7 +140,7 @@ const TASKS = [
         pattern: 'persist',
         why: 'startFresh 未加 persist 参数（A13/A14 依赖它，会话无法落到新工作区）'
       },
-      { kind: 'grep', file: QA, pattern: 'A13：', why: '缺 A13 断言（focusRoot 与终端 cwd 同源）' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A13：', why: '缺 A13 断言（focusRoot 与终端 cwd 同源）' }
     ]
   },
   {
@@ -149,8 +149,7 @@ const TASKS = [
     name: 'A29/A30 回归守卫（只审查不改码）',
     criteria: [
       // 判据是「不许再出现」：为刷新列表调 invalidateIndex 会让在跑的对话静默丢盘
-      { kind: 'absent', file: 'apps/desktop/src/main/services/worktree', pattern: 'invalidateIndex', why: 'worktree 代码里出现 invalidateIndex：会让在跑的对话静默丢盘（A29/A30）' },
-      { kind: 'grep', file: QA, pattern: 'A35', why: '缺 A35 断言（项目记忆跨工作区共享 —— spec 标为 P1 的 G5）' }
+      { kind: 'absent', file: 'apps/desktop/src/main/services/worktree', pattern: 'invalidateIndex', why: 'worktree 代码里出现 invalidateIndex：会让在跑的对话静默丢盘（A29/A30）' }
     ]
   },
 
@@ -161,7 +160,7 @@ const TASKS = [
     name: '新建会话 UI（位置单选 / 起点选择器 / dirty 只警示）',
     criteria: [
       { kind: 'grep', file: 'apps/desktop/src/renderer/src/redesign/QuickStart.tsx', pattern: 'locationTouched', why: '缺 QuickStart.tsx 或其 locationTouched 联动' },
-      { kind: 'grep', file: QA, pattern: 'A47', why: '缺 A47 断言' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A47', why: '缺 A47 断言' }
     ]
   },
   {
@@ -180,7 +179,7 @@ const TASKS = [
     criteria: [
       { kind: 'file', file: `${WT}/deps.ts`, why: 'deps.ts 不存在' },
       { kind: 'grep', file: `${WT}/ipc.ts`, pattern: 'install-deps', why: 'ipc 里没有 install-deps 通道' },
-      { kind: 'grep', file: QA, pattern: 'A27', why: '缺 A27 断言（依赖装好之前不许当可用）' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A27', why: '缺 A27 断言（依赖装好之前不许当可用）' }
     ]
   },
   {
@@ -205,7 +204,7 @@ const TASKS = [
     name: '边界告知 A36（五项齐全）',
     criteria: [
       { kind: 'file', file: `${WT}/brief.ts`, why: 'brief.ts 不存在' },
-      { kind: 'grep', file: QA, pattern: 'A36-5', why: 'A36 未覆盖到第 5 项（记忆共享行）' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A36-5', why: 'A36 未覆盖到第 5 项（记忆共享行）' }
     ]
   },
   {
@@ -217,7 +216,7 @@ const TASKS = [
       // listing.ts 的参数刻意叫 memoryRoot（注释：原名 root 会让人顺手传 workspaceRoot），
       // 真正的接线点在 agent-loop 传 ctx.memoryScopeRoot 进去
       { kind: 'grep', file: 'apps/desktop/src/main/services/agent-loop.ts', pattern: 'memoryScopeRoot', why: 'agent-loop.ts 未把 ctx.memoryScopeRoot 传给记忆清单' },
-      { kind: 'grep', file: QA, pattern: 'A35', why: '缺 A35 断言（worktree 写入 → 主仓库立即可读）' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A35', why: '缺 A35 断言（worktree 写入 → 主仓库立即可读）' }
     ]
   },
   {
@@ -238,7 +237,7 @@ const TASKS = [
       { kind: 'file', file: `${WT}/merge.ts`, why: 'merge.ts 不存在（合并流程整块没开工）' },
       { kind: 'grep', file: `${WT}/merge.ts`, pattern: '--no-ff', why: '合并没有 --no-ff' },
       { kind: 'absent', file: `${WT}/merge.ts`, pattern: '--autostash', why: '出现 --autostash：实测 exit 0 但工作区 UU、MERGE_HEAD 空（§4.9 禁用）' },
-      { kind: 'grep', file: QA, pattern: 'A37', why: '缺 A37 断言' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A37', why: '缺 A37 断言' }
     ]
   },
   {
@@ -247,20 +246,20 @@ const TASKS = [
     name: '显式 stash 流程（push -u → merge → pop）',
     criteria: [
       { kind: 'grep', file: `${WT}/merge.ts`, pattern: 'stash', why: 'merge.ts 里没有 stash 流程' },
-      { kind: 'grep', file: QA, pattern: 'A94', why: '缺 A94 断言' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A94', why: '缺 A94 断言' }
     ]
   },
   {
     id: 'T2.1c',
     stage: 'P2',
     name: 'stderr 稳健解析',
-    criteria: [{ kind: 'grep', file: QA, pattern: 'A97', why: '缺 A97 断言' }]
+    criteria: [{ kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A97', why: '缺 A97 断言' }]
   },
   {
     id: 'T2.2',
     stage: 'P2',
     name: '失败出口四件套 + 成功面板',
-    criteria: [{ kind: 'grep', file: QA, pattern: 'A42', why: '缺 A42 断言（四个出口都要可用）' }]
+    criteria: [{ kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A42', why: '缺 A42 断言（四个出口都要可用）' }]
   },
   {
     id: 'T2.3',
@@ -276,7 +275,7 @@ const TASKS = [
     name: '删除 worktree（三态分派 + dirty 拒绝）',
     criteria: [
       { kind: 'file', file: `${WT}/remove.ts`, why: 'remove.ts 不存在' },
-      { kind: 'grep', file: QA, pattern: 'A53', why: '缺 A53 断言' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A53', why: '缺 A53 断言' }
     ]
   },
   {
@@ -291,7 +290,7 @@ const TASKS = [
     name: 'worktree:rebuild',
     criteria: [
       { kind: 'file', file: `${WT}/rebuild.ts`, why: 'rebuild.ts 不存在' },
-      { kind: 'grep', file: QA, pattern: 'A34', why: '缺 A34 断言' }
+      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A34', why: '缺 A34 断言' }
     ]
   }
 ]
@@ -343,14 +342,44 @@ function checkCriterion(c) {
   if (c.kind === 'file') {
     return { ok: exists(c.file), detail: exists(c.file) ? '' : c.why }
   }
-  const content = c.kind === 'absent' ? readTree(c.file) : readFileSafe(c.file)
-  if (content === null) {
+  const raw = c.kind === 'absent' ? readTree(c.file) : readFileSafe(c.file)
+  if (raw === null) {
     return { ok: false, detail: `读不到 ${c.file}（不是「没有违规」，是没法判断）` }
+  }
+  // `within`：只在名字以该前缀开头的场景函数体里找。
+  //
+  // 为什么必须有：断言编号是**每个功能各自从 A1 数起**的。worktree 的 A42（合并冲突后四个出口可用）
+  // 与模型切换的 A42（密钥库损坏时不能集体判缺密钥）编到了同一个号，而两者都在 `test-main.ts` 里。
+  // 只按 `A42` 找会命中别人的断言，于是「没做」被报成「做好了」——这是假绿，比假红危险得多。
+  const content = c.within ? scopeToScenario(raw, c.within) : raw
+  if (content === null) {
+    return { ok: false, detail: `找不到以 ${c.within} 开头的场景函数（断言无处可写）` }
   }
   const hit = content.includes(c.pattern)
   if (c.kind === 'grep') return { ok: hit, detail: hit ? '' : c.why }
   // absent：命中即为问题
   return { ok: !hit, detail: hit ? c.why : '' }
+}
+
+/**
+ * 取出名字以 `prefix` 开头的场景函数体，拼成一段。
+ *
+ * 找不到任何匹配函数时返回 null —— 调用方据此报「断言无处可写」，
+ * 而不是把「函数不存在」当成「断言不存在」蒙混过去（那会让判据永远为假，红了也不知道为什么）。
+ */
+function scopeToScenario(text, prefix) {
+  const re = /(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*\(/g
+  const blocks = []
+  let m
+  while ((m = re.exec(text)) !== null) {
+    if (!m[1].startsWith(prefix)) continue
+    // 从函数头到下一个 function 声明之间即函数体（不追求精确配对，够用且不会跨到别的场景）
+    const start = m.index
+    const next = text.slice(re.lastIndex).search(/\n(?:export\s+)?(?:async\s+)?function\s+\w+\s*\(/)
+    const end = next === -1 ? text.length : re.lastIndex + next
+    blocks.push(text.slice(start, end))
+  }
+  return blocks.length ? blocks.join('\n') : null
 }
 
 function checkTask(t) {
@@ -425,12 +454,57 @@ for (const s of STAGES) {
 }
 
 // ── 门槛结论 ──
+//
+// ## 这里只拦「跳级」，「没做完」不算失败
+//
+// 一开始我把「任一阶段没全绿」判成 exit 1，这是错的：开发期间 P1 天然是半成品，
+// 于是 CI 天天红——**红着的门禁等于没有门禁**，正是这个脚本要解决的那个问题本身。
+//
+// 真正该拦的是**跳级**：前一个阶段还没全绿，后一个阶段却已经有产物了。
+// 那才是「不按顺序走」的客观证据，而且是代码状态的函数，不依赖谁记不记得。
 const firstBad = STAGES.find((s) => !stageOk[s])
+
+/**
+ * 某阶段是否已经有产物，用于判断「有没有偷偷开工」。
+ *
+ * 这里**不要求整个任务通过**，只要**任意一条判据命中**就算开过工。
+ * 一开始我用 `r.ok`（整个任务全绿），结果造一个只有空壳的 `merge.ts` 时检测不到——
+ * 而「空壳 merge.ts 已经躺在仓库里」恰恰就是跳级的证据。判据要能抓住**半成品**，
+ * 不能只在「做完了」时才说话，那样它就只能事后追认，拦不住人。
+ */
+function started(s) {
+  return byStage[s].some((r) => r.task.criteria.some((c) => checkCriterion(c).ok))
+}
+
 console.log('═══════ 结论 ═══════')
 for (const s of STAGES) {
   const list = byStage[s]
   const done = list.filter((r) => r.ok).length
   console.log(`  ${stageOk[s] ? '✅' : '❌'} ${s}: ${done}/${list.length}`)
+}
+
+/** 跳级：前序阶段未全绿，但本阶段已有产物。 */
+const jumps = []
+for (const s of STAGES) {
+  const gate = GATE[s]
+  if (gate && !stageOk[gate] && started(s)) {
+    // 报「已开工的任务数」而不是「已全绿的任务数」：跳级时的常态是半成品，
+    // 用全绿计数会打出「已有 0 项产物」这种自相矛盾的文案。
+    const touched = byStage[s].filter((r) => r.task.criteria.some((c) => checkCriterion(c).ok)).length
+    jumps.push({ later: s, gate, touched })
+  }
+}
+
+if (jumps.length > 0) {
+  console.log('\n❌ 跳级：')
+  for (const j of jumps) {
+    console.log(
+      `  ${j.later} 已有 ${j.touched} 项开工，但 ${j.gate} 还没全绿 —— 按 spec §8「${j.gate} 全绿才允许进入 ${j.later}」`
+    )
+  }
+  console.log('\n这不是「进度慢」，是顺序错了：失败清理、锁、路径归一化这些地基没验完就开始往上盖，')
+  console.log(`出问题时无法判断是上层写错还是地基漏了。先补 ${jumps[0].gate}，再继续。`)
+  process.exit(1)
 }
 
 if (!firstBad) {
@@ -439,10 +513,10 @@ if (!firstBad) {
 }
 
 const bad = byStage[firstBad].filter((r) => !r.ok)
-console.log(`\n当前卡在 ${firstBad}：还有 ${bad.length} 项未完成。`)
-console.log(`按 spec §8，**不允许进入 ${Object.keys(GATE).find((k) => GATE[k] === firstBad) || '后续阶段'}**。`)
+console.log(`\n当前在 ${firstBad}：还有 ${bad.length} 项未完成（这是正常进度，不是错误）。`)
+console.log(`约束：${firstBad} 全绿之前不许开工 ${Object.keys(GATE).find((k) => GATE[k] === firstBad) || '后续阶段'}。`)
 console.log('\n边界：本脚本只查「产物在不在、断言有没有」。以下查不到：')
 console.log('  · 断言是否真的有效（可能写了 A35 但恒真）→ break-*.cjs 与独立验收')
 console.log('  · 实现是否符合 spec 的算法细节（如失败清理六步顺序）→ 代码审查')
 console.log('  · 界面是否好用 → 要人看')
-process.exit(1)
+process.exit(0)
