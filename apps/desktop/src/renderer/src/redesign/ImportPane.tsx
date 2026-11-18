@@ -57,6 +57,9 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   // secrets.json 写盘失败。与 config-write-failed 分开：那条是 config.json，这条是密钥文件，
   // 用户按文案去查的位置不一样。
   'secrets-write-failed': 'settings.import.reason.secretsWriteFailed',
+  // 目标 secrets.json 本身读不出来（内容坏 / 被占用）。此刻写进去会覆盖整份库，所以一条都不写。
+  // 与 secrets-write-failed 分开：那条是「想写但磁盘写不进去」，这条是「库已经坏了，先修文件」。
+  'secrets-store-unreadable': 'settings.import.reason.secretsStoreUnreadable',
   // 源里的 secrets.json 内容坏了（半截 JSON）：一个密钥都没读到，逐条 key 无从谈起，用占位 id。
   'source-secrets-corrupt': 'settings.import.reason.sourceSecretsCorrupt',
   // 源密钥文件读不出来（EPERM/EBUSY）：与「内容坏」分开，用户处置不同（等等再试 vs 去改文件内容）。

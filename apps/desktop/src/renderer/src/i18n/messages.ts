@@ -915,6 +915,8 @@ const zhCN: MessageTree = {
         sourceFileUnreadable: '原版这个文件读不出来（可能被占用），这一条没有导入。请稍后重新导入一次',
         sourceNotAFile: '原版这个位置不是普通文件（可能是同名文件夹占了位置），这一条搬不了。请检查原版数据',
         secretsWriteFailed: '密钥没能写入本地密钥文件（权限或磁盘异常）',
+        secretsStoreUnreadable:
+          '本地密钥文件本身读不出来（内容损坏或被占用），为避免覆盖掉里面的其它密钥，这次一条都没写。请检查 secrets.json',
         avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用'
       },
       // 密钥行的附加说明（见 ImportPane 的 secretsRow）。{n} 是条数。
@@ -2623,6 +2625,8 @@ const en: MessageTree = {
         sourceNotAFile:
           'This upstream entry is not a regular file (a folder with the same name may be in the way) — it can’t be imported. Check the upstream data',
         secretsWriteFailed: 'The key couldn’t be written to the local secrets file — check permissions or disk space',
+        secretsStoreUnreadable:
+          'The local secrets file itself can’t be read (corrupted or in use). Nothing was written so the other keys inside are not overwritten — check secrets.json',
         avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable'
       },
       secretNote: {

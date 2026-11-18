@@ -325,12 +325,17 @@ export async function copySecrets(srcHome: string): Promise<SecretsStat> {
      *    这是「密钥不用重输」唯一会无声失效的通道——界面必须能把它单独提示出来（「这台机器无法保存密钥，
      *    请手动重填」），混进「跳过 5」用户永远不知道；
      *  - `write-failed`  → failed：内存里有、盘上没有，重启后密钥就没了，是真失败。
+     *  - `store-unreadable` → failed：目标密钥库文件本身坏了，写进去会覆盖整份库，所以拒绝。
+     *    这条**绝不能落进下面的 `skipped`**：那等于告诉用户「这些密钥本来就不用导」，
+     *    而真实原因是目标库坏了要修——两者的处置完全不同。
      */
     const r = await importEncryptedSecret(key, value)
     if (r.ok) stat.copied.push(key)
     else if (r.code === 'write-failed') {
       // reason 用 secrets 专属码：用户看到「配置写盘失败」会去查 config.json，而失败的是 secrets.json
       stat.failed = [...(stat.failed ?? []), { step: 'secrets', id: key, reason: 'secrets-write-failed' }]
+    } else if (r.code === 'store-unreadable') {
+      stat.failed = [...(stat.failed ?? []), { step: 'secrets', id: key, reason: 'secrets-store-unreadable' }]
     } else if (r.code === 'no-encryption') {
       stat.noEncryption.push(key)
       /*

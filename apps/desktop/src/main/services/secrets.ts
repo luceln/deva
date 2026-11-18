@@ -181,6 +181,19 @@ export async function setSecret(
 ): Promise<{ ok: boolean; available: boolean }> {
   await ensureLoaded()
   const available = safeStorage.isEncryptionAvailable()
+  /*
+   * 库内容坏掉时**拒绝写入**。
+   *
+   * 不拒的后果是数据丢失级：此刻 `store` 是空的（解析失败没装进来），写一条新密钥再 `persist()`
+   * 就整份覆盖——用户原本那十几个服务商的密钥一条不剩，而返回值还是 `ok:true`，界面显示「已保存」。
+   * 实测确认过：损坏的 `{bad json` 在 `setSecret('newkey','v')` 之后变成 `{"newkey":"..."}`，
+   * 其它键全没了。
+   *
+   * `readSecret` 早就把 `corrupt` 放在查 `store[key]` 之前（见 :137 的注释），这里是同一层保护的
+   * 写侧对应物。修好 `secrets.json` 之后自然恢复——不需要为它开一条「先备份再覆盖」的通道：
+   * 用户此刻要做的是去修那个文件，而不是让应用替他猜里面原本有什么。
+   */
+  if (loadKind === 'corrupt') return { ok: false, available }
   if (!value) {
     delete store[key]
     await persist()
@@ -219,6 +232,8 @@ export type ImportSecretResult =
   | { ok: false; code: 'invalid' }
   /** 系统未提供加密（无 DPAPI / keychain）：不能存明文，只能跳过 */
   | { ok: false; code: 'no-encryption' }
+  /** 目标密钥库文件本身读不出来：此刻写进去会把整份库覆盖掉，所以拒绝 */
+  | { ok: false; code: 'store-unreadable' }
   /** 内存里写进去了但没落盘：这是**真失败**，重启后密钥就没了 */
   | { ok: false; code: 'write-failed' }
 
@@ -234,6 +249,8 @@ export async function importEncryptedSecret(
    */
   if (!key.trim() || !cipherTextBase64.trim()) return { ok: false, code: 'invalid' }
   if (!safeStorage.isEncryptionAvailable()) return { ok: false, code: 'no-encryption' }
+  // 库坏时拒绝：同 `setSecret` 的理由——此刻 store 为空，写进去再 persist 会把整份库覆盖掉。
+  if (loadKind === 'corrupt') return { ok: false, code: 'store-unreadable' }
   if (key in store) return { ok: false, code: 'exists' }
   store[key] = cipherTextBase64
   try {
@@ -247,18 +264,20 @@ export async function importEncryptedSecret(
   return { ok: true }
 }
 
-/** 删除某密钥（幂等）。 */
+/** 删除某密钥（幂等）。库坏时不动盘：此刻 store 是空的，`persist()` 会用空库覆盖掉那份可能还能救的文件。 */
 export async function deleteSecret(key: string): Promise<void> {
   await ensureLoaded()
+  if (loadKind === 'corrupt') return
   if (key in store) {
     delete store[key]
     await persist()
   }
 }
 
-/** 删除某前缀下的所有密钥（如删除 MCP 服务时清 `mcp:<id>:` 全部字段）。 */
+/** 删除某前缀下的所有密钥（如删除 MCP 服务时清 `mcp:<id>:` 全部字段）。库坏时不动盘，理由同上。 */
 export async function deleteSecretsByPrefix(prefix: string): Promise<void> {
   await ensureLoaded()
+  if (loadKind === 'corrupt') return
   let changed = false
   for (const k of Object.keys(store)) {
     if (k.startsWith(prefix)) {
@@ -276,6 +295,8 @@ export function registerSecretsIpc(): void {
     async (_e, providerId: string, key: string): Promise<{ ok: boolean; available: boolean }> => {
       await ensureLoaded()
       const available = safeStorage.isEncryptionAvailable()
+      // 库坏时拒绝：同 `setSecret`。IPC 是界面唯一的写入口，漏了这里的守卫，前面两层都白设。
+      if (loadKind === 'corrupt') return { ok: false, available }
       if (!key) {
         delete store[providerId]
         await persist()
@@ -296,6 +317,8 @@ export function registerSecretsIpc(): void {
 
   ipcMain.handle('secrets:delete', async (_e, providerId: string): Promise<{ ok: true }> => {
     await ensureLoaded()
+    // 库坏时不动盘（见 deleteSecret 的理由）
+    if (loadKind === 'corrupt') return { ok: true }
     delete store[providerId]
     await persist()
     return { ok: true }
