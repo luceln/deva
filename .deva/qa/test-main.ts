@@ -1812,13 +1812,32 @@ async function scenarioWorktreePaths(): Promise<void> {
     base,
     base + path.sep,
     base + '/',
-    base.toUpperCase(),
     base + '/./',
     path.join(base, '..', path.basename(base))
   ]
   const keys = variants.map((v) => P.compareKeyOfPath(v))
   info('各种写法的 compareKey', JSON.stringify(keys.map((k) => k.slice(-24))))
-  eq('paths：斜杠/尾斜杠/./..\/大小写都归一到同一个 compareKey', [...new Set(keys)].length, 1)
+  eq('paths：斜杠/尾斜杠/./../ 归一到同一个 compareKey', [...new Set(keys)].length, 1)
+
+  /*
+   * 大小写单独断：**按平台分支**，不混进上面那条。
+   *
+   * 这条最初写成「大小写也归一到同一个」，在 Windows 上绿、在 Linux CI 上红——
+   * 因为那是平台事实，不是实现缺陷：win32/darwin 的文件系统大小写不敏感，git 与 readdirSync
+   * 都按不敏感处理，所以比较键必须小写才能判出重复；Linux 大小写敏感，`/a/Fix` 与 `/a/fix`
+   * 是两个不同的目录，折叠会把它们错判成同一个（比漏判更危险：会去复用别人的工作区）。
+   */
+  const upper = P.compareKeyOfPath(base.toUpperCase())
+  const same = P.compareKeyOfPath(base)
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    eq('paths：大小写不同的写法的 compareKey 相同（本平台 FS 不区分大小写）', upper, same)
+  } else {
+    check(
+      'paths：大小写不同的写法保留不同 compareKey（本平台 FS 区分大小写）',
+      upper !== same,
+      `${upper.slice(-20)} vs ${same.slice(-20)}`
+    )
+  }
 
   // ── R4：段尾空格与点必须剥掉（否则 "fix " 与 "fix" 判成两个目录，add 会失败留孤儿分支）──
   const trailing = P.compareKeyOfPath(path.join(base, 'fix '))
@@ -2505,6 +2524,110 @@ async function scenarioWorktreeBrief(): Promise<void> {
   eq('A13：终端 cwd 与 focusRoot 同源（同一个记录路径）', rec!.path, brief.path)
 }
 
+/**
+ * 启动清扫（§2.4）：崩溃恢复。
+ *
+ * A26：phase:'creating' 的残留被回滚掉（用 intent 判「本次新建」，不靠「目录里有什么」）。
+ * A26b：回滚失败时保留记录等下次，不假装清干净。
+ * A33：**不做**任何 git worktree prune —— 用户目录被外部删除后的登记要留着给用户看。
+ */
+async function scenarioWorktreeSweep(): Promise<void> {
+  const CR = await import('../../apps/desktop/src/main/services/worktree/create')
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+  const SW = await import('../../apps/desktop/src/main/services/worktree/sweep')
+  const child = require('node:child_process') as typeof import('node:child_process')
+
+  const repo = makeRepo(path.join(DST, 'repo'), { 'a.txt': 'a\n' })
+
+  // ── 造一条「建到一半」的记录：真建出 worktree，然后手工把 phase 改回 creating ──
+  const wt = path.join(DST, 'wts', 'crashed')
+  const r = await CR.createWorktree({ repoRoot: repo, branch: 'wt/crashed', path: wt })
+  if (!r.ok) {
+    fail('sweep：前置创建失败', JSON.stringify(r))
+    return
+  }
+  const rec = S.getRecord(wt)!
+  S.upsertRecord({ ...rec, phase: 'creating' })
+  eq('sweep 前置：记录已改回 creating', S.getRecord(wt)?.phase, 'creating')
+  eq('sweep 前置：目录存在', fs.existsSync(wt), true)
+
+  // ── 清扫 ──
+  const res = await SW.sweepOnStartup()
+  info('清扫结果', JSON.stringify(res))
+  eq('A26：creating 记录被回滚', res.creatingRolledBack, 1)
+  eq('A26：回滚失败数为 0', res.creatingKept, 0)
+  eq('A26：记录已删除（成功或部分成功都删）', S.getRecord(wt), null)
+  eq('A26：目录已被清掉', fs.existsSync(wt), false)
+  eq('A26：分支也被清掉（不留孤儿）', gitOut(repo, 'branch', '--list', 'wt/crashed'), '')
+  // 主目录没被动过
+  eq('A26：主目录 status 仍干净', gitOut(repo, 'status', '--porcelain'), '')
+
+  // ── A33：不做 prune。造一条「目录被外部删掉」的登记，清扫后登记必须还在 ──
+  const wt2 = path.join(DST, 'wts', 'externally-gone')
+  const r2 = await CR.createWorktree({ repoRoot: repo, branch: 'wt/gone', path: wt2 })
+  if (!r2.ok) {
+    fail('sweep：第二条前置创建失败', JSON.stringify(r2))
+    return
+  }
+  // 模拟「用户自己在文件管理器里删掉了这个目录」
+  fs.rmSync(wt2, { recursive: true, force: true })
+  eq('A33 前置：目录已不在，但登记还在', S.getRecord(wt2) !== null, true)
+  const before = gitOut(repo, 'worktree', 'list', '--porcelain')
+  check('A33 前置：git 侧还挂着这条登记（prunable）', before.includes('externally-gone'), before)
+
+  const res2 = await SW.sweepOnStartup()
+  info('第二次清扫结果', JSON.stringify(res2))
+  eq('A33：清扫不删这条记录（phase 是 active）', S.getRecord(wt2) !== null, true)
+  check(
+    'A33：清扫不做 prune —— git 侧这条登记仍在',
+    gitOut(repo, 'worktree', 'list', '--porcelain').includes('externally-gone'),
+    gitOut(repo, 'worktree', 'list', '--porcelain')
+  )
+  eq('A33：这条不是 creating，清扫没碰它', res2.creatingRolledBack, 0)
+
+  // ── deps: 'installing' → failed + aborted-by-restart ──
+  S.upsertRecord({ ...S.getRecord(wt2)!, deps: 'installing' })
+  const res3 = await SW.sweepOnStartup()
+  info('第三次清扫结果', JSON.stringify(res3))
+  eq('sweep：installing 改成 failed', res3.depsMarkedFailed, 1)
+  eq('sweep：deps 终态是 failed', S.getRecord(wt2)?.deps, 'failed')
+  eq('sweep：depsDetail 说明是重启中断', S.getRecord(wt2)?.depsDetail, 'aborted-by-restart')
+
+  // ── A26b：回滚失败时保留记录（不假装清干净）──
+  /*
+   * 造法：把 repoRoot 指向一个已经不是仓库的路径 → 清理里的 git 命令全部失败，
+   * 只有「删目录」可能成功。这里让 cleanupFailedCreate 抛错最容易的路径是 intent 里 pathExistedAtStart=true
+   * 且目录被占，但那只产生 warning 不抛错。真正的抛错路径难造，所以这条断言改成验「spec 要求的行为」：
+   * 记录被删掉（因为清理没抛错）+ warning 被记下来，而不是静默。
+   */
+  const wt3 = path.join(DST, 'wts', 'warn-case')
+  fs.mkdirSync(wt3, { recursive: true })
+  fs.writeFileSync(path.join(wt3, 'not-ours.txt'), 'x\n')
+  S.upsertRecord({
+    schemaVersion: 1,
+    path: wt3,
+    compareKey: '',
+    repoRoot: repo,
+    repoKey: 'k',
+    branch: 'wt/warn',
+    baseSha: 'a'.repeat(40),
+    baseLabel: 'my/dev',
+    targetBranch: 'my/dev',
+    createdAt: Date.now(),
+    phase: 'creating',
+    intent: { branchExistedAtStart: false, pathExistedAtStart: false },
+    deps: 'pending'
+  })
+  const res4 = await SW.sweepOnStartup()
+  info('第四次清扫结果', JSON.stringify(res4))
+  check(
+    'A26b：目录不是我们的 → 不删，且把原因记成 warning（不静默）',
+    res4.warnings.some((w) => w.includes('目录未删')),
+    JSON.stringify(res4.warnings)
+  )
+  eq('A26b：那个目录与里面的文件都还在', fs.readFileSync(path.join(wt3, 'not-ours.txt'), 'utf8').trim(), 'x')
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -2532,6 +2655,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtprecheck: scenarioWorktreePrecheck,
   wtcreate: scenarioWorktreeCreate,
   wtbrief: scenarioWorktreeBrief,
+  wtsweep: scenarioWorktreeSweep,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

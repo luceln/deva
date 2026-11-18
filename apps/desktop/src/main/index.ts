@@ -25,6 +25,7 @@ import {
 import { registerAttachmentsIpc } from './services/attachments'
 import { registerTerminalIpc } from './services/terminal'
 import { registerWorktreeIpc } from './services/worktree/ipc'
+import { sweepOnStartup } from './services/worktree/sweep'
 import { registerGitIpc } from './services/git'
 import { registerClipboardIpc } from './services/clipboard'
 import { registerDeliverablesIpc } from './services/deliverables'
@@ -378,6 +379,19 @@ if (!app.requestSingleInstanceLock()) {
 
   // 集成终端（node-pty 跑在独立 Utility Process，主进程仅中继）
   registerTerminalIpc(() => mainWindow)
+
+  /*
+   * worktree：**先在注册 IPC 之前跑一次启动清扫**（spec §2.4）。
+   *
+   * 顺序在这里有意义：清扫会把上次崩溃留下的 `phase:'creating'` 记录回滚掉，
+   * 界面一打开看到的就是干净状态；若先注册 IPC，渲染层有机会在清扫中途读到一条「建了一半」的记录。
+   *
+   * `void` 而非 `await`：这个函数是同步的（registerWorktreeIpc 不回 promise），阻塞启动等 git 命令不合适。
+   * 清扫内部绝不抛错（它在启动路径上，抛出去会让应用起不来），失败只进日志。
+   * 代价是极小的竞态窗口：界面若在清扫完成前就调 list，可能看到一条 creating 记录——它 phase 不是 active，
+   * 界面不会把它当可用工作区（§2.1 的 state 判定要求 phase==='active'）。
+   */
+  void sweepOnStartup()
   registerWorktreeIpc()
 
   // Git 源代码管理（调用系统 git，对标 VS Code；凭据交系统 GCM）
