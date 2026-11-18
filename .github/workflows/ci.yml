@@ -45,8 +45,16 @@ jobs:
       - name: 同类扫描
         run: node .deva/qa/scan-same-class.cjs
 
-      # 导入功能的 17 个行为场景（esbuild 打包后逐个独立进程跑）。
+      # 导入功能的行为场景（esbuild 打包后逐个独立进程跑）。
       # Linux 上有 2 个场景的夹具不成立（full 要真实 ~/.deva、gate 要 powershell.exe），
-      # 它们会被显式 SKIP 并在汇总里点名，不算通过；其余 15 个必须全绿。
+      # 它们会被显式 SKIP 并在汇总里点名，不算通过；其余必须全绿。
       - name: 导入场景
         run: node .deva/qa/driver.cjs
+
+      # 实施门槛：把 spec §8 的任务表变成判据（文件存在 / grep 命中 / 不许再出现）。
+      # 现在**不阻塞**：P0 还差 2 项（Git 锁与 A35 断言），立刻 blocking 会让门禁红着，
+      # 而红着的门禁等于没有门禁（没人会看第二次）。
+      # 等 P0 全绿后把 `|| true` 去掉即可——那时它才开始拦人。
+      # 输出里会写明「当前卡在哪个阶段、不允许进入哪一阶段」，所以即便不阻塞也看得见。
+      - name: 实施门槛（未阻塞，P0 未全绿）
+        run: node .deva/qa/spec-gate.cjs || true
