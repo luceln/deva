@@ -3082,6 +3082,218 @@ async function scenarioWorktree(): Promise<void> {
   const instHandler = stub.__test.ipcHandlers.get('worktree:install-deps')
   check('IPC：worktree:install-deps 已注册', typeof instHandler === 'function', typeof instHandler)
 
+  // ══ mergeGate 四个 blocker（spec §7.5）══
+  /*
+   * `mergeGate` 是「按钮能不能点」的唯一依据（A48：渲染层不复算）。四个 blocker 各构造一次：
+   *   target-not-set / source-missing / source-branch-changed / installing
+   *
+   * 这里直接测纯函数 `computeMergeGate`（轻量三判据），再测快照里真的带上了它。
+   */
+  eq(
+    'mergeGate：targetBranch 为空 → target-not-set',
+    L.computeMergeGate({ state: 'ok', deps: 'ready', targetBranch: null }),
+    { mayMerge: false, blocker: 'target-not-set' }
+  )
+  eq(
+    'mergeGate：目录缺失 → source-missing',
+    L.computeMergeGate({ state: 'dir-missing', deps: 'ready', targetBranch: 'my/dev' }),
+    { mayMerge: false, blocker: 'source-missing' }
+  )
+  eq(
+    'mergeGate：prunable 也归 source-missing（对用户都是「用不了」）',
+    L.computeMergeGate({ state: 'prunable', deps: 'ready', targetBranch: 'my/dev' }),
+    { mayMerge: false, blocker: 'source-missing' }
+  )
+  eq(
+    'mergeGate：被切到别的分支 → source-branch-changed',
+    L.computeMergeGate({ state: 'branch-mismatch', deps: 'ready', targetBranch: 'my/dev' }),
+    { mayMerge: false, blocker: 'source-branch-changed' }
+  )
+  eq(
+    'mergeGate：依赖正在装 → installing（UI 层判断，不走 C1~C6）',
+    L.computeMergeGate({ state: 'ok', deps: 'installing', targetBranch: 'my/dev' }),
+    { mayMerge: false, blocker: 'installing' }
+  )
+  eq(
+    'mergeGate：一切正常 → mayMerge',
+    L.computeMergeGate({ state: 'ok', deps: 'ready', targetBranch: 'my/dev' }),
+    { mayMerge: true }
+  )
+  // blocker 的**优先级**：targetBranch 为空比「目录不在」更根本（先要有个目标才谈得上合并）
+  eq(
+    'mergeGate：多个问题同时存在时，blocker 按 §7.5 的顺序取（target-not-set 最优先）',
+    L.computeMergeGate({ state: 'dir-missing', deps: 'installing', targetBranch: null }),
+    { mayMerge: false, blocker: 'target-not-set' }
+  )
+
+  /*
+   * 先把 wt3 恢复成「干净且 deps 非 installing」，否则下面几条断言测的是前面段落的残留
+   * （package-lock.json 还在 → dirtyCount 不为 0；deps 被改成 installing → mergeGate 是 installing）。
+   */
+  // 前面几段在 wt3 里留过 lockfile / Cargo.toml / blob.bin：全清掉，才谈得上「干净」
+  for (const f of ['pnpm-lock.yaml', 'package-lock.json', 'Cargo.toml', 'blob.bin'])
+    try {
+      fs.rmSync(path.join(wt3, f))
+    } catch {
+      /* 不存在就算了 */
+    }
+  S.upsertRecord({ ...S.getRecord(wt3)!, deps: 'ready' })
+  // 快照里真的带上了三者（真实 IPC 返回的字段）
+  const snapGate = await L.listWorktrees()
+  const withGate = snapGate.items.find((i) => i.compareKey === rec3.compareKey)
+  check('快照：每条都带 mergeGate', typeof withGate?.mergeGate === 'object' && withGate.mergeGate !== null, JSON.stringify(withGate?.mergeGate))
+  check('快照：每条都带 dirtyCount 字段（可为 null）', withGate !== undefined && 'dirtyCount' in withGate, JSON.stringify(withGate?.dirtyCount))
+  check('快照：每条都带 mergeInProgress 字段（可为 null）', withGate !== undefined && 'mergeInProgress' in withGate, JSON.stringify(withGate?.mergeInProgress))
+  eq('快照：工作区干净时 dirtyCount 为 0', withGate?.dirtyCount, 0)
+  // 造一个改动，dirtyCount 要跟着变
+  fs.writeFileSync(path.join(wt3, 'dirty-a.txt'), 'x\n')
+  fs.writeFileSync(path.join(wt3, 'dirty-b.txt'), 'y\n')
+  const snapDirty = await L.listWorktrees()
+  eq(
+    '快照：有 2 个未提交改动时 dirtyCount = 2（§7.7 的「N 个未提交改动」）',
+    snapDirty.items.find((i) => i.compareKey === rec3.compareKey)?.dirtyCount,
+    2
+  )
+  eq(
+    'mergeGate：有未提交改动**不**影响 mayMerge（§7.5 明确不跑 status）',
+    snapDirty.items.find((i) => i.compareKey === rec3.compareKey)?.mergeGate,
+    { mayMerge: true }
+  )
+  fs.rmSync(path.join(wt3, 'dirty-a.txt'))
+  fs.rmSync(path.join(wt3, 'dirty-b.txt'))
+
+  // ══ mergeInProgress：target 检出里有未收尾的合并（§13.10）══
+  /*
+   * 造法：在 target（主检出）里制造一个真冲突的 merge。
+   * wt3 的分支改 a.txt，主检出也改 a.txt → 在 repo 里 merge wt3 的分支必冲突 →
+   * MERGE_HEAD 存在、有未合并文件。
+   */
+  eq('mergeInProgress：没有合并时是 null', snapGate.items.find((i) => i.compareKey === rec3.compareKey)?.mergeInProgress, null)
+  const mergeWt = path.join(DST, 'wts', 'conflict-src')
+  const rM = await CR.createWorktree({
+    repoRoot: repo,
+    branch: 'wt/conflict',
+    path: mergeWt,
+    skipDeps: true
+  })
+  if (!rM.ok) {
+    fail('mergeInProgress：前置创建失败', JSON.stringify(rM))
+    return
+  }
+  const recM = S.getRecord(mergeWt)!
+  // 带 git 身份跑（合并要写 commit；不设身份时 commit 会失败，MERGE_HEAD 就造不出来）
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'q',
+    GIT_AUTHOR_EMAIL: 'q@q',
+    GIT_COMMITTER_NAME: 'q',
+    GIT_COMMITTER_EMAIL: 'q@q'
+  }
+  const gitRun = (cwd: string, args: string[]): { code: number; out: string } => {
+    const r = require('node:child_process').spawnSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: gitEnv
+    })
+    return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` }
+  }
+  // 两边都改 a.txt 的同一行 → 必冲突
+  fs.writeFileSync(path.join(mergeWt, 'a.txt'), 'from worktree\n')
+  const c1 = gitRun(mergeWt, ['commit', '-qam', 'wt change'])
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'from primary\n')
+  const c2 = gitRun(repo, ['commit', '-qam', 'primary change'])
+  // 在 target（主检出）里尝试合并 → 必冲突并留下 MERGE_HEAD
+  const mg = gitRun(repo, ['merge', '--no-edit', recM.branch])
+  info('mergeInProgress 前置现场', `commit=${c1.code}/${c2.code} merge=${mg.code} ${mg.out.slice(0, 200)}`)
+  check(
+    'mergeInProgress 前置：主检出确实进入了合并中',
+    fs.existsSync(path.join(repo, '.git', 'MERGE_HEAD')),
+    `commit=${c1.code}/${c2.code} merge=${mg.code}`
+  )
+  const snapMerge = await L.listWorktrees()
+  const inProgress = snapMerge.items.find((i) => i.compareKey === recM.compareKey)?.mergeInProgress
+  info('mergeInProgress 实测', JSON.stringify(inProgress))
+  check(
+    'mergeInProgress：target 检出里有未收尾合并时给出 { targetPath, unmergedCount }',
+    inProgress !== null &&
+      typeof inProgress === 'object' &&
+      inProgress.targetPath.length > 0 &&
+      inProgress.unmergedCount === 1,
+    JSON.stringify(inProgress)
+  )
+  // 清理：撤销合并，别让后续断言受影响
+  gitRun(repo, ['merge', '--abort'])
+  const snapAbort = await L.listWorktrees()
+  eq(
+    'mergeInProgress：git merge --abort 之后立刻变回 null（每次现算、不落盘）',
+    snapAbort.items.find((i) => i.compareKey === recM.compareKey)?.mergeInProgress,
+    null
+  )
+
+  // ══ A27 状态转移：驱动 startInstall，不是自己跑 npm ══
+  /*
+   * **这条是补盲区**：上一批的三条断言测的是测试自己的 `runNpmCi`（跑 npm ci 成功），
+   * 绕过了 `deps.ts`。所以把 deps.ts 的 `finish(rec,'ready')` 改成 `failed` 它们仍然绿——
+   * 这类回归无人拦。这里必须驱动产品状态机本身：`startInstall` → 等它跑完 → 断言 record.deps。
+   */
+  const transferRoot = path.join(DST, 'transfer-install')
+  const transferRepo = R.makeTinyInstallableRepo(transferRoot)
+  if (!transferRepo) {
+    info('A27 状态转移', 'SKIP —— npm 不可用')
+  } else {
+    // 造一个 worktree 记录，路径指向那个可安装的目录
+    const transferPath = path.join(DST, 'wts', 'transfer')
+    fs.mkdirSync(transferPath, { recursive: true })
+    S.upsertRecord({
+      schemaVersion: 1,
+      path: transferPath,
+      compareKey: '',
+      repoRoot: repo,
+      repoKey: 'k',
+      branch: 'wt/transfer',
+      baseSha: 'a'.repeat(40),
+      baseLabel: 'my/dev',
+      targetBranch: 'my/dev',
+      createdAt: Date.now(),
+      phase: 'active',
+      intent: { branchExistedAtStart: false, pathExistedAtStart: false },
+      deps: 'pending'
+    })
+    // 把可安装目录里的 package.json / lockfile 拷进 worktree 路径
+    for (const f of ['package.json', 'package-lock.json'])
+      fs.copyFileSync(path.join(transferRepo, f), path.join(transferPath, f))
+    /*
+     * `file:../pkg-local` 的相对路径要能解析到：worktree 在 `<DST>/wts/transfer`，
+     * 所以 pkg-local 必须在 `<DST>/wts/pkg-local`。makeTinyInstallableRepo 已经把它建在
+     * `<DST>/pkg-local`（transferRoot 的兄弟），这里复制一份到 wts 下。
+     */
+    const srcPkg = path.join(DST, 'pkg-local')
+    const dstPkg = path.join(DST, 'wts', 'pkg-local')
+    if (srcPkg !== dstPkg) fs.cpSync(srcPkg, dstPkg, { recursive: true })
+
+    const started = DEPS.startInstall(S.getRecord(transferPath)!)
+    eq('A27 状态转移：startInstall 进入 installing', started.started, true)
+    eq('A27 状态转移：落盘值立刻是 installing', S.getRecord(transferPath)?.deps, 'installing')
+    // 等它跑完（npm ci 几秒）
+    for (let i = 0; i < 120; i++) {
+      await new Promise((r) => setTimeout(r, 500))
+      const d = S.getRecord(transferPath)?.deps
+      if (d === 'ready' || d === 'failed') break
+    }
+    const finalDeps = S.getRecord(transferPath)?.deps
+    info('A27 状态转移终态', String(finalDeps))
+    /*
+     * 这一条就是验收指出的盲区：它驱动 deps.ts 自己走到终态。
+     * 把 deps.ts 里的 `finish(rec, 'ready')` 改成 `failed` 会让它变红。
+     */
+    eq('A27 核心：installing → ready', finalDeps, 'ready')
+    eq(
+      'A27 核心：失败时 depsDetail 会写现场（ready 时应为空）',
+      S.getRecord(transferPath)?.depsDetail,
+      undefined
+    )
+  }
+
   // ══ A48：判定只在主进程，渲染层拿到的就是结果 ══
   const snapFinal = await L.listWorktrees()
   const finalItem = snapFinal.items.find((i) => i.compareKey === rec3.compareKey)
