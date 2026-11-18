@@ -84,3 +84,9 @@ jobs:
       # mergeGate，不按 state 推算——这条一旦写成常量或推断式，编译与类型都不会报错，只能靠判据守。
       - name: 工作区字段渲染
         run: node .deva/qa/check-worktree-fields.cjs
+
+      # 体积回填走 worktree:size 增量事件：主进程发了、渲染层没接，体积就会永远停在「统计中…」。
+      # 这类「A 发了事件、B 没接」的回归编译与类型都看不出来，所以这里驱动真实的
+      # applySizeUpdate 纯函数喂一条事件，断言快照里的 sizeBytes 真的变了（不只查字符串）。
+      - name: 体积增量回填
+        run: node .deva/qa/check-worktree-size.cjs

@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode
 } from 'react'
-import type { WorktreeListItem, WorktreeSnapshot } from '../../../shared/worktree-protocol'
+import type { WorktreeListItem, WorktreeSizeUpdate, WorktreeSnapshot } from '../../../shared/worktree-protocol'
 
 /**
  * worktree 快照的渲染层侧（spec §7.5 / §7.6）。
@@ -24,10 +24,21 @@ import type { WorktreeListItem, WorktreeSnapshot } from '../../../shared/worktre
  * `worktree:changed` 只是一句通知，收到后**重拉全量**。理由：事件顺序与 invoke 响应顺序无保证，
  * 若把事件里的快照当状态用，界面会闪一下旧状态。worktree 数量是个位数，重拉一次很便宜。
  *
- * ## sizeBytes 的「统计中…」
+ * ## sizeBytes 的「统计中…」与增量回填
  *
- * 列表首次返回时 `sizeBytes` 可能是 `null`（后台还在异步统计目录大小）。这不是错误态，UI 显示「统计中…」；
- * 算完主进程发 `worktree:changed`，本 store 重拉后自然刷新。故 store 不需要任何轮询。
+ * 列表首次返回时 `sizeBytes` 可能是 `null`（后台还在异步统计目录大小）。这不是错误态，UI 显示「统计中…」。
+ *
+ * 算完**不是**发 `worktree:changed` 让界面重拉，而是逐条发 `worktree:size`
+ * （`{ compareKey, sizeBytes }`），本 store 收到后就地替掉那一条的 `sizeBytes`。
+ * 为什么增量：体积是列表里唯一「按条目异步、且必然慢」的东西，为它重拉一次整表，
+ * 并行化省下的时间就全白省了（实测整表一轮 448ms）。所以两条路径分工明确——
+ * **结构/状态变了走 `changed` 重拉，只有体积变了走 `size` 增量**。
+ *
+ * ## 两个订阅都不能少
+ *
+ * 少 `onChanged`：创建/删除/依赖状态转移后列表不更新。
+ * 少 `onSize`：体积永远停在「统计中…」——这正是「A 发了事件、B 没接」那类回归，
+ * 编译、类型、人眼都看不出来，只能靠断言守（见 `.deva/qa/check-worktree-size.cjs`）。
  *
  * **别在这里加「没有 onChanged 就只拉一次」的降级分支**：事件曾经断在
  * `publishWorktreeChanged()` 只发进程内总线、没有 `webContents.send` 上，现在已由 `4b07711` 接好。
@@ -49,6 +60,31 @@ interface WorktreeValue extends WorktreeListState {
 }
 
 const WorktreeContext = createContext<WorktreeValue | null>(null)
+
+/**
+ * 把一条 `worktree:size` 增量应用到快照上，返回**新的** state。
+ *
+ * 抽成导出纯函数是为了能直接断言「收到事件后 sizeBytes 真的变了」——回归的性质是
+ * 「A 发了事件、B 没接」，光断言 `onSize` 这个字符串在文件里出现过（注释里也能有）
+ * 拦不住它，必须跑到数据层。
+ *
+ * 三条行为都要守住：
+ * 1. 命中 `compareKey` → 只换那一条的 `sizeBytes`，别的字段与别的记录原样（不整表重建）
+ * 2. 值没变 → 返回**同一个** state 引用（体积事件连发多条，避免无谓重渲染）
+ * 3. 找不到 `compareKey` / 还没有快照 → 原样返回（统计期间那条被删了是正常事）
+ *
+ * 注意它**不触发任何拉取**：重拉会把并行化省下的时间吃回去（实测整表一轮 448ms）。
+ */
+export function applySizeUpdate(state: WorktreeListState, update: WorktreeSizeUpdate): WorktreeListState {
+  const snap = state.snapshot
+  if (!snap) return state
+  const idx = snap.items.findIndex((w) => w.compareKey === update.compareKey)
+  if (idx === -1) return state
+  if (snap.items[idx].sizeBytes === update.sizeBytes) return state
+  const items = snap.items.slice()
+  items[idx] = { ...items[idx], sizeBytes: update.sizeBytes }
+  return { ...state, snapshot: { ...snap, items } }
+}
 
 export function WorktreeProvider({ children }: { children: ReactNode }): React.JSX.Element {
   const [state, setState] = useState<WorktreeListState>({ snapshot: null, loading: false, error: null })
@@ -75,15 +111,32 @@ export function WorktreeProvider({ children }: { children: ReactNode }): React.J
     liveRef.current = true
     void refresh()
     /*
-     * 订阅 `worktree:changed`：创建 / 删除 / 重建 / 依赖状态转移 / 合并成功 / sizeBytes 算完都会发。
+     * 订阅 `worktree:changed`：创建 / 删除 / 重建 / 依赖状态转移 / 合并成功都会发。
      * 收到的是一句**通知**而不是快照，故一律重拉。
+     *
+     * 注意这里**不包含**体积算完——那走 `worktree:size` 增量事件（见下面的 `onSize`）。
      */
-    const off = window.deva.worktree.onChanged(() => {
+    const offChanged = window.deva.worktree.onChanged(() => {
       void refresh()
+    })
+    /*
+     * 订阅 `worktree:size`：目录体积后台算完之后**逐条**推回来，带 `compareKey` + `sizeBytes`。
+     *
+     * 这里**只就地替换那一条的 `sizeBytes`，绝不重拉列表**。理由：体积统计是列表里唯一
+     * 按条目异步、且必须慢的事，重拉一次就把并行化省下的时间全吃回去了（实测整表一轮 448ms）。
+     * 增量事件的存在就是为了省这一下。
+     *
+     * 找不到对应 `compareKey` 时静默忽略：那说明这条记录在统计期间被删了/换了。
+     *
+     * 只在本地 state 上改：不做成「先 setState 再 refresh」——那样既慢又会闪回旧值。
+     */
+    const offSize = window.deva.worktree.onSize((u) => {
+      setState((s) => applySizeUpdate(s, u))
     })
     return () => {
       liveRef.current = false
-      off()
+      offChanged()
+      offSize()
     }
   }, [refresh])
 
