@@ -53,9 +53,8 @@ import {
 } from '../components/humation'
 import { samePath, DEFAULT_PERSONA_ID, fill, AvatarStack, Avatar } from './shell-common'
 import { GitWidget, WorkspaceMenu } from './GitWidget'
-// ModelSwapDialog 仍在仓库里，但当前没有调用点：上游 9daa64f 把模型选择器重写成 ModelPanel.tsx，
-// 我们的「失效标红 + 批量替换」还没迁过去（见 .deva/pending-model-swap-ui.md）。
-// 迁移时把 import 与 <ModelPanel /> 附近的挂载点一起接回去。
+// 模型与思考等级、上下文占用在同一块 ModelPanel 里（上游 9daa64f 重写）；
+// 「模型失效标红 + 批量替换」已迁进去：失效时贴片标红、点击直接开 ModelSwapDialog。
 import { leadingQuote, withQuote, quotePlain } from './ConvMessage'
 import { ModelPanel } from './ModelPanel'
 

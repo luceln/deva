@@ -238,3 +238,25 @@
   color: var(--fg-subtle);
   white-space: normal;
 }
+
+/* ---------- 失效与「密钥用不了」 ---------- */
+/* 服务商行上的钥匙标记：扫一眼就知道这家的模型为什么点不动 */
+.cf-mp__keyicon {
+  flex-shrink: 0;
+  color: var(--warning);
+}
+/* 整个服务商缺密钥时，在模型列表上方写明原因（说明文字，要读 → 12px） */
+.cf-mp__blockednote {
+  padding: 2px 8px 4px;
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* 不可选的模型项：压暗、去掉 hover 反馈，指针仍是禁止符 */
+.model-pick__item.is-unusable,
+.model-pick__item.is-unusable:hover {
+  background: transparent;
+  color: var(--fg-subtle);
+  opacity: 0.55;
+  cursor: not-allowed;
+}

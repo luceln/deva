@@ -65,3 +65,10 @@ jobs:
       # 见 .deva/qa/git-pill/README.md 的手动步骤——不要把本步骤当成行为验证。
       - name: 分支 pill 刷新时机
         run: node .deva/qa/check-git-focus.cjs
+
+      # 模型失效标红：合并上游 0.1.16 时这块被暂时摘掉，迁回 ModelPanel 后靠它守住。
+      # 驱动的是真实 brokenInfoOf / mainIdOf（不是副本）：本会话才标红、密钥事用警示色、
+      # 徽标数、成员会话按主对话判断、swapFromRef 的 trim、拿不到结论不误标。
+      # 红色贴片长什么样、点了会怎样、上游新功能还在不在，要浏览器，见 .deva/qa/model-panel/。
+      - name: 模型失效标红
+        run: node .deva/qa/check-model-swap.cjs

@@ -7,7 +7,7 @@
  * 换到窗口小的模型，占用会跳高甚至马上压缩，先看到心里有数。
  */
 import { useState } from 'react'
-import { Check, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Check, ChevronLeft, ChevronRight, KeyRound } from 'lucide-react'
 import type { ModelDef, Provider } from '../mock/models'
 import { autoContextWindow, formatTokens } from '../../../shared/context'
 import { useI18n } from '../i18n/i18n'
@@ -21,11 +21,17 @@ export function ModelMenu({
   groups,
   activePid,
   activeMid,
+  blocked,
   onPick
 }: {
   groups: ModelGroup[]
   activePid: string | null
   activeMid: string | null
+  /**
+   * 「密钥用不了」的服务商 id（无密钥 / 解不开）：名下模型列出来但标成不可选，并写明原因。
+   * 不直接不列：删掉用户只会觉得「我的服务商怎么不见了」，不知道该先去填密钥。
+   */
+  blocked: Set<string>
   onPick: (pid: string, mid: string) => void
 }): React.JSX.Element {
   const { t } = useI18n()
@@ -59,6 +65,7 @@ export function ModelMenu({
             >
               <span className="model-pick__dot" style={{ background: p.accent }} />
               <span className="model-pick__name">{p.name}</span>
+              {blocked.has(p.id) && <KeyRound size={11} className="cf-mp__keyicon" />}
               <span className="cf-mp__count">{models.length}</span>
               <ChevronRight size={13} className="cf-mp__chev" />
             </button>
@@ -67,6 +74,7 @@ export function ModelMenu({
       </div>
     )
 
+  const keyBlocked = blocked.has(group.p.id)
   return (
     <div className="cf-mp__sub" role="menu">
       {groups.length > 1 && (
@@ -82,6 +90,8 @@ export function ModelMenu({
         <span className="model-pick__dot" style={{ background: group.p.accent }} />
         <span className="model-pick__group-name">{group.p.name}</span>
       </div>
+      {/* 整个服务商不可用时在标题下写明原因：否则用户会以为是某个模型坏了 */}
+      {keyBlocked && <div className="cf-mp__blockednote">{t('cf.modelSwap.providerNoKey')}</div>}
       <div className="cf-mp__list">
         {group.models.map((m) => {
           const on = group.p.id === activePid && m.id === activeMid
@@ -91,7 +101,9 @@ export function ModelMenu({
               type="button"
               role="menuitemradio"
               aria-checked={on}
-              className={`model-pick__item${on ? ' is-active' : ''}`}
+              aria-disabled={keyBlocked || undefined}
+              disabled={keyBlocked}
+              className={`model-pick__item${on ? ' is-active' : ''}${keyBlocked ? ' is-unusable' : ''}`}
               title={m.name === m.id ? m.id : `${m.name} · ${m.id}`}
               onClick={() => onPick(group.p.id, m.id)}
             >
