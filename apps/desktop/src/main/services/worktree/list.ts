@@ -335,14 +335,15 @@ const GIT_CONCURRENCY = 8
  * 限并发跑一批异步任务，结果顺序与输入一致。
  *
  * **单条失败不影响其它条**：每个 worker 只处理一个任务，某个任务抛错时只让它自己那份变
- * `undefined`（`fail` 分支），worker 继续取下一个。这样「一个坏掉的 worktree」不会把整张列表拖垮
+ * `undefined`，worker 继续取下一个。这样「一个坏掉的工作区」不会把整张列表拖垮
  * ——这是并行化最容易引入的回归（串行时抛错会直接中断，并行时若不 catch 会变成 unhandled rejection）。
  *
- * 输入任务本身不该抛错（调用方都在内部 try），这里兜的是「万一」。
+ * `labelOf` 只用于日志：出问题时要能立刻知道是哪一条，只打序号还得回去数一遍。
  */
 async function runLimited<T>(
   tasks: Array<() => Promise<T>>,
-  limit: number
+  limit: number,
+  labelOf?: (i: number) => string
 ): Promise<Array<T | undefined>> {
   const results: Array<T | undefined> = new Array(tasks.length).fill(undefined)
   let next = 0
@@ -353,8 +354,12 @@ async function runLimited<T>(
       try {
         results[i] = await tasks[i]()
       } catch (e) {
-        // 单条失败：留 undefined，其余照常
-        console.warn(`[worktree] list 单项失败（#${i}）：`, (e as Error)?.message ?? e)
+        /*
+         * 单条失败：留 undefined（**不给假状态**，见 listWorktrees 里 finalItems 的注释），
+         * 其余照常。这里把 label 打出来，排查时不用回去数序号。
+         */
+        const who = labelOf ? labelOf(i) : `#${i}`
+        console.warn(`[worktree] list 单项失败（${who}）：`, (e as Error)?.message ?? e)
       }
     }
   }
@@ -459,14 +464,25 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
         /* 归一化失败：当作没登记，state 会落到 dir-missing */
       }
       /*
-       * 三条只读调用并发。目录不在时前两条不问（那条命令必失败）：
-       * `headBranch` 只用于算 state，`dirtyCount` 对不存在的目录给 null。
+       * 两条只读调用并发（`headBranch` 不再单独跑 git，直接从 porcelain 条目读）。
+       *
+       * ## `dirtyCount === null` 同时是「git 在这个目录里能不能跑」的探针
+       *
+       * `status` 在目录存在的前提下失败，只有一种原因：这个工作区自己的 git 坏了
+       * （`.git` 文件被删/改名、磁盘上的 gitdir 指向失效等）。此时 **porcelain 里那条 branch
+       * 是主仓库登记中的旧值**，不能当「它还在自己的分支上」的证据——改之前这里会真去跑
+       * `rev-parse`，那种情况返回 null → `branch-mismatch`；改之后若不判这一下就会变成 `ok`，
+       * 界面显示「正常」，用户完全看不出工作区已经坏了。
+       *
+       * 所以：status 失败 ⇒ 不信任 porcelain 的 branch，按 null 交上去（落 `branch-mismatch`，
+       * 与改之前一致）。不额外跑 git——status 本来就要跑。
        */
-      const [headBranch, dirtyCount, mergeInProgress] = await Promise.all([
-        Promise.resolve(exists && entry ? headBranchFromEntry(entry) : null),
+      const [dirtyCount, mergeInProgress] = await Promise.all([
         exists ? dirtyCountOf(rec.path) : Promise.resolve(null),
         mergeInProgressCached(rec.targetBranch, repoState?.entries ?? [])
       ])
+      const gitUsable = exists && dirtyCount !== null
+      const headBranch = exists && entry ? (gitUsable ? headBranchFromEntry(entry) : null) : null
       const { state, actualBranch } = computeState({
         record: rec,
         dirExists: exists,
@@ -496,39 +512,28 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
       }
       return item
     }),
-    GIT_CONCURRENCY
+    GIT_CONCURRENCY,
+    // 日志里带上路径：只打序号的话排查还得回去数
+    (i) => records[i]?.path ?? `#${i}`
   )
 
   /*
-   * 单条任务的异常（理论上不该发生——里面的 git 调用都自带失败兜底）**不能让它从列表里消失**：
-   * 用户会看到工作区没了，比看到一条状态不准的条目更糟（可能以为工作区被删了）。
-   * 所以兜一条只带记录本身字段的条目，`state` 取最保守的 `dir-missing`，其余可空字段给 null，
-   * 并在 `console.warn` 里留现场（上面 runLimited 已经记了序号）。
+   * 单条任务的异常（理论上不该发生——里面的 git 调用都自带失败兜底）**不兜假状态**：
+   * 直接把那条从 items 里滤掉，让 `runLimited` 的 `console.warn`（带路径）去留现场。
+   *
+   * ## 为什么不兜「dir-missing」这样的保守值（上一版的做法）
+   *
+   * 那个兜底会把一个**目录其实存在**的工作区显示成「工作区目录已缺失」，还给它「重建」按钮。
+   * 用户会照着点——等 P2 的 rebuild 接通后，那就是「对一个存在的目录执行 git worktree add」。
+   * 一句错的文案 + 一个可执行的危险动作，比少一行更糟；而且它把一个**程序 bug** 伪装成了
+   * **正常的产品状态**，排查时完全看不出异常。
+   *
+   * ## 那「工作区凭空消失」会让用户以为被删了吗
+   *
+   * 会有一点，但两害相权：消失 + warn 是可以查的（日志里有路径），假状态是查不出来的
+   * （没有日志，界面看起来一切正常）。且这条路本来就只在代码有 bug 时才走到。
    */
-  const finalItems: WorktreeListItem[] = items.map((it, i) => {
-    if (it) return it
-    const rec = records[i]
-    return {
-      path: rec.path,
-      compareKey: rec.compareKey,
-      repoRoot: rec.repoRoot,
-      branch: rec.branch,
-      baseSha: rec.baseSha,
-      baseLabel: rec.baseLabel,
-      targetBranch: rec.targetBranch,
-      createdAt: rec.createdAt,
-      // 算不出来时按「目录缺失」呈现：这是唯一不需要额外 git 就能断定的保守值
-      state: 'dir-missing' as WorktreeState,
-      deps: rec.deps,
-      ...(rec.depsDetail !== undefined ? { depsDetail: rec.depsDetail } : {}),
-      sessionCount: counts.get(rec.compareKey) ?? 0,
-      sizeBytes: null,
-      lockHolder: null,
-      dirtyCount: null,
-      mergeInProgress: null,
-      mergeGate: { mayMerge: false, blocker: 'source-missing' as const }
-    }
-  })
+  const finalItems = items.filter((it): it is WorktreeListItem => it !== undefined)
 
   // unmanaged：git 登记里有、记录里没有的
   const managed = new Set(records.map((r) => r.compareKey))

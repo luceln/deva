@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { getRecord, upsertRecord, type DepsState, type WorktreeRecord } from './store'
 import { publishWorktreeChanged, publishWorktreeProgress } from '../chat-bus'
+import { invalidateSize } from './list'
 
 /**
  * 依赖安装（spec §3.6 Step 4）：**异步、可降级、失败不回滚 worktree**。
@@ -106,6 +107,17 @@ function finish(
   }
   const ok = upsertRecord(next)
   if (!ok) console.warn(`[worktree] deps 状态写入失败（${record.branch} → ${deps}）`)
+  /*
+   * 安装写过磁盘（成功写满 node_modules，失败也可能写了一半），**体积缓存必须失效**。
+   *
+   * 少了这一步的表现很隐蔽：`publishWorktreeChanged()` 会让界面重拉列表，而重拉走
+   * `sizeBytesOf` 命中**旧缓存**——于是用户装完依赖、刷新了列表，看到的还是装之前的体积
+   * （比如 12 MB 而不是 480 MB），而且没有任何报错。缓存本身没错（目录体积不会自己变小），
+   * 错在没把「安装」这个会改变体积的事件告诉它。
+   *
+   * 只在真动过磁盘的状态上失效：`pending`/`installing`/`skipped` 都不改变目录内容。
+   */
+  if (deps === 'ready' || deps === 'failed') invalidateSize(record.compareKey)
   publishWorktreeChanged()
   return { ok, deps, ...(detail !== undefined ? { detail } : {}) }
 }
