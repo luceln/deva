@@ -186,7 +186,7 @@ export function ModelSwapDialog({
         res.skipped.length ? t('cf.modelSwap.skippedN').replace('{n}', String(res.skipped.length)) : ''
       ]
         .filter(Boolean)
-        .join(' · '),
+        .join('，'),
       // 有跳过项时留足时间点开看是哪些会话（它们是正常保留，但用户可能会疑惑为什么没全换）。
       duration: res.skipped.length ? 8000 : undefined
     })
@@ -214,7 +214,7 @@ export function ModelSwapDialog({
             {changeable.length
               ? t('cf.modelSwap.willChange').replace('{n}', String(changeable.length))
               : ''}
-            {changeable.length && kept.length ? ' · ' : ''}
+            {changeable.length && kept.length ? '，' : ''}
             {kept.length ? t('cf.modelSwap.keep').replace('{n}', String(kept.length)) : ''}
           </span>
         </div>
@@ -328,7 +328,7 @@ function Result({
     result.failed.length ? t('cf.modelSwap.failedN').replace('{n}', String(result.failed.length)) : ''
   ]
     .filter(Boolean)
-    .join(' · ')
+    .join('，')
   return (
     <div className="cf-swap__section">
       <div className="cf-swap__result">{summary}</div>
