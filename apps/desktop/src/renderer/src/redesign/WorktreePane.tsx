@@ -15,6 +15,7 @@ import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
 import { useWorktree } from '../store/worktree'
 import type {
+  MergeBlocker,
   WorktreeInstallResult,
   WorktreeListItem,
   WorktreeState
@@ -26,13 +27,14 @@ import './worktree-pane.css'
  *
  * ## 这个面板最重要的一条：什么都不推断
  *
- * `state`、`deps`、`sessionCount`、`sizeBytes`、`lockHolder` **全部原样显示主进程给的值**。
- * 界面里看不到任何一处「按 state 自己推算能不能做某件事」——那正是 A48 / R13 要防的事：
+ * `state`、`deps`、`sessionCount`、`sizeBytes`、`lockHolder`、`dirtyCount`、`mergeGate` **全部原样显示
+ * 主进程给的值**。界面里看不到任何一处「按 state 自己推算能不能做某件事」——那正是 A48 / R13 要防的事：
  * 两处各算一遍，迟早一处说能、一处拒绝，而用户只会看到「按钮能点，点了报错」。
  *
- * 合并按钮现在**没有可用性门可读**：`mergeGate` 还没进 `WorktreeListItem`（合并是 P2 的东西）。
- * 所以这里既不按 `state` 自己判「能不能合并」，也不假装能合并——按钮保持未接通提示，
- * 等主进程把 `mergeGate` 加进快照后直接读它即可（注释里留了位置）。
+ * 合并按钮就是这条的实例：`disabled` 只读 `mergeGate.mayMerge`，`title` 只读 `mergeGate.blocker`。
+ * 主进程已经算好四个 blocker 的优先级，界面连「哪个先」都不判。真正的 `worktree:merge` IPC 还没落地（P2），
+ * 所以 `mayMerge` 为真时点下去给的是「还没接通」——这两种状态必须能区分：一个是「你需要先做点什么」，
+ * 另一个是「这个功能还没做」。
  *
  * ## 「无关联会话」与 `state` 正交（§2.5 / A54）
  *
@@ -45,6 +47,18 @@ import './worktree-pane.css'
  * 判据是 `state`：`dir-missing` / `prunable` → 目录都没了，无从统计 → 「占用未知」；
  * 其余 → 目录在，`null` 只能是还没算完 → 「统计中…」。
  * 后者算完主进程会发 `worktree:changed`，store 重拉后自然变成数字，**不需要轮询**。
+ *
+ * ## `dirtyCount` 的 `null` 与 `0` 不是同一件事
+ *
+ * 主进程只在**目录不存在**时给 `null`（无法统计），目录在且干净时给 `0`。
+ * 把 `null` 渲染成 0（或反过来）会让用户看到「没有未提交改动」而实际是「根本看不了」，
+ * 于是放心地在别处继续改同一批文件。故三态各自出文案：`null` →「无法统计改动」、`>0` →「N 个未提交改动」、
+ * `0` →「没有未提交改动」。
+ *
+ * ## `mergeInProgress` 只报事实，不假装能处理（§13.10）
+ *
+ * 非 null 时显示冲突数。冲突处理窗口是 P2 的事，所以「处理冲突」按钮走与其它未落地操作
+ * 相同的诚实提示，而不是弹一个空面板。
  *
  * ## `deps === 'failed'` 必须同时说「会话仍可使用」（§7.7 屏⑤ / A27）
  *
@@ -72,6 +86,18 @@ const DEPS_KEY: Record<WorktreeListItem['deps'], string> = {
   ready: 'cf.wt.deps.ready',
   failed: 'cf.wt.deps.failed',
   skipped: 'cf.wt.deps.skipped'
+}
+
+/**
+ * `mergeGate.blocker` → 文案。四个取值各对应「为什么不能合并」，**由主进程给**（含优先级），
+ * 这里只负责翻译。`Record<MergeBlocker, string>` 让漏一个取值就编译不过——新增 blocker 时
+ * 界面不会静默显示成空白。
+ */
+const BLOCKER_KEY: Record<MergeBlocker, string> = {
+  'target-not-set': 'cf.wt.merge.blocker.targetNotSet',
+  'source-missing': 'cf.wt.merge.blocker.sourceMissing',
+  'source-branch-changed': 'cf.wt.merge.blocker.sourceBranchChanged',
+  installing: 'cf.wt.merge.blocker.installing'
 }
 
 /** 字节数 → 人读的形态。`null` 由调用方区分「统计中」与「占用未知」，不在这里兜。 */
@@ -227,6 +253,23 @@ function WorktreeCard({
           <HardDrive size={11} />
           {sizeText}
         </span>
+        {/*
+          dirtyCount（§7.7「N 个未提交改动」）：`null` 与 `0` 语义不同，**不能当成同一件事**——
+          `null` 是「目录不在、无法统计」，`0` 是「目录在且干净」。把 null 渲染成 0 会让用户以为
+          工作区是干净的，而实际是根本没法看。
+        */}
+        {view.dirtyCount === null ? (
+          <span className="cf-wt__metaitem">{t('cf.wt.dirtyUnknown')}</span>
+        ) : view.dirtyCount > 0 ? (
+          <span
+            className="cf-wt__metaitem is-warn"
+            title={t('cf.wt.dirtyMeta').replace('{n}', String(view.dirtyCount))}
+          >
+            {t('cf.wt.dirtyMeta').replace('{n}', String(view.dirtyCount))}
+          </span>
+        ) : (
+          <span className="cf-wt__metaitem">{t('cf.wt.dirtyClean')}</span>
+        )}
         {view.baseLabel && (
           <span className="cf-wt__metaitem" title={view.baseLabel}>
             {t('cf.wt.baseLabel').replace('{label}', view.baseLabel)}
@@ -261,12 +304,40 @@ function WorktreeCard({
         </div>
       )}
 
+      {/*
+        合并进行中（§13.10）：target 检出里还有没收尾的合并。这里给的是「有几处冲突」这一个事实，
+        冲突处理窗口属于 P2 还没做，所以按钮明确标成未接通——不假装点了能打开。
+      */}
+      {view.mergeInProgress !== null && (
+        <div className="cf-wt__note is-warn">
+          <span>{t('cf.wt.mergeInProgress').replace('{n}', String(view.mergeInProgress.unmergedCount))}</span>
+          <button type="button" className="btn btn--ghost cf-wt__notebtn" onClick={() => onNotWired('conflicts')}>
+            {t('cf.wt.merge.resolve')}
+          </button>
+        </div>
+      )}
+
       <footer className="cf-wt__actions">
         {/*
-          合并按钮：`mergeGate` 还没进 WorktreeListItem（P2 才有），故这里**不按 state 自己判可用性**。
-          等字段到位后改成 `disabled={!view.mergeGate.mayMerge}` + `title` 取 blocker 文案即可。
+          合并按钮的可用性**只读** `mergeGate`（A48）：主进程算、界面照着禁用。
+          这里不出现任何 `state === ...` 的推断——两处各算一遍，迟早一处说能、一处拒绝，
+          用户看到的就是「按钮能点，点了报错」。
+
+          `mergeGate` 有 blocker 时禁用并说明原因；`mayMerge` 为真时按钮可用，但真正的
+          `worktree:merge` IPC 还没落地（P2），点了给诚实的未接通提示。两种状态必须区分开：
+          把「不能合并」和「还没做」混成同一种表现，用户没法判断是该改点什么还是该等版本。
         */}
-        <button type="button" className="btn btn--ghost" onClick={() => onNotWired('merge')}>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          disabled={!view.mergeGate.mayMerge}
+          title={
+            view.mergeGate.blocker
+              ? t(BLOCKER_KEY[view.mergeGate.blocker])
+              : t('cf.wt.merge.title').replace('{target}', view.targetBranch ?? '')
+          }
+          onClick={() => onNotWired('merge')}
+        >
           {t('cf.wt.merge.merge')}
         </button>
         {/* 重建只对「目录不在」有意义；prunable 走「移除登记」（A33：必须用户点） */}

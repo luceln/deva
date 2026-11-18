@@ -78,3 +78,9 @@ jobs:
       # 这条删掉不会有任何编译或类型反馈，只能靠判据守。运行时位置/可读性要浏览器，见 .deva/qa/。
       - name: 依赖失败提示
         run: node .deva/qa/check-deps-fail-note.cjs
+
+      # worktree 卡片的 mergeGate / dirtyCount / mergeInProgress 三个字段：拿到却不用是安静失效的
+      # （按钮永远可点、目录没了却显示「干净」、半截合并没人知道）。A48 要求 disabled 只读主进程算好的
+      # mergeGate，不按 state 推算——这条一旦写成常量或推断式，编译与类型都不会报错，只能靠判据守。
+      - name: 工作区字段渲染
+        run: node .deva/qa/check-worktree-fields.cjs

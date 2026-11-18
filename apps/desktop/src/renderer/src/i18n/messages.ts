@@ -1679,6 +1679,9 @@ const zhCN: MessageTree = {
       noSession: '无关联会话',
       sessionCount: '{n} 个会话',
       dirtyMeta: '{n} 个未提交改动',
+      // dirtyCount 的 null 与 0 语义不同：null 是「目录不在、无法统计」，0 是「干净」。
+      dirtyUnknown: '无法统计改动',
+      dirtyClean: '没有未提交改动',
       memoryShared: '与主仓库 {repoRoot} 共享项目私有记忆',
       rebuild: '重建',
       state: {
@@ -1715,9 +1718,15 @@ const zhCN: MessageTree = {
       merge: {
         merge: '合并',
         title: '合并回 {target}',
-        targetNotSet: '还没有合并目标。选一个本地分支作为目标。',
-        notCheckedOut: '分支当前没有被任何工作区检出，无法合并。',
-        sourceBranchChanged: '该工作区已不在原分支上，无法合并。'
+        // 四个 blocker 与主进程 `MergeBlocker` 一一对应（`Record<MergeBlocker, string>` 兜住漏配）。
+        // 每句都说清「为什么不能合并」，而不是只说「不能合并」——用户要的是下一步该做什么。
+        blocker: {
+          targetNotSet: '还不能合并：还没指定要合回哪个分支。先在合并面板里选一个目标分支。',
+          sourceMissing: '还不能合并：工作区目录已不存在。',
+          sourceBranchChanged: '还不能合并：工作区已不在它原来的分支上。',
+          installing: '还不能合并：依赖还在安装，装完再合并。'
+        },
+        resolve: '处理冲突'
       },
       reveal: '在文件管理器打开'
     },
@@ -3472,6 +3481,8 @@ const en: MessageTree = {
       noSession: 'No linked chats',
       sessionCount: '{n} chats',
       dirtyMeta: '{n} uncommitted changes',
+      dirtyUnknown: 'Changes unknown',
+      dirtyClean: 'No uncommitted changes',
       memoryShared: 'Shares project memory with the main repo {repoRoot}',
       rebuild: 'Rebuild',
       state: {
@@ -3507,9 +3518,13 @@ const en: MessageTree = {
       merge: {
         merge: 'Merge',
         title: 'Merge back into {target}',
-        targetNotSet: 'No merge target yet. Pick a local branch as the target.',
-        notCheckedOut: 'That branch is not checked out in any worktree, so it cannot be merged.',
-        sourceBranchChanged: 'This worktree is no longer on its original branch, so it cannot be merged.'
+        blocker: {
+          targetNotSet: 'Cannot merge yet: no target branch is set. Pick one in the merge panel.',
+          sourceMissing: 'Cannot merge yet: the worktree folder no longer exists.',
+          sourceBranchChanged: 'Cannot merge yet: this worktree is no longer on its original branch.',
+          installing: 'Cannot merge yet: dependencies are still installing.'
+        },
+        resolve: 'Resolve conflicts'
       },
       reveal: 'Show in file manager'
     },
