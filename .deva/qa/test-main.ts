@@ -3027,6 +3027,61 @@ async function scenarioWorktree(): Promise<void> {
   check('A27：安装失败/中断都不会删 worktree 目录', fs.existsSync(wt3), String(fs.existsSync(wt3)))
   check('A27：分支也还在（不回滚 = 用户能继续读代码）', gitOut(repo, 'branch', '--list', rec3.branch).includes(rec3.branch), gitOut(repo, 'branch', '--list', rec3.branch))
 
+  // ══ A27 的真实安装路径：installing → ready（用本地 file: 依赖，几秒完成、不联网）══
+  /*
+   * 此前只验了检测规则与「失败不回滚」，**没验过「装成功」**。这条补上它：
+   * 假包里只有一个 file: 依赖，`npm ci` 几秒结束、不联网，但它走的是与生产完全相同的那条
+   * 「起子进程 → 等 exit 0 → 写 ready」链路。
+   *
+   * npm 不可用时显式 SKIP 并计数（不当作通过）。
+   */
+  const R = await import('./a27-real-install')
+  const tinyRoot = path.join(DST, 'tiny-install')
+  const tinyRepo = R.makeTinyInstallableRepo(tinyRoot)
+  if (!tinyRepo) {
+    info('A27 真实安装路径', 'SKIP —— npm 不可用或 lockfile 生成失败')
+  } else {
+    eq('A27：自动生成的 lockfile 被检测规则命中 npm ci', DEPS.detectInstallPlan(tinyRepo).argv?.join(' '), 'npm ci')
+    const inst = R.runNpmCi(tinyRepo)
+    eq('A27：npm ci 成功退出（installing → ready 的前提）', inst.ok, true)
+    check('A27：依赖真的落进 node_modules（不是「看着成功」）', R.depInstalled(tinyRepo), String(R.depInstalled(tinyRepo)))
+    if (!inst.ok) info('A27 npm ci 失败现场', inst.detail)
+  }
+
+  // ══ IPC 真的接上了：`worktree:list` 返回的是**快照**，不是记录数组 ══
+  /*
+   * 这条防的是一类特别隐蔽的漏：`list.ts` 写好了、也测了，但 `ipc.ts` 还挂着旧的
+   * `listRecords()`（返回裸记录数组），于是渲染层拿不到 `state` / `sizeBytes` / `sessionCount`。
+   * 直接调 `listWorktrees()` 的测试**发现不了**它——必须走 IPC 处理器。
+   */
+  const IPC = await import('../../apps/desktop/src/main/services/worktree/ipc')
+  const stub = require('./stub-electron.cjs') as {
+    __test: { ipcHandlers: Map<string, (...a: unknown[]) => unknown> }
+  }
+  // stub 的 env 校验会在 import 期抛，本场景已设好；直接注册即可
+  IPC.registerWorktreeIpc(() => null)
+  const listHandler = stub.__test.ipcHandlers.get('worktree:list')
+  check('IPC：worktree:list 已注册', typeof listHandler === 'function', typeof listHandler)
+  const viaIpc = (await listHandler?.({})) as {
+    items?: Array<{ state?: string; sizeBytes?: unknown }>
+    unmanaged?: unknown
+    storeUnreadable?: unknown
+  }
+  check(
+    'IPC：worktree:list 返回快照（items + unmanaged + storeUnreadable），不是裸记录数组',
+    Array.isArray(viaIpc?.items) &&
+      Array.isArray(viaIpc?.unmanaged) &&
+      typeof viaIpc?.storeUnreadable === 'boolean',
+    JSON.stringify(Object.keys(viaIpc ?? {}))
+  )
+  check(
+    'IPC：快照每条都带主进程算好的 state（渲染层不复算，A48）',
+    (viaIpc?.items ?? []).length > 0 && (viaIpc?.items ?? []).every((i) => typeof i.state === 'string'),
+    JSON.stringify((viaIpc?.items ?? []).map((i) => i.state))
+  )
+  const instHandler = stub.__test.ipcHandlers.get('worktree:install-deps')
+  check('IPC：worktree:install-deps 已注册', typeof instHandler === 'function', typeof instHandler)
+
   // ══ A48：判定只在主进程，渲染层拿到的就是结果 ══
   const snapFinal = await L.listWorktrees()
   const finalItem = snapFinal.items.find((i) => i.compareKey === rec3.compareKey)
