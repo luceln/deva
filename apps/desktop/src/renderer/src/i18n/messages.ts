@@ -1666,6 +1666,7 @@ const zhCN: MessageTree = {
       refresh: '刷新',
       empty: '还没有独立工作区。在新建会话时选「独立工作区」即可创建。',
       loadFailed: '读取工作区列表失败：{msg}',
+      storeUnreadable: '工作区记录文件读不出来，下面显示的不是全部工作区。可以在设置里重试，或检查 ~/.deva 下的记录文件。',
       notWired: '这个操作还没接通',
       detached: '分离头指针',
       unmanagedTitle: 'git 里登记、但不是 Deva 建的',
@@ -1692,7 +1693,17 @@ const zhCN: MessageTree = {
         ready: '依赖就绪',
         failed: '依赖安装失败',
         skipped: '无需安装依赖',
-        retry: '重试安装'
+        retry: '重试安装',
+        // §7.7 屏⑤：失败时必须与明细同屏出现。只说失败不说还能用，用户会以为整个工作区废了。
+        stillUsable: '会话仍可使用，只是 pnpm / npm 之类的命令会失败。',
+        retryReason: {
+          'not-found': '找不到这个工作区，可能已被删除。',
+          'already-installing': '依赖正在安装，等这一轮结束再看。',
+          'no-lockfile': '没有 lockfile，无处可装依赖。',
+          'unsupported-language': '这个项目不是 Node 工程，Deva 不代为安装依赖。',
+          'write-failed': '写记录失败，稍后再试。',
+          error: '发起安装失败，稍后再试。'
+        }
       },
       remove: {
         title: '删除工作区',
@@ -3448,6 +3459,7 @@ const en: MessageTree = {
       refresh: 'Refresh',
       empty: 'No worktrees yet. Pick "separate worktree" when starting a new chat to create one.',
       loadFailed: 'Could not load worktrees: {msg}',
+      storeUnreadable: 'The worktree record file could not be read, so this is not the full list. Retry, or check the record file under ~/.deva.',
       notWired: 'This action is not wired up yet',
       detached: 'detached HEAD',
       unmanagedTitle: 'Registered in git but not created by Deva',
@@ -3474,7 +3486,16 @@ const en: MessageTree = {
         ready: 'Dependencies ready',
         failed: 'Dependency install failed',
         skipped: 'No dependencies needed',
-        retry: 'Retry install'
+        retry: 'Retry install',
+        stillUsable: 'The chat is still usable; only pnpm / npm style commands will fail.',
+        retryReason: {
+          'not-found': 'This worktree no longer exists.',
+          'already-installing': 'Dependencies are installing; check again when this run finishes.',
+          'no-lockfile': 'No lockfile, so there is nothing to install.',
+          'unsupported-language': 'This is not a Node project, so Deva will not install dependencies for it.',
+          'write-failed': 'Could not write the record; try again later.',
+          error: 'Could not start the install; try again later.'
+        }
       },
       remove: {
         title: 'Remove worktree',

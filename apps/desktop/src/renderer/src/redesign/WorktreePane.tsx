@@ -12,8 +12,13 @@ import {
   Trash2
 } from 'lucide-react'
 import { useI18n } from '../i18n/i18n'
+import { useToast } from '../components/ToastProvider'
 import { useWorktree } from '../store/worktree'
-import type { DepsState, MergeBlocker, WorktreeState, WorktreeView } from '../store/worktree-view'
+import type {
+  WorktreeInstallResult,
+  WorktreeListItem,
+  WorktreeState
+} from '../../../shared/worktree-protocol'
 import './worktree-pane.css'
 
 /**
@@ -21,12 +26,13 @@ import './worktree-pane.css'
  *
  * ## 这个面板最重要的一条：什么都不推断
  *
- * `state`、`deps`、`sessionCount`、`dirtyCount`、`sizeBytes`、`mergeGate` **全部原样显示主进程给的值**。
- * 界面里看不到任何一处 `if (state === ...) 认为能合并` —— 那正是 A48 / R13 要防的事：
+ * `state`、`deps`、`sessionCount`、`sizeBytes`、`lockHolder` **全部原样显示主进程给的值**。
+ * 界面里看不到任何一处「按 state 自己推算能不能做某件事」——那正是 A48 / R13 要防的事：
  * 两处各算一遍，迟早一处说能、一处拒绝，而用户只会看到「按钮能点，点了报错」。
  *
- * 具体到「合并」按钮：可用性只读 `mergeGate.mayMerge`。`state` 是 `branch-mismatch` 时按钮之所以禁用，
- * 是因为**主进程在 mergeGate 里已经这么说了**，不是因为界面看到了 `branch-mismatch`。
+ * 合并按钮现在**没有可用性门可读**：`mergeGate` 还没进 `WorktreeListItem`（合并是 P2 的东西）。
+ * 所以这里既不按 `state` 自己判「能不能合并」，也不假装能合并——按钮保持未接通提示，
+ * 等主进程把 `mergeGate` 加进快照后直接读它即可（注释里留了位置）。
  *
  * ## 「无关联会话」与 `state` 正交（§2.5 / A54）
  *
@@ -39,6 +45,12 @@ import './worktree-pane.css'
  * 判据是 `state`：`dir-missing` / `prunable` → 目录都没了，无从统计 → 「占用未知」；
  * 其余 → 目录在，`null` 只能是还没算完 → 「统计中…」。
  * 后者算完主进程会发 `worktree:changed`，store 重拉后自然变成数字，**不需要轮询**。
+ *
+ * ## `deps === 'failed'` 必须同时说「会话仍可使用」（§7.7 屏⑤ / A27）
+ *
+ * 只给 `depsDetail` 的 20 行报错，用户会以为这块废了，而实际能继续用：工作区本身是好的，
+ * 只是 pnpm / npm 类命令会失败。这句话与明细**同屏出现**，不折叠、不做成 tooltip ——
+ * 收起来就等于没说。
  *
  * ## A33：不自动 prune
  *
@@ -54,19 +66,12 @@ const STATE_KEY: Record<WorktreeState, string> = {
   'branch-mismatch': 'cf.wt.state.branchMismatch'
 }
 
-const DEPS_KEY: Record<DepsState, string> = {
+const DEPS_KEY: Record<WorktreeListItem['deps'], string> = {
   pending: 'cf.wt.deps.pending',
   installing: 'cf.wt.deps.installing',
   ready: 'cf.wt.deps.ready',
   failed: 'cf.wt.deps.failed',
   skipped: 'cf.wt.deps.skipped'
-}
-
-const BLOCKER_KEY: Record<MergeBlocker, string> = {
-  'target-not-set': 'cf.wt.merge.targetNotSet',
-  'source-missing': 'cf.wt.merge.notCheckedOut',
-  'source-branch-changed': 'cf.wt.merge.sourceBranchChanged',
-  installing: 'cf.wt.deps.installing'
 }
 
 /** 字节数 → 人读的形态。`null` 由调用方区分「统计中」与「占用未知」，不在这里兜。 */
@@ -85,14 +90,17 @@ function formatBytes(n: number): string {
 export function WorktreePane(): React.JSX.Element {
   const { t } = useI18n()
   const { snapshot, loading, error, refresh } = useWorktree()
+  /** 未接通的按钮点了之后的短暂反馈（删除/重建/prune/合并的 IPC 还没落地）。 */
   const [pending, setPending] = useState<string | null>(null)
 
-  const rows = snapshot?.worktrees ?? []
+  const rows = snapshot?.items ?? []
   const unmanaged = snapshot?.unmanaged ?? []
 
-  // 操作（删除 / 重建 / prune）目前没有 IPC：主进程侧 T3.1/T3.3 还没落地。
-  // 这里**不假装成功**——点下去先禁用并说明「尚未接通」，而不是弹个 toast 说删好了。
-  // 等 IPC 到位后，把 onRemove / onRebuild / onPrune 换成真实调用即可，卡片结构不用动。
+  /*
+   * 删除 / 重建 / prune / 合并的 IPC（T3.1 / T3.3 / T2.x）还没落地，故这里**不假装成功**：
+   * 点下去只提示「这个操作还没接通」，不弹「已删除」这种假 toast。
+   * IPC 到位后把这些换成真实调用即可，卡片结构与样式都不用动。
+   */
   const notWired = (name: string): void => {
     setPending(name)
     setTimeout(() => setPending(null), 1200)
@@ -124,16 +132,21 @@ export function WorktreePane(): React.JSX.Element {
         </div>
       )}
 
-      {rows.length === 0 && !loading && !error && <div className="cf-wt__empty">{t('cf.wt.empty')}</div>}
+      {/* 记录文件读坏了：`items` 为空不代表没有工作区，必须说清楚，否则用户以为工作区都没了 */}
+      {snapshot?.storeUnreadable && (
+        <div className="cf-wt__err" role="alert">
+          <AlertTriangle size={14} />
+          <span>{t('cf.wt.storeUnreadable')}</span>
+        </div>
+      )}
+
+      {rows.length === 0 && !loading && !error && !snapshot?.storeUnreadable && (
+        <div className="cf-wt__empty">{t('cf.wt.empty')}</div>
+      )}
 
       <div className="cf-wt__list">
         {rows.map((w) => (
-          <WorktreeCard
-            key={w.compareKey || w.path}
-            view={w}
-            pending={pending}
-            onNotWired={notWired}
-          />
+          <WorktreeCard key={w.compareKey || w.path} view={w} pending={pending} onNotWired={notWired} />
         ))}
       </div>
 
@@ -152,12 +165,6 @@ export function WorktreePane(): React.JSX.Element {
           ))}
         </section>
       )}
-
-      {snapshot?.memoryRoot && (
-        <p className="cf-wt__memnote">
-          {t('cf.wt.memoryShared').replace('{repoRoot}', snapshot.memoryRoot)}
-        </p>
-      )}
     </div>
   )
 }
@@ -168,18 +175,19 @@ function WorktreeCard({
   pending,
   onNotWired
 }: {
-  view: WorktreeView
+  view: WorktreeListItem
   pending: string | null
   onNotWired: (name: string) => void
 }): React.JSX.Element {
   const { t } = useI18n()
+  const toast = useToast()
 
   const stateKey = STATE_KEY[view.state]
   // branch-mismatch 的文案要带「实际检出的是哪个分支」：只说「不匹配」用户不知道该切回哪。
   const stateText =
     view.state === 'branch-mismatch'
       ? t(stateKey)
-          .replace('{actual}', view.detail?.headBranch ?? t('cf.wt.detached'))
+          .replace('{actual}', view.actualBranch ?? t('cf.wt.detached'))
           .replace('{branch}', view.branch)
       : t(stateKey)
 
@@ -190,15 +198,7 @@ function WorktreeCard({
 
   // sizeBytes 的三种展示（见文件头注释：null 的语义由 state 区分）。
   const sizeText =
-    view.sizeBytes != null
-      ? formatBytes(view.sizeBytes)
-      : dirGone
-        ? t('cf.wt.sizeUnknown')
-        : t('cf.wt.sizePending')
-
-  // 合并按钮：只读主进程给的 mergeGate，绝不按 state 自己推算（A48 / R13）。
-  const mayMerge = view.mergeGate?.mayMerge === true
-  const blockerText = view.mergeGate?.blocker ? t(BLOCKER_KEY[view.mergeGate.blocker]) : ''
+    view.sizeBytes != null ? formatBytes(view.sizeBytes) : dirGone ? t('cf.wt.sizeUnknown') : t('cf.wt.sizePending')
 
   return (
     <article className={`cf-wt__card${badState ? ' is-bad' : ''}`}>
@@ -227,11 +227,6 @@ function WorktreeCard({
           <HardDrive size={11} />
           {sizeText}
         </span>
-        {view.dirtyCount != null && view.dirtyCount > 0 && (
-          <span className="cf-wt__metaitem is-warn" title={t('cf.wt.dirtyMeta').replace('{n}', String(view.dirtyCount))}>
-            {t('cf.wt.dirtyMeta').replace('{n}', String(view.dirtyCount))}
-          </span>
-        )}
         {view.baseLabel && (
           <span className="cf-wt__metaitem" title={view.baseLabel}>
             {t('cf.wt.baseLabel').replace('{label}', view.baseLabel)}
@@ -246,19 +241,32 @@ function WorktreeCard({
         )}
       </div>
 
-      {view.mergeInProgress && (
-        <div className="cf-wt__note is-warn">{t('cf.wt.mergeInProgress').replace('{n}', String(view.mergeInProgress.unmergedCount))}</div>
+      {/*
+        依赖装失败：明细与「会话仍可使用」**同屏**出现（§7.7 屏⑤）。
+        只说失败不说还能用，用户会以为整个工作区废了——而实际只是 pnpm / npm 类命令会失败。
+      */}
+      {view.deps === 'failed' && (
+        <div className="cf-wt__depsfail">
+          <div className="cf-wt__depsstill">{t('cf.wt.deps.stillUsable')}</div>
+          {view.depsDetail && <div className="cf-wt__depsdetail">{view.depsDetail}</div>}
+          <button
+            type="button"
+            className="btn btn--ghost cf-wt__depsretry"
+            onClick={() =>
+              void retryDeps(view.path, t, (msg) => toast.show({ variant: 'error', message: msg }))
+            }
+          >
+            {t('cf.wt.deps.retry')}
+          </button>
+        </div>
       )}
-      {view.deps === 'failed' && view.depsDetail && <div className="cf-wt__note is-bad">{view.depsDetail}</div>}
 
       <footer className="cf-wt__actions">
-        <button
-          type="button"
-          className="btn btn--ghost"
-          disabled={!mayMerge}
-          title={mayMerge ? t('cf.wt.merge.title').replace('{target}', view.targetBranch ?? '') : blockerText}
-          onClick={() => onNotWired('merge')}
-        >
+        {/*
+          合并按钮：`mergeGate` 还没进 WorktreeListItem（P2 才有），故这里**不按 state 自己判可用性**。
+          等字段到位后改成 `disabled={!view.mergeGate.mayMerge}` + `title` 取 blocker 文案即可。
+        */}
+        <button type="button" className="btn btn--ghost" onClick={() => onNotWired('merge')}>
           {t('cf.wt.merge.merge')}
         </button>
         {/* 重建只对「目录不在」有意义；prunable 走「移除登记」（A33：必须用户点） */}
@@ -300,4 +308,26 @@ function WorktreeCard({
       </footer>
     </article>
   )
+}
+
+/**
+ * 「重试安装」走**真实**的 IPC（`worktree:install-deps` 已在 `4b07711` 接通）。
+ *
+ * 它立刻返回、不等安装完成：进度走 `onProgress`，终态（ready / failed）由主进程发 `worktree:changed`，
+ * store 收到后重拉列表，这张卡片上的 deps 自己就变了。故这里不需要任何本地状态。
+ *
+ * 只有「发起就没发起来」需要立刻说（已在装 / 没 lockfile / 项目语言不支持 / 写记录失败），
+ * 否则用户点了看不到任何动静。失败原因用主进程回的 `reason` 取文案，取不到就原样显示原因码。
+ */
+async function retryDeps(path: string, t: (k: string) => string, showMsg: (msg: string) => void): Promise<void> {
+  try {
+    const res: WorktreeInstallResult = await window.deva.worktree.installDeps(path)
+    if (res.ok) return
+    const reason = res.reason ?? 'error'
+    const key = `cf.wt.deps.retryReason.${reason}`
+    const mapped = t(key)
+    showMsg(mapped === key ? reason : mapped)
+  } catch (e) {
+    showMsg((e as Error)?.message ?? String(e))
+  }
 }

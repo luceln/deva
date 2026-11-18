@@ -115,21 +115,32 @@
 .cf-wt__metaitem.is-warn {
   color: var(--warning);
 }
-.cf-wt__note {
-  padding: 6px 10px;
+/* 依赖装失败：明细 +「会话仍可使用」同屏。整块用 danger 底，但「仍可使用」那行是正文色而不是 danger ——
+ * 它是安抚信息，不是错误；染成红色会让用户跳过它，正好与 §7.7 屏⑤ 的目的相反。 */
+.cf-wt__depsfail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
-  background: var(--bg-inset);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.cf-wt__depsstill {
   font-size: 12px;
   line-height: 1.5;
-  color: var(--fg-muted);
+  color: var(--fg);
 }
-.cf-wt__note.is-bad {
-  background: color-mix(in srgb, var(--danger) 8%, transparent);
+.cf-wt__depsdetail {
+  overflow: auto;
+  max-height: 140px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
   color: var(--danger);
+  white-space: pre-wrap;
 }
-.cf-wt__note.is-warn {
-  background: color-mix(in srgb, var(--warning) 10%, transparent);
-  color: var(--warning);
+.cf-wt__depsretry {
+  align-self: flex-start;
 }
 .cf-wt__actions {
   display: flex;

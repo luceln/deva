@@ -72,3 +72,9 @@ jobs:
       # 红色贴片长什么样、点了会怎样、上游新功能还在不在，要浏览器，见 .deva/qa/model-panel/。
       - name: 模型失效标红
         run: node .deva/qa/check-model-swap.cjs
+
+      # 依赖装失败必须说「会话仍可使用」：spec §7.7 屏⑤ / A27。
+      # 只给 20 行报错会让人以为工作区废了，而实际只是 pnpm/npm 类命令会失败。
+      # 这条删掉不会有任何编译或类型反馈，只能靠判据守。运行时位置/可读性要浏览器，见 .deva/qa/。
+      - name: 依赖失败提示
+        run: node .deva/qa/check-deps-fail-note.cjs
