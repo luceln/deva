@@ -1,5 +1,6 @@
 import { listRecords, removeRecord, upsertRecord, type WorktreeRecord } from './store'
 import { cleanupFailedCreate } from './git-worktree'
+import { withGitLock } from './lock'
 
 /**
  * 启动清扫（崩溃恢复，spec §2.4）。
@@ -57,13 +58,24 @@ export async function sweepOnStartup(): Promise<SweepResult> {
     // ── 建到一半的：按 §3.4 回滚 ──
     if (rec.phase === 'creating') {
       try {
-        const cleanup = await cleanupFailedCreate({
-          repoRoot: rec.repoRoot,
-          path: rec.path,
-          branch: rec.branch,
-          // 唯一凭据：Step 0 的探测结果（崩溃恢复时 Step 0 早已不在内存里）
-          intent: rec.intent
-        })
+        /*
+         * 每条清扫单独持锁（`[repoRoot, path]`，与创建/删除同一对路径）。
+         *
+         * 为什么在**这里**加而不是 `cleanupFailedCreate` 内部：那个函数也被 `createWorktree` 在锁内调用，
+         * 内部再加同一把锁就是死锁（§5.1 禁止嵌套）。所以锁只加在编排层——沿用到它的两个调用点各加各的。
+         *
+         * 用 `continue` 而不是整轮批量持锁：一条记录卡住不该把其余全堵住，
+         * 且这里逐条处理本来就是串行的。
+         */
+        const cleanup = await withGitLock([rec.repoRoot, rec.path], 'prune', () =>
+          cleanupFailedCreate({
+            repoRoot: rec.repoRoot,
+            path: rec.path,
+            branch: rec.branch,
+            // 唯一凭据：Step 0 的探测结果（崩溃恢复时 Step 0 早已不在内存里）
+            intent: rec.intent
+          })
+        )
         // spec：清理成功或部分成功都删掉记录。只有「清理本身抛错」才保留。
         for (const w of cleanup.warnings) res.warnings.push(`[${rec.branch}] ${w}`)
         /*

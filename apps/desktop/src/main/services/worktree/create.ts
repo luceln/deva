@@ -4,8 +4,15 @@ import { getDevaHome } from '../config'
 import { publishWorktreeChanged } from '../chat-bus'
 import { repoKeyOf } from './paths'
 import { upsertRecord, removeRecord, type WorktreeRecord } from './store'
-import { precheck, nextFreeWorktreePath, type PrecheckFail, type PrecheckRequest } from './precheck'
+import {
+  precheck,
+  nextFreeWorktreePath,
+  type PrecheckFail,
+  type PrecheckOk,
+  type PrecheckRequest
+} from './precheck'
 import { addWorktree, cleanupFailedCreate, verifyWorktree } from './git-worktree'
+import { withGitLock } from './lock'
 
 /**
  * Step 1-3：创建主流程（spec §3.2-§3.5）。
@@ -57,6 +64,18 @@ export async function createWorktree(req: CreateRequest): Promise<CreateOk | Cre
 
   // 路径若与已有记录撞键，等价于「已存在」：0.7 已按文件系统判过，这里再按记录判一次
   const finalPath = pre.path
+
+  /*
+   * 从这里开始一律走 Git 锁（spec §5.2 的创建那一行：`[repoRoot, 目标 path]`）。
+   *
+   * **锁只包一层**：`addWorktree` / `cleanupFailedCreate` 内部都**不**再调 `withGitLock`——
+   * 它们都在本函数的锁内执行，内层再加同一把锁就是死锁（§5.1 明令禁止嵌套）。
+   */
+  return withGitLock([pre.repoRoot, finalPath], 'create', () => doCreate(pre, finalPath))
+}
+
+/** 创建的实际步骤（Step 1-3）。**调用方必须已在 `[repoRoot, path]` 的锁内**。 */
+async function doCreate(pre: PrecheckOk, finalPath: string): Promise<CreateOk | CreateFail> {
 
   /*
    * ── Step 1：写意图（phase: 'creating'）──

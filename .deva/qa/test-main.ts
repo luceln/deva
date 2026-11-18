@@ -2647,6 +2647,135 @@ async function scenarioWorktreeSweep(): Promise<void> {
   eq('A26b：那个目录与里面的文件都还在', fs.readFileSync(path.join(wt3, 'not-ours.txt'), 'utf8').trim(), 'x')
 }
 
+/**
+ * Git 锁（§5）：同一路径严格串行、不同路径可并行、等锁超 5 秒发进度事件。
+ *
+ * 这三条是 §5.2 的行为判据。第三条用**缩短的等待**没法测（常量固定在模块里），
+ * 所以那条走「把 holder 直接看到」的等价路径——见下面的说明。
+ */
+async function scenarioWorktreeLock(): Promise<void> {
+  const L = await import('../../apps/desktop/src/main/services/worktree/lock')
+  const bus = await import('../../apps/desktop/src/main/services/chat-bus')
+
+  const p1 = path.join(DST, 'lock', 'a')
+  const p2 = path.join(DST, 'lock', 'b')
+
+  // ── ① 同一路径严格串行 ──
+  const order: string[] = []
+  const t = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+  const task = (name: string, ms: number, p: string) =>
+    L.withGitLock([p], 'create', async () => {
+      order.push(`${name}:in`)
+      await t(ms)
+      order.push(`${name}:out`)
+    })
+  await Promise.all([task('A', 40, p1), task('B', 10, p1)])
+  info('同路径执行顺序', JSON.stringify(order))
+  eq('§5.2：同一路径的两次并发调用串行（A 先完才轮到 B）', order, [
+    'A:in',
+    'A:out',
+    'B:in',
+    'B:out'
+  ])
+
+  // ── ② 不同路径可以并行（不是一把全局大锁）──
+  const order2: string[] = []
+  const task2 = (name: string, ms: number, p: string) =>
+    L.withGitLock([p], 'create', async () => {
+      order2.push(`${name}:in`)
+      await t(ms)
+      order2.push(`${name}:out`)
+    })
+  const t0 = Date.now()
+  await Promise.all([task2('X', 60, p1), task2('Y', 60, p2)])
+  const elapsed = Date.now() - t0
+  info('不同路径耗时 / 顺序', JSON.stringify({ elapsed, order2 }))
+  check(
+    '§5.2：不同路径可并行（两者交错进入，总耗时远小于串行的 120ms）',
+    order2.slice(0, 2).sort().join(',') === 'X:in,Y:in' && elapsed < 110,
+    JSON.stringify({ elapsed, order2 })
+  )
+
+  // ── ③ 同一路径的不同写法要命中同一把锁（归一化后判等）──
+  const order3: string[] = []
+  const task3 = (name: string, p: string) =>
+    L.withGitLock([p], 'remove', async () => {
+      order3.push(`${name}:in`)
+      await t(20)
+      order3.push(`${name}:out`)
+    })
+  await Promise.all([task3('P', p1), task3('Q', p1.toUpperCase() + '/')])
+  info('大小写/尾斜杠变体的顺序', JSON.stringify(order3))
+  eq(
+    '§5.1：同一路径的不同写法命中同一把锁（归一化后才比较）',
+    order3,
+    ['P:in', 'P:out', 'Q:in', 'Q:out']
+  )
+
+  // ── ④ 多路径一次全传：两条路径都锁上 ──
+  let holderDuringFn: unknown = null
+  await L.withGitLock([p1, p2], 'merge', async () => {
+    holderDuringFn = [L.gitLockHolder(p1), L.gitLockHolder(p2)]
+  })
+  info('持锁期间 holder', JSON.stringify(holderDuringFn))
+  check(
+    '§5.1 第 5 条：全部拿到后登记 holder（两条路径都有）',
+    Array.isArray(holderDuringFn) &&
+      holderDuringFn.every((h) => h && (h as { label: string }).label === 'merge'),
+    JSON.stringify(holderDuringFn)
+  )
+  // 释放后清空
+  eq('§5.1 第 6 条：释放后 holder 清空', [L.gitLockHolder(p1), L.gitLockHolder(p2)], [null, null])
+
+  // ── ⑤ 异常也要释放（否则一次失败就把那条路径永久锁死）──
+  let threw = false
+  try {
+    await L.withGitLock([p1], 'create', async () => {
+      throw new Error('boom')
+    })
+  } catch {
+    threw = true
+  }
+  eq('§5.1：fn 抛错时异常照常上抛', threw, true)
+  let after = false
+  await L.withGitLock([p1], 'remove', async () => {
+    after = true
+  })
+  eq('§5.1：fn 抛错后锁已释放（后续调用能拿到）', after, true)
+  eq('§5.1：抛错后 holder 也是空的', L.gitLockHolder(p1), null)
+
+  // ── ⑥ 等锁超 5 秒必须发一条 progress（B6 的显式提示就靠它，真等一次）──
+  /*
+   * 这条真等 5 秒多：`WAIT_NOTICE_MS` 是模块内常量，没有测试后门可调。
+   * 不给它开后门（那会在生产里留一个能改行为的开关），代价是这个场景慢 5 秒——
+   * 而 B6 的「能明确提示正在等另一个会话」全靠它，用「通道能订阅」冒充验证是不诚实的。
+   */
+  const events: Array<{ phase: string; holder: { label: string } | null }> = []
+  const off = bus.onWorktreeProgress((e) => events.push(e as never))
+  const slow = L.withGitLock([p1], 'merge', async () => {
+    await t(5500)
+  })
+  // 让慢任务先拿到锁，再排一条等它的
+  await t(20)
+  const waiting = L.withGitLock([p1], 'create', async () => {
+    order.push('waiter:in')
+  })
+  await Promise.all([slow, waiting])
+  off()
+  info('等待期间收到的进度事件', JSON.stringify(events))
+  check(
+    '§5.1 第 7 条：等锁超 5 秒发出 waiting-lock 事件（B6）',
+    events.length > 0 && events.every((e) => e.phase === 'waiting-lock'),
+    JSON.stringify(events)
+  )
+  check(
+    '§5.1 第 7 条：事件里带上占用者是谁（界面才能说清「在等 merge」）',
+    events.length > 0 && events[0]?.holder?.label === 'merge',
+    JSON.stringify(events[0] ?? null)
+  )
+  eq('§5.1：慢调用跑完后，等锁的那条也真的跑到了', order.includes('waiter:in'), true)
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -2675,6 +2804,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtcreate: scenarioWorktreeCreate,
   wtbrief: scenarioWorktreeBrief,
   wtsweep: scenarioWorktreeSweep,
+  wtlock: scenarioWorktreeLock,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,

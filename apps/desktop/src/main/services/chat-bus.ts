@@ -81,3 +81,22 @@ export function publishWorktreeChanged(): void {
 export function onWorktreeChanged(listener: () => void): () => void {
   return subscribe<void>('worktree', listener)
 }
+
+/** worktree 长操作的进度（目前只有「正在等 Git 锁」一种）。 */
+export interface WorktreeProgress {
+  phase: 'waiting-lock'
+  /** 占着锁的那一头；拿不到（刚释放）时为 null。 */
+  holder: { label: string; since: number } | null
+}
+
+/**
+ * 发一条 worktree 进度。用于「等锁超过 5 秒」这类场景（spec §5.1 第 7 条 / B6）：
+ * 界面据此显示「正在等另一个会话的 git 操作完成」，而不是看起来冻住。
+ */
+export function publishWorktreeProgress(p: WorktreeProgress): void {
+  bus.emit('worktree-progress', p)
+}
+
+export function onWorktreeProgress(listener: (p: WorktreeProgress) => void): () => void {
+  return subscribe<WorktreeProgress>('worktree-progress', listener)
+}
