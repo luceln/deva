@@ -71,6 +71,48 @@ function ensureLinuxPasswordStore(): void {
 // 必须早于 app ready：Chromium 在初始化 OSCrypt 时读一次，之后再改就没用了
 ensureLinuxPasswordStore()
 
+/**
+ * dev 与安装版**彻底隔离开**（userData + 数据目录各一份）。
+ *
+ * ## 为什么不能共用
+ *
+ * 1. **单实例锁会互相打架**。`package.json` 的 name（`devaplus`）与 productName（`DevaPlus`）被 Electron
+ *    归一成同一个 userData 目录名，所以 `requestSingleInstanceLock()` 拿到的是**同一把锁**：开着
+ *    `pnpm dev` 时双击安装版不会开新窗口，只会把 dev 窗口唤到前台，反过来也一样——两个没法同时开。
+ *    而**只跳过锁**并不能解决问题：两个进程会同时写同一个 `config.json` / `_index.json`，
+ *    `services/config.ts` 里写明了这种并发写没有任何锁拦着（彼此覆盖，是数据损坏级的），
+ *    而且调度器会把同一个定时任务**双触发**。
+ * 2. **dev 会污染真实数据**。`~/.deva-plus` 里是用户真实的对话 / 记忆 / personas（约 209MB）。
+ *    dev 里试坏一个配置、跑一次破坏性迁移，坏的就是真资产。隔离目录才是根治。
+ *
+ * ## 为什么必须在 `whenReady()` 之前
+ *
+ * `app.getPath('userData')` 的值在 ready 时就被各方读走并缓存（Chromium 的 profile 目录、
+ * safeStorage 的密钥条目名、cookie / localStorage 路径都在那之后定下）。ready 之后再 `setPath`
+ * 只会改「之后新建的窗口」而不改已经打开的 profile——等于什么都没隔离干净。
+ * 这是 Electron 官方支持的覆盖点（`app.getPath` 文档明说要在 ready 前设置）。
+ *
+ * ## 打包版完全不受影响
+ *
+ * 整个改动都在 `is.dev` 里（`is.dev === !app.isPackaged`）：发布版的 userData 仍是 `devaplus`、
+ * 数据目录仍是 `~/.deva-plus`，一个字都不变。dev 下数据目录换成 `~/.deva-plus-dev`，
+ * **全新安装状态**（零模型零密钥）是预期行为——这里不做任何迁移，也不碰 `~/.deva-plus` 里任何东西。
+ */
+function isolateDevData(): void {
+  if (!is.dev) return
+  // userData 子目录：单实例锁与 Chromium profile 都跟着它走
+  app.setPath('userData', join(app.getPath('userData'), 'dev'))
+  /*
+   * 数据目录：只用 `||=` 不硬写——CI / 测试用 DEVA_HOME 指定临时目录时不该被这里覆盖
+   * （driver.cjs 每个场景都设 DEVA_HOME，硬写会让所有场景写到真 home 去）。
+   */
+  if (!process.env.DEVA_HOME?.trim())
+    process.env.DEVA_HOME = join(app.getPath('home'), '.deva-plus-dev')
+}
+
+// 同样必须早于 app ready（见上面 isolateDevData 的说明）
+isolateDevData()
+
 // 内置浏览器：收起的「Deva 浏览器」窗口挪在屏幕外继续运行（隐藏的窗口不渲染，Deva 没法截图、点击、输入）。
 // Chromium 默认会把完全看不见的窗口判为被遮挡而停止绘制，这里关掉这项检测（实测关掉后屏幕外窗口照常工作）。
 // 代价：Deva 窗口被别的程序挡住时也照常绘制，界面基本静止，影响很小。须早于 app ready。
