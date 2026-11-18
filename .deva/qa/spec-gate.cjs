@@ -172,16 +172,16 @@ const TASKS = [
         why: 'QuickStart.tsx 与 NewSessionDialog.tsx 里都没有 locationTouched 联动'
       },
       // A47 = 分支名为中文/含空格 → slug 回落 worktree；路径框可编辑，用户改写为合法值后创建成功。
-      // 主进程半边在 scenarioWorktreePaths 的 slug 用例，渲染层半边（路径可编辑）在 NewSessionDialog。
-      // 两处任一有 A47 都算这条被覆盖到了。
+      //
+      // 判据只认 `test-main.ts` 里**断言调用**的形态（`A47.*eq(`），不认裸 `A47`：
+      // 裸字串会让「在文件头写一句 `## A47：…` 注释」也算通过，而注释不是断言 —— 那是把门禁改成
+      // 「写个字就能过」。渲染层那半边（路径可编辑）靠上面 T1.1 的 `locationTouched` 判据兜。
       {
-        kind: 'grepAny',
-        files: [
-          '.deva/qa/test-main.ts',
-          'apps/desktop/src/renderer/src/redesign/NewSessionDialog.tsx'
-        ],
-        pattern: 'A47',
-        why: '缺 A47 断言（中文/空格分支名 → slug 回落 + 路径可编辑后创建成功）'
+        kind: 'grep',
+        file: '.deva/qa/test-main.ts',
+        pattern: 'eq\\(.*A47',
+        regex: true,
+        why: '缺 A47 真断言（中文/空格分支名 → slug 回落 worktree），只写注释不算'
       }
     ]
   },
@@ -360,6 +360,24 @@ function readTree(rel) {
   return out.join('\n')
 }
 
+/**
+ * 判据的匹配：`c.regex` 为真时按正则，否则按字面量 `includes`。
+ *
+ * 为什么需要正则：字面量匹配无法区分「断言」与「注释」。例如 A47 的断言在
+ * `eq(\`…（A47）\`, …)` 里，但如果只在文件头写一句 `## A47：…` 注释也会被字面量命中——
+ * 那就成了「写个字就能过门禁」。给定 `regex: true` 后可以把 pattern 收成 `eq\(.*A47` 这类
+ * 「必须是断言调用」的形态。
+ */
+function matches(c, content) {
+  if (!c.regex) return content.includes(c.pattern)
+  try {
+    return new RegExp(c.pattern).test(content)
+  } catch {
+    // pattern 写错当不命中处理：不能因为判据本身有 typo 就静默放行
+    return false
+  }
+}
+
 function checkCriterion(c) {
   if (c.kind === 'file') {
     return { ok: exists(c.file), detail: exists(c.file) ? '' : c.why }
@@ -377,7 +395,7 @@ function checkCriterion(c) {
         misses.push(`${f}（读不到）`)
         continue
       }
-      if (raw.includes(c.pattern)) return { ok: true, detail: '' }
+      if (matches(c, raw)) return { ok: true, detail: '' }
       misses.push(f)
     }
     return { ok: false, detail: `${c.why}｜查过：${misses.join('、')}` }
@@ -395,7 +413,7 @@ function checkCriterion(c) {
   if (content === null) {
     return { ok: false, detail: `找不到以 ${c.within} 开头的场景函数（断言无处可写）` }
   }
-  const hit = content.includes(c.pattern)
+  const hit = matches(c, content)
   if (c.kind === 'grep') return { ok: hit, detail: hit ? '' : c.why }
   // absent：命中即为问题
   return { ok: !hit, detail: hit ? c.why : '' }
