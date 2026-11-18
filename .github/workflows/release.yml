@@ -116,8 +116,15 @@ jobs:
           append_body: true
           # 本次新建的 Release 建成草稿，发版人看过说明再手动发布；网页上已发布的不受影响（保持已发布）
           draft: true
-          # v0.2.0-beta.1 这类带连字符的 tag 标为预发布
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          # 预发布判定：只认「真预发布」的后缀。
+          #
+          # 不能简单按「带连字符就算」——二开版用 `<上游版本>-plus.<序号>` 做正式版号，那也带连字符，
+          # 被标成 prerelease 的后果是**检查更新永远说已是最新**：GitHub 的 `releases/latest` 只返回
+          # 「non-prerelease, non-draft」（官方文档原文），而 services/updater.ts 读的正是这个接口。
+          #
+          # 所以这里排除 `-plus.`，只把 beta / alpha / rc 这类当预发布。注意用 github.ref_name
+          # （tag 名，如 v0.1.16-plus.1），它不含 refs/tags/ 前缀，正则不必处理那部分。
+          prerelease: ${{ contains(github.ref_name, '-') && !contains(github.ref_name, '-plus.') }}
 
       - name: 输出 Release 链接
         run: |
