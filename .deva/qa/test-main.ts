@@ -1827,15 +1827,15 @@ async function scenarioWorktreePaths(): Promise<void> {
    * 都按不敏感处理，所以比较键必须小写才能判出重复；Linux 大小写敏感，`/a/Fix` 与 `/a/fix`
    * 是两个不同的目录，折叠会把它们错判成同一个（比漏判更危险：会去复用别人的工作区）。
    */
-  const upper = P.compareKeyOfPath(base.toUpperCase())
-  const same = P.compareKeyOfPath(base)
+  const keyUpper = P.compareKeyOfPath(base.toUpperCase())
+  const keySame = P.compareKeyOfPath(base)
   if (process.platform === 'win32' || process.platform === 'darwin') {
-    eq('paths：大小写不同的写法的 compareKey 相同（本平台 FS 不区分大小写）', upper, same)
+    eq('paths：大小写不同的写法的 compareKey 相同（本平台 FS 不区分大小写）', keyUpper, keySame)
   } else {
     check(
       'paths：大小写不同的写法保留不同 compareKey（本平台 FS 区分大小写）',
-      upper !== same,
-      `${upper.slice(-20)} vs ${same.slice(-20)}`
+      keyUpper !== keySame,
+      `${keyUpper.slice(-20)} vs ${keySame.slice(-20)}`
     )
   }
 
@@ -1861,7 +1861,13 @@ async function scenarioWorktreePaths(): Promise<void> {
   // ── repoKey：sha1 前 16 位，且与 chat-store 的 projectKey 不是同一个函数 ──
   const rk1 = P.repoKeyOf(base)
   const rk2 = P.repoKeyOf(base.toUpperCase())
-  eq('paths：repoKey 对同一仓库的不同写法一致', rk1, rk2)
+  // repoKey 由 compareKey 派生，大小写是否折叠同样随平台（理由见上面 paths 那条）
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    eq('paths：repoKey 对同一仓库的不同写法一致（本平台 FS 不区分大小写）', rk1, rk2)
+  } else {
+    check('paths：repoKey 对大小写敏感（本平台 FS 区分大小写）', rk1 !== rk2, `${rk1} vs ${rk2}`)
+  }
+  eq('paths：repoKey 对尾斜杠的写法一致', P.repoKeyOf(base + '/'), rk1)
   eq('paths：repoKey 是 16 位 hex', /^[0-9a-f]{16}$/.test(rk1), true)
 
   // ── slug：§6.3 逐条 ──
@@ -1927,8 +1933,21 @@ async function scenarioWorktreeStore(): Promise<void> {
   eq('store：upsert 返回 true（写盘成功）', S.upsertRecord(rec()), true)
   eq('store：能读回一条', S.listRecords().length, 1)
   eq('store：getRecord 按路径取到', S.getRecord(path.join(DST, 'wts', 'one'))?.branch, 'my/dev')
-  // 主键是 compareKey：不同写法取同一条
-  eq('store：getRecord 对大小写/尾斜杠的不同写法取同一条', S.getRecord(path.join(DST, 'wts', 'ONE') + '/')?.branch, 'my/dev')
+  // 主键是 compareKey：尾斜杠的不同写法必须取同一条（与平台无关）
+  eq('store：getRecord 对尾斜杠的不同写法取同一条', S.getRecord(path.join(DST, 'wts', 'one') + '/')?.branch, 'my/dev')
+  if (process.platform === 'win32' || process.platform === 'darwin') {
+    eq(
+      'store：getRecord 对大小写不同的写法取同一条（本平台 FS 不区分大小写）',
+      S.getRecord(path.join(DST, 'wts', 'ONE'))?.branch,
+      'my/dev'
+    )
+  } else {
+    eq(
+      'store：getRecord 对大小写不同的写法取不到（本平台 FS 区分大小写）',
+      S.getRecord(path.join(DST, 'wts', 'ONE')),
+      null
+    )
+  }
 
   // ── 文件真的落在 DEVA_HOME/worktrees.json（不是 config.json 的一个键）──
   const file = path.join(DST, 'worktrees.json')
