@@ -1,14 +1,14 @@
-# PR 与推到 main / my/* 时做类型检查 + 构建 + 同类扫描，挡住编不过、也挡住已知形状的静默失效。
+# PR 与推到 main / dev 时做类型检查 + 构建 + 同类扫描，挡住编不过、也挡住已知形状的静默失效。
 # 打包与发版仍由 release.yml 负责。
 #
-# 为什么带上 my/*：二开全部写在 my/* 分支上（main 只做上游镜像），只监听 main 等于这条门禁
-# 一次都不会跑——改之前 my/dev 从未被推过，Actions 里一条记录都没有。
+# 为什么连 dev 一起监听：日常提交都落在 dev，只监听 main 等于这条门禁一次都不会跑——
+# 等功能合进 main 才发现编不过，那时已经攒了一堆提交。
 name: CI
 
 on:
   pull_request:
   push:
-    branches: [main, 'my/**']
+    branches: [main, dev]
 
 permissions:
   contents: read
