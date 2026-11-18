@@ -1948,6 +1948,221 @@ async function scenarioWorktreeStore(): Promise<void> {
   eq('store：拒绝写入后原文件内容原样保留（没被空表覆盖）', fs.readFileSync(file, 'utf8'), '{bad json ,,,')
 }
 
+/** 建一个真实的临时 git 仓库（worktree 相关场景共用）。 */
+function makeRepo(root: string, files: Record<string, string> = { 'a.txt': 'a\n' }): string {
+  fs.mkdirSync(root, { recursive: true })
+  const run = (args: string[], cwd = root): string => {
+    const r = require('node:child_process').spawnSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_AUTHOR_NAME: 'q', GIT_AUTHOR_EMAIL: 'q@q', GIT_COMMITTER_NAME: 'q', GIT_COMMITTER_EMAIL: 'q@q' }
+    })
+    return `${r.stdout ?? ''}`
+  }
+  run(['init', '-q', '-b', 'my/dev'])
+  for (const [name, body] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(root, name)), { recursive: true })
+    fs.writeFileSync(path.join(root, name), body)
+  }
+  run(['add', '-A'])
+  run(['commit', '-qm', 'init'])
+  return root
+}
+
+const gitOut = (cwd: string, ...args: string[]): string =>
+  String(
+    require('node:child_process').spawnSync('git', args, { cwd, encoding: 'utf8' }).stdout ?? ''
+  ).trim()
+
+/**
+ * Step 0 探测（`precheck`）。**无副作用**：不建目录、不建分支、不写记录。
+ *
+ * 覆盖 A5（起点 = 预检那一刻的 HEAD）、A6（不是从上游镜像切的）、A8（主目录 detached 也能建）、
+ * A12b/A23（分支已存在必须拒绝，不得静默复用）、A22（路径已存在不得覆盖）。
+ */
+async function scenarioWorktreePrecheck(): Promise<void> {
+  const PC = await import('../../apps/desktop/src/main/services/worktree/precheck')
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+
+  const repo = makeRepo(path.join(DST, 'repo'), { 'a.txt': 'a\n', 'only-dev.txt': 'dev\n' })
+  const headBefore = gitOut(repo, 'rev-parse', 'HEAD')
+  const branchesBefore = gitOut(repo, 'branch', '--format=%(refname:short)')
+
+  // ── 0.1 非仓库 ──
+  const notRepo = path.join(DST, 'not-a-repo')
+  fs.mkdirSync(notRepo, { recursive: true })
+  const r1 = await PC.precheck({ repoRoot: notRepo, branch: 'x/y', path: path.join(DST, 'wts', 'x') })
+  eq('precheck 0.1：非仓库 → not-a-repo', r1.ok === false && r1.reason, 'not-a-repo')
+
+  // ── 正常探测：0.2 分支、0.4 baseSha = 预检那一刻的 HEAD（A5）──
+  const r2 = await PC.precheck({ repoRoot: repo, branch: 'wt/one', path: path.join(DST, 'wts', 'one') })
+  if (!r2.ok) {
+    fail('precheck：正常场景不该失败', JSON.stringify(r2))
+    return
+  }
+  info('正常探测结果', JSON.stringify({ baseSha: r2.baseSha, target: r2.targetBranch, branch: r2.branch }))
+  eq('precheck 0.4 / A5：baseSha 等于预检那一刻主目录的 HEAD', r2.baseSha, headBefore)
+  eq('precheck 0.2：targetBranch 是主目录当前分支', r2.targetBranch, 'my/dev')
+  eq('precheck 0.2：primaryDetached = false', r2.primaryDetached, false)
+  eq('precheck：baseLabel 回显分支名', r2.baseLabel, 'my/dev')
+
+  // ── 无副作用：探测不建分支、不建目录、不写记录 ──
+  eq('precheck：探测后分支列表不变（无副作用）', gitOut(repo, 'branch', '--format=%(refname:short)'), branchesBefore)
+  eq('precheck：探测后 HEAD 不变', gitOut(repo, 'rev-parse', 'HEAD'), headBefore)
+  check('precheck：探测没有创建目录', !fs.existsSync(path.join(DST, 'wts', 'one')), '')
+  eq('precheck：探测没有写记录', S.listRecords().length, 0)
+
+  // ── 0.8 自动生成路径（spec 空缺的补法）──
+  const auto = await PC.precheck({ repoRoot: repo, branch: 'feat/auto-path' })
+  if (!auto.ok) {
+    fail('precheck 0.8：省略 path 时应自动生成而不是报错', JSON.stringify(auto))
+    return
+  }
+  info('自动生成的路径', auto.path)
+  check(
+    'precheck 0.8：省略 path 时按 §6.1 自动生成（<DEVA_HOME>/worktrees/<repoKey>/<slug>-<shortid>）',
+    auto.path.includes(path.join('worktrees')) && /feat-auto-path-[0-9a-z]+$/.test(auto.path.replace(/\\/g, '/')),
+    auto.path
+  )
+  eq('precheck 0.8：slug 从分支名派生', auto.slug, 'feat-auto-path')
+  eq('precheck 0.8：自动生成的路径在仓库外', PC.keyOf(auto.path) !== PC.keyOf(repo), true)
+
+  // ── 0.8 长度判：用原始形态的 path（不是 compareKey）──
+  const longSlug = 'a'.repeat(40)
+  const deep = path.join(DST, 'x'.repeat(120), 'y'.repeat(120))
+  const rLong = await PC.precheck({ repoRoot: repo, branch: longSlug, path: deep })
+  eq('precheck 0.8：超长路径 → path-too-long', rLong.ok === false && rLong.reason, 'path-too-long')
+
+  // ── 0.8 仓库内 → 拒绝（B5 的机械校验，不得只靠「默认在仓库外」）──
+  const rInside = await PC.precheck({ repoRoot: repo, branch: 'in/repo', path: path.join(repo, 'sub', 'wt') })
+  eq('precheck 0.8：路径在仓库内 → path-inside-repo', rInside.ok === false && rInside.reason, 'path-inside-repo')
+
+  // ── 0.5 分支名非法 ──
+  const rBad = await PC.precheck({ repoRoot: repo, branch: 'bad name with space', path: path.join(DST, 'wts', 'bad') })
+  eq('precheck 0.5：非法分支名 → bad-branch', rBad.ok === false && rBad.reason, 'bad-branch')
+
+  // ── 0.6 / A12b / A23：分支已存在必须拒绝，不得静默复用，并给可用替代 ──
+  require('node:child_process').spawnSync('git', ['branch', 'taken'], { cwd: repo })
+  const rTaken = await PC.precheck({ repoRoot: repo, branch: 'taken', path: path.join(DST, 'wts', 'taken') })
+  info('分支已存在的结果', JSON.stringify(rTaken))
+  eq('precheck 0.6 / A12b：分支已存在 → branch-exists（不得静默复用）', rTaken.ok === false && rTaken.reason, 'branch-exists')
+  check('precheck 0.6：给出可用替代（自动后缀）', rTaken.ok === false && rTaken.suggestion === 'taken-2', JSON.stringify(rTaken))
+
+  // ── 0.7 / A22：目标路径已存在 → 拒绝（不得覆盖、不得删除、不复用空目录）──
+  const takenDir = path.join(DST, 'wts', 'taken-dir')
+  fs.mkdirSync(takenDir, { recursive: true })
+  fs.writeFileSync(path.join(takenDir, 'keep.txt'), 'must not be deleted\n')
+  const rPathTaken = await PC.precheck({ repoRoot: repo, branch: 'ok-name', path: takenDir })
+  eq('precheck 0.7 / A22：路径已存在 → path-exists', rPathTaken.ok === false && rPathTaken.reason, 'path-exists')
+  eq('precheck 0.7 / A22：已存在目录里的文件没被动过', fs.readFileSync(path.join(takenDir, 'keep.txt'), 'utf8'), 'must not be deleted\n')
+
+  // 0.7 的「空目录也不复用」：spec 明确不做特例
+  const emptyDir = path.join(DST, 'wts', 'empty-dir')
+  fs.mkdirSync(emptyDir, { recursive: true })
+  const rEmpty = await PC.precheck({ repoRoot: repo, branch: 'ok2', path: emptyDir })
+  eq('precheck 0.7：空目录也不复用（spec 明确不做特例）', rEmpty.ok === false && rEmpty.reason, 'path-exists')
+
+  // 0.7 的断链：裸 existsSync 会返回 false（→ 误判「不存在」），lstat 能看见。
+  // 本机 Windows 未开开发者模式时 symlinkSync 一律 EPERM（已实测），造不出断链 → 显式跳过而不是假装验过。
+  const dangling = path.join(DST, 'wts', 'dangling')
+  let canSymlink = true
+  try {
+    fs.mkdirSync(path.dirname(dangling), { recursive: true })
+    fs.symlinkSync(path.join(DST, 'no-such-target'), dangling, 'file')
+  } catch {
+    canSymlink = false
+  }
+  if (!canSymlink) {
+    info('SKIP', '本机不能创建符号链接（Windows 未开开发者模式 → EPERM），断链场景未验')
+  } else {
+    eq('precheck 0.7：断链对 existsSync 不可见（这正是禁止裸用它的原因）', fs.existsSync(dangling), false)
+    const rDangling = await PC.precheck({ repoRoot: repo, branch: 'ok3', path: dangling })
+    eq(
+      'precheck 0.7：断链占位也拒绝（lstat 能看见它）',
+      rDangling.ok === false && rDangling.reason,
+      'path-exists'
+    )
+  }
+
+  // ── 0.9 脏改动 → needsConfirm ──
+  fs.writeFileSync(path.join(repo, 'a.txt'), 'modified\n')
+  const rDirty = await PC.precheck({ repoRoot: repo, branch: 'dirty/one', path: path.join(DST, 'wts', 'dirty') })
+  if (!rDirty.ok) {
+    fail('precheck 0.9：脏改动只警示不拦截', JSON.stringify(rDirty))
+    return
+  }
+  info('脏改动数', String(rDirty.dirtyCount))
+  eq('precheck 0.9：dirtyCount = 1', rDirty.dirtyCount, 1)
+  eq('precheck 0.9：脏且未确认 → needsConfirm', rDirty.needsConfirm, true)
+  const rDirtyOk = await PC.precheck({
+    repoRoot: repo,
+    branch: 'dirty/one',
+    path: path.join(DST, 'wts', 'dirty'),
+    confirmedDirty: true
+  })
+  eq('precheck 0.9：确认后 needsConfirm = false', rDirtyOk.ok && rDirtyOk.needsConfirm, false)
+  // 脏改动没被动过（不得 stash、不得 checkout）
+  eq('precheck 0.9 / A1：探测没动用户的改动', fs.readFileSync(path.join(repo, 'a.txt'), 'utf8'), 'modified\n')
+  eq('precheck 0.9 / A2：探测没产生 stash', gitOut(repo, 'stash', 'list'), '')
+  require('node:child_process').spawnSync('git', ['checkout', '--', 'a.txt'], { cwd: repo })
+
+  // ── 0.10 many-worktrees：软提示，不阻断 ──
+  for (let i = 0; i < 5; i++) {
+    S.upsertRecord({
+      schemaVersion: 1,
+      path: path.join(DST, 'fake', `w${i}`),
+      compareKey: '',
+      repoRoot: repo,
+      repoKey: 'x',
+      branch: `b${i}`,
+      baseSha: 'a'.repeat(40),
+      baseLabel: 'my/dev',
+      targetBranch: 'my/dev',
+      createdAt: i,
+      phase: 'active',
+      intent: { branchExistedAtStart: false, pathExistedAtStart: false },
+      deps: 'pending'
+    })
+  }
+  const rMany = await PC.precheck({ repoRoot: repo, branch: 'many/one', path: path.join(DST, 'wts', 'many') })
+  if (!rMany.ok) {
+    fail('precheck 0.10：many-worktrees 是软提示，不该阻断', JSON.stringify(rMany))
+    return
+  }
+  eq('precheck 0.10：已有 5 个 → softWarn = many-worktrees', rMany.softWarn, 'many-worktrees')
+  eq('precheck 0.10：软提示不阻断（ok 仍为 true）', rMany.ok, true)
+  eq('precheck 0.10：existingCount 报出来', rMany.existingCount, 5)
+
+  // ── 0.3 / A8：主目录 detached 仍可创建，targetBranch = null，并给合并警告 ──
+  require('node:child_process').spawnSync('git', ['checkout', '-q', '--detach', 'HEAD'], { cwd: repo })
+  const rDetached = await PC.precheck({ repoRoot: repo, branch: 'det/one', path: path.join(DST, 'wts', 'det') })
+  if (!rDetached.ok) {
+    fail('precheck 0.3 / A8：主目录 detached 时应允许创建', JSON.stringify(rDetached))
+    return
+  }
+  info('detached 探测结果', JSON.stringify({ target: rDetached.targetBranch, warn: rDetached.mergeTargetWarning, base: rDetached.baseLabel }))
+  eq('precheck 0.3 / A8：detached 时 targetBranch = null', rDetached.targetBranch, null)
+  eq('precheck 0.3：primaryDetached = true', rDetached.primaryDetached, true)
+  eq('precheck 0.3：给出 mergeTargetWarning', rDetached.mergeTargetWarning, 'merge-target-unset')
+  eq('precheck 0.3：detached 下 baseSha 仍是那个提交（rev-parse HEAD 而非 --abbrev-ref）', rDetached.baseSha, headBefore)
+  check(
+    'precheck 0.3：detached 时 baseLabel 标注短 SHA',
+    rDetached.baseLabel.includes('detached') && rDetached.baseLabel.includes(headBefore.slice(0, 7)),
+    rDetached.baseLabel
+  )
+  require('node:child_process').spawnSync('git', ['checkout', '-q', 'my/dev'], { cwd: repo })
+
+  // ── 0.11 trustRoot：受信根登记了 repoRoot 与 path 的父目录 ──
+  const roots = (await import('../../apps/desktop/src/main/services/fs-guard')).listRoots()
+  info('受信根', JSON.stringify(roots.map((r) => path.basename(r))))
+  check('precheck 0.11：repoRoot 已登记为受信根', roots.some((r) => PC.keyOf(r) === PC.keyOf(repo)), JSON.stringify(roots))
+  check(
+    'precheck 0.11：path 的父目录已登记（否则创建后写不进去）',
+    roots.some((r) => PC.keyOf(r) === PC.keyOf(path.dirname(path.join(DST, 'wts', 'one')))),
+    JSON.stringify(roots)
+  )
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -1972,6 +2187,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   blockedlist: scenarioBlockedProviderListed,
   wtpaths: scenarioWorktreePaths,
   wtstore: scenarioWorktreeStore,
+  wtprecheck: scenarioWorktreePrecheck,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
   empty: scenarioEmptySource,
