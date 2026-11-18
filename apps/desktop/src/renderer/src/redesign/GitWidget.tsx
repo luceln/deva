@@ -36,7 +36,7 @@ import { useI18n } from '../i18n/i18n'
 import { useDialog } from '../components/DialogProvider'
 import { useToast, type ToastOptions } from '../components/ToastProvider'
 import { Modal } from '../components/Modal'
-import { basename } from './shell-common'
+import { useWorktreeLabel } from './worktree-label'
 import { type CtxEntry, ContextMenu } from './ContextMenu'
 
 /* ─────────────────────────── Git 快捷面板（IDEA 式点击浮出） ───────────────────────────
@@ -540,6 +540,8 @@ export function GitWidget({ root, streaming }: { root: string; streaming: boolea
 export function WorkspaceMenu({ root }: { root: string }): React.JSX.Element {
   const { t } = useI18n()
   const toast = useToast()
+  // chip 主按钮文字：worktree 显示分支名，普通目录回落目录名（§1.7）。
+  const label = useWorktreeLabel(root)
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
 
@@ -588,7 +590,7 @@ export function WorkspaceMenu({ root }: { root: string }): React.JSX.Element {
         onClick={openMenu}
       >
         <FolderOpen size={15} />
-        <span className="cf-wschip__name">{basename(root)}</span>
+        <span className="cf-wschip__name">{label}</span>
       </button>
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} openUp items={items} onClose={() => setMenu(null)} />

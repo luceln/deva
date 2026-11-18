@@ -11,6 +11,7 @@ import {
   useChatActions
 } from '../store/chat'
 import { useExtensions } from '../store/extensions'
+import { useWorkspace } from '../store/workspace'
 import { useTasks } from '../store/tasks'
 import { useI18n } from '../i18n/i18n'
 import { useDialog } from '../components/DialogProvider'
@@ -35,6 +36,7 @@ import { type SlashCommand, type ComposerPrefill, restoreToComposer } from './Co
 import { registerModelSettingsOpener } from './modelSettingsBus'
 import { type EditorState, ProfileView, PersonaEditor } from './ProfileView'
 import { type SettingsInit, Settings } from './SettingsPane'
+import { NewSessionDialog } from './NewSessionDialog'
 
 /**
  * 「对话优先」外壳（已接真实 store）。
@@ -211,7 +213,11 @@ export function ChatFirstShell(): React.JSX.Element {
    */
   const [tasksTarget, setTasksTarget] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // 打开设置时落在哪一页（资料卡的「能力」直达设置 › 扩展，可直接进某项详情）。
+  // 新建会话对话框（§7.7）。位置选择（主目录 / 新工作区）只在这一次创建里有效，故用独立开关。
+  const [newSessionOpen, setNewSessionOpen] = useState(false)
+  // 主目录取当前打开的项目：会话的 focusRoot 平时就是它（Composer 挂载同一路径）。
+  const { activeProject } = useWorkspace()
+  const primaryBranch = usePrimaryBranch(activeProject?.path ?? null)  // 打开设置时落在哪一页（资料卡的「能力」直达设置 › 扩展，可直接进某项详情）。
   const [settingsInit, setSettingsInit] = useState<SettingsInit>({})
   const openSettings = (init: SettingsInit = {}): void => {
     setSettingsInit(init)
@@ -674,6 +680,7 @@ export function ChatFirstShell(): React.JSX.Element {
               onOpenThread={openThread}
               onOpenProfile={openProfile}
               onStartPersona={startWith}
+              onNewSessionAt={() => setNewSessionOpen(true)}
               onAddPersona={() => setEditor({ mode: 'create' })}
               onAddPersonaByChat={addPersonaByChat}
               onNewChatFromThread={newChatFromThread}
@@ -776,6 +783,19 @@ export function ChatFirstShell(): React.JSX.Element {
 
       {editor && <PersonaEditor initial={editor} onClose={() => setEditor(null)} />}
       {settingsOpen && <Settings initial={settingsInit} onClose={() => setSettingsOpen(false)} />}
+      {/* 新建会话对话框（§7.7）：选主目录 / 新工作区。主目录取当前打开的项目。 */}
+      {newSessionOpen && (
+        <NewSessionDialog
+          repoRoot={activeProject?.path ?? ''}
+          primaryBranch={primaryBranch}
+          onClose={() => setNewSessionOpen(false)}
+          onDone={(res) => {
+            setNewSessionOpen(false)
+            newSession(defaultPersonaId, res.focusRoot, defaultPersona?.model)
+            setRailTab('chats')
+          }}
+        />
+      )}
       {/* 从任务对话标题栏「编辑任务」打开的表单（同管理页）。不显示运行方式：这里是从某个对话进来的，改到别的对话后
           「返回」就会回到那个对话；运行方式到定时任务页里改。 */}
       {editTask && (
@@ -793,4 +813,37 @@ export function ChatFirstShell(): React.JSX.Element {
       )}
     </div>
   )
+}
+
+/**
+ * 主目录当前分支（detached 时为 null）。
+ *
+ * 只服务「新建会话」对话框的描述行（`主目录，当前分支 my/dev`）。为什么不去读 worktree 快照：
+ * 主目录不是 worktree，`worktree:brief` 对它返回 null；`git.status` 才是这里的事实来源，
+ * 而且它已经带了 `detached`，不需要渲染层再自己判断。
+ *
+ * 拿不到（非 git 目录 / 出错）时返回 null —— 描述行会省掉分支那半句，不是错误态。
+ */
+function usePrimaryBranch(root: string | null): string | null {
+  const [branch, setBranch] = useState<string | null>(null)
+  useEffect(() => {
+    if (!root) {
+      setBranch(null)
+      return
+    }
+    let live = true
+    void window.deva.git
+      .status(root)
+      .then((st) => {
+        if (!live) return
+        setBranch(st.isRepo && !st.detached ? st.branch : null)
+      })
+      .catch(() => {
+        if (live) setBranch(null)
+      })
+    return () => {
+      live = false
+    }
+  }, [root])
+  return branch
 }

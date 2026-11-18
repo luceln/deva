@@ -22,7 +22,8 @@ import {
   type AvatarSpec
 } from '../components/humation'
 import { AvatarEditor } from './AvatarEditor'
-import { basename, DragBar, useRelativeTime } from './shell-common'
+import { DragBar, useRelativeTime } from './shell-common'
+import { useWorktreeLabel } from './worktree-label'
 
 /**
  * 角色编辑器打开态：新建 / 编辑（带原对象）/ 确认名片（propose：预填 LLM 草稿，接受才落盘）。
@@ -61,7 +62,6 @@ export function ProfileView({
 }): React.JSX.Element {
   const { t, locale } = useI18n()
   const { skills, mcp } = useExtensions()
-  const rel = useRelativeTime()
   const [tab, setTab] = useState<ProfileTab>('chats')
   const convs = useMemo(
     () =>
@@ -154,16 +154,7 @@ export function ProfileView({
                 </div>
               ) : (
                 convs.map((s) => (
-                  <button key={s.id} className="cf-convrow" onClick={() => onOpenThread(s.id)}>
-                    <span className="cf-convrow__title">{s.title || t('chat.untitled')}</span>
-                    {s.focusRoot && (
-                      <span className="cf-convrow__proj" title={s.focusRoot}>
-                        <Folder size={11} />
-                        <span className="cf-convrow__projname">{basename(s.focusRoot)}</span>
-                      </span>
-                    )}
-                    <span className="cf-convrow__time">{rel(s.updatedAt)}</span>
-                  </button>
+                  <ConvRow key={s.id} sessionId={s.id} title={s.title} focusRoot={s.focusRoot} updatedAt={s.updatedAt} onOpen={onOpenThread} />
                 ))
               )
             ) : (
@@ -192,6 +183,42 @@ export function ProfileView({
 }
 
 /* ============================ 角色编辑器（Part G） ============================ */
+/**
+ * 资料页「最近对话」里的一行。
+ *
+ * 单独抽成组件是为了能用 `useWorktreeLabel`（hook 不能在 map 回调里调）。
+ * 目录名换成分支名（§1.7）：worktree 的目录形如 deva-my-dev-a1b2c3，普通目录则回落 basename。
+ */
+function ConvRow({
+  sessionId,
+  title,
+  focusRoot,
+  updatedAt,
+  onOpen
+}: {
+  sessionId: string
+  title: string
+  focusRoot: string | null | undefined
+  updatedAt: number
+  onOpen: (id: string) => void
+}): React.JSX.Element {
+  const { t } = useI18n()
+  const rel = useRelativeTime()
+  const wsLabel = useWorktreeLabel(focusRoot ?? null)
+  return (
+    <button className="cf-convrow" onClick={() => onOpen(sessionId)}>
+      <span className="cf-convrow__title">{title || t('chat.untitled')}</span>
+      {focusRoot && (
+        <span className="cf-convrow__proj" title={focusRoot}>
+          <Folder size={11} />
+          <span className="cf-convrow__projname">{wsLabel}</span>
+        </span>
+      )}
+      <span className="cf-convrow__time">{rel(updatedAt)}</span>
+    </button>
+  )
+}
+
 export function PersonaEditor({
   initial,
   onClose

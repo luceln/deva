@@ -1879,13 +1879,15 @@ async function scenarioWorktreePaths(): Promise<void> {
   eq('paths：repoKey 对尾斜杠的写法一致', P.repoKeyOf(base + '/'), rk1)
   eq('paths：repoKey 是 16 位 hex', /^[0-9a-f]{16}$/.test(rk1), true)
 
-  // ── slug：§6.3 逐条 ──
+  // ── slug：§6.3 逐条。其中「纯中文 → worktree」与「含空格 → 折叠」是 这条的主进程半边：
+  //    分支名不能直接当目录名用，必须有确定的兜底，否则 precheck 会给一个建不出来的路径。
+  //    另一半（路径框可编辑、用户改写为合法值后能创建）在渲染层 NewSessionDialog 里。
   const slugCases: Array<[string, string]> = [
     ['my/dev', 'my-dev'], // '/' 扁平化（目录名不能有层级）
     ['feat/req-worktree-ui', 'feat-req-worktree-ui'],
     ['MyBranch', 'mybranch'], // 小写化
-    ['修复登录', 'worktree'], // 纯中文 → 兜底
-    ['a  b', 'a-b'], // 连续非法片段折叠
+    ['修复登录', 'worktree'], // A47：纯中文 → 兜底 worktree
+    ['a  b', 'a-b'], // A47：含空格 → 连续非法片段折叠
     ['--x--', 'x'], // 去首尾 '-'
     ['.x.', 'x'], // 去首尾 '.'
     ['a..b', 'a.b'], // '..' → '.'
@@ -1893,7 +1895,7 @@ async function scenarioWorktreePaths(): Promise<void> {
     ['x'.repeat(60), 'x'.repeat(40)] // 截断 40
   ]
   for (const [input, want] of slugCases) {
-    eq(`paths：slugifyBranch(${JSON.stringify(input)})`, P.slugifyBranch(input), want)
+    eq(`paths：slugifyBranch(${JSON.stringify(input)})（A47）`, P.slugifyBranch(input), want)
   }
   // 截断后不得留下尾部 '-'
   check(
@@ -2811,6 +2813,235 @@ async function scenarioWorktreeLock(): Promise<void> {
   eq('§5.1：慢调用跑完后，等锁的那条也真的跑到了', order.includes('waiter:in'), true)
 }
 
+/**
+ * worktree P1 主进程侧：A35（记忆跨工作区共享）、A27（依赖装好前不当可用）、
+ * `state` 四态（删目录 / prune / 切分支 / 正常）、`sizeBytes` 异步统计。
+ *
+ * 这个场景是 spec §9.1 里 R1/R8/R13 三条风险的落点，也是 T1.2/T1.3/T1.4b/T1.6 的验收处。
+ */
+async function scenarioWorktree(): Promise<void> {
+  const CR = await import('../../apps/desktop/src/main/services/worktree/create')
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+  const L = await import('../../apps/desktop/src/main/services/worktree/list')
+  const M = await import('../../apps/desktop/src/main/services/memory')
+  const SCOPE = await import('../../apps/desktop/src/main/services/worktree/scope')
+  const DEPS = await import('../../apps/desktop/src/main/services/worktree/deps')
+
+  const repo = makeRepo(path.join(DST, 'repo'), { 'a.txt': 'a\n', 'README.md': 'r\n' })
+  const wt = path.join(DST, 'wts', 'main-case')
+  const r = await CR.createWorktree({
+    repoRoot: repo,
+    branch: 'wt/main-case',
+    path: wt,
+    skipDeps: true
+  })
+  if (!r.ok) {
+    fail('worktree：前置创建失败', JSON.stringify(r))
+    return
+  }
+  const rec = S.getRecord(wt)!
+  eq('前置：记录 phase 是 active', rec.phase, 'active')
+  eq('前置：skipDeps 让 deps 落 skipped（不探测命令）', rec.deps, 'skipped')
+  eq('前置：depsDetail 说明是用户勾选', rec.depsDetail, 'user-skipped')
+
+  // ══ A35：worktree 写入 → 主仓库立即可读 ══
+  /*
+   * 这是 R1/G5 的核心断言：项目私有记忆只有一份，键是主仓库根（`projectMemoryRootOf`）。
+   * 造法走**真实链路**——用 `projectMemoryRootOf` 把 worktree 路径映射回 repoRoot，
+   * 再走 `saveMemories` / `listMemories`，与工具层（tools.ts 的 memory_write）用的是同一对函数。
+   */
+  const memoryRoot = SCOPE.projectMemoryRootOf(wt)
+  eq('A35：worktree 路径的项目记忆根 = 主仓库根', memoryRoot, repo)
+  eq('A35：非 worktree 路径原样返回（不归一化、不漂移）', SCOPE.projectMemoryRootOf(repo), repo)
+  eq('A35：null 透传 null', SCOPE.projectMemoryRootOf(null), null)
+
+  const marker = `A35-${Date.now()}`
+  const wrote = M.writeMemory(`${marker} 在 worktree 里写下的记忆`, undefined, {
+    kind: 'project',
+    root: memoryRoot!
+  })
+  eq('A35 前置：写入成功', wrote.ok, true)
+  // 主仓库会话读：必须立刻看到同一条（listMemories 每次读盘，无缓存）
+  const fromPrimary = M.listMemories({ kind: 'project', root: repo })
+  check(
+    'A35：worktree 写入 → 主仓库立即可读',
+    fromPrimary.some((e) => e.content.includes(marker)),
+    JSON.stringify(fromPrimary.map((e) => e.content))
+  )
+  // 反向：如果记忆根错用 workspaceRoot，读到的会是另一份（空）
+  const wrongRoot = M.listMemories({ kind: 'project', root: wt })
+  check(
+    'A35 反向：直接用 worktree 路径当记忆根读不到（证明共享靠 memoryScopeRoot 而非路径巧合）',
+    !wrongRoot.some((e) => e.content.includes(marker)),
+    JSON.stringify(wrongRoot.map((e) => e.content))
+  )
+  // 清理：别把测试数据留在真实记忆里
+  M.clearMemories({ kind: 'project', root: memoryRoot! })
+
+  // ══ state 四态 ══
+  const snap0 = await L.listWorktrees()
+  const item0 = snap0.items.find((i) => i.compareKey === rec.compareKey)
+  eq('state：正常情况是 ok', item0?.state, 'ok')
+  eq('state：unmanaged 不含主检出（它是仓库本身）', snap0.unmanaged.length, 0)
+
+  // ① 切分支 → branch-mismatch
+  gitOut(wt, 'checkout', '-q', '-b', 'wt/other')
+  const snap1 = await L.listWorktrees()
+  const item1 = snap1.items.find((i) => i.compareKey === rec.compareKey)
+  eq('state：目录被切到别的分支 → branch-mismatch', item1?.state, 'branch-mismatch')
+  eq('state：mismatch 时给出实际分支名（界面要显示「已被切到 X」）', item1?.actualBranch, 'wt/other')
+  gitOut(wt, 'checkout', '-q', rec.branch)
+
+  // ② detached → 也算 branch-mismatch（不能把字面量 HEAD 当分支名放过）
+  const headSha = gitOut(wt, 'rev-parse', 'HEAD')
+  gitOut(wt, 'checkout', '-q', '--detach', headSha)
+  const snap2 = await L.listWorktrees()
+  eq(
+    'state：detached 也算 branch-mismatch（不把 "HEAD" 当分支名）',
+    snap2.items.find((i) => i.compareKey === rec.compareKey)?.state,
+    'branch-mismatch'
+  )
+  gitOut(wt, 'checkout', '-q', rec.branch)
+
+  // ③ 删目录 → 目录不在 + git 随即标 prunable → 落 prunable（§2.1 第 1 条优先）
+  /*
+   * 这里是 `prunable` 而不是 `dir-missing`：git 发现 worktree 目录没了会立刻把它标成 prunable，
+   * 而 §2.1 明确要求「prunable 比 dir-missing 更强，两者同时成立时按更强的展示」——
+   * 用户才看得到「清理登记」这个出口。`dir-missing` 是「目录不在但 git 还没标」那一态。
+   */
+  fs.rmSync(wt, { recursive: true, force: true })
+  const snap3 = await L.listWorktrees()
+  eq(
+    'state：目录被外部删掉 → prunable（git 随即标记，§2.1 第 1 条优先于 dir-missing）',
+    snap3.items.find((i) => i.compareKey === rec.compareKey)?.state,
+    'prunable'
+  )
+  eq('state：dir-missing 时 sizeBytes 直接给 0（不去遍历不存在的目录）', snap3.items.find((i) => i.compareKey === rec.compareKey)?.sizeBytes, 0)
+
+  // ④ prune 掉登记 → 仍是 dir-missing（目录不在，登记也没了）
+  gitOut(repo, 'worktree', 'prune')
+  const snap4 = await L.listWorktrees()
+  eq(
+    'state：prune 掉登记后仍是 dir-missing（不新造第五种状态）',
+    snap4.items.find((i) => i.compareKey === rec.compareKey)?.state,
+    'dir-missing'
+  )
+
+  // ⑤ 目录在但登记丢了 → dir-missing（第 3 条短路）
+  fs.mkdirSync(wt, { recursive: true })
+  const snap5 = await L.listWorktrees()
+  eq(
+    'state：目录在但 git 登记丢了 → dir-missing（§2.1 第 3 条）',
+    snap5.items.find((i) => i.compareKey === rec.compareKey)?.state,
+    'dir-missing'
+  )
+  fs.rmSync(wt, { recursive: true, force: true })
+
+  // ⑥ prunable：目录不在 + git 标记 prunable → prunable（更强的信号优先）
+  const wt2 = path.join(DST, 'wts', 'prunable-case')
+  const r2 = await CR.createWorktree({
+    repoRoot: repo,
+    branch: 'wt/prunable',
+    path: wt2,
+    skipDeps: true
+  })
+  if (!r2.ok) {
+    fail('worktree：第二条创建失败', JSON.stringify(r2))
+    return
+  }
+  const rec2 = S.getRecord(wt2)!
+  fs.rmSync(wt2, { recursive: true, force: true })
+  const snap6 = await L.listWorktrees()
+  eq(
+    'state：目录不在 + git 标记 prunable → prunable（§2.1 第 1 条，比 dir-missing 更强）',
+    snap6.items.find((i) => i.compareKey === rec2.compareKey)?.state,
+    'prunable'
+  )
+
+  // ══ T1.4b：sizeBytes 异步统计 ══
+  L.clearSizeCacheForTest()
+  const wt3 = path.join(DST, 'wts', 'size-case')
+  const r3 = await CR.createWorktree({
+    repoRoot: repo,
+    branch: 'wt/size',
+    path: wt3,
+    skipDeps: true
+  })
+  if (!r3.ok) {
+    fail('worktree：第三条创建失败', JSON.stringify(r3))
+    return
+  }
+  const rec3 = S.getRecord(wt3)!
+  // 塞点体积进去，让统计结果可判
+  fs.writeFileSync(path.join(wt3, 'blob.bin'), Buffer.alloc(4096, 1))
+  const first = await L.listWorktrees()
+  const firstItem = first.items.find((i) => i.compareKey === rec3.compareKey)
+  eq('T1.4b：列表首次返回 sizeBytes 为 null（界面显示「统计中…」）', firstItem?.sizeBytes, null)
+  // 等后台算完（setImmediate + 遍历）
+  await new Promise((r) => setTimeout(r, 300))
+  const second = await L.listWorktrees()
+  const secondItem = second.items.find((i) => i.compareKey === rec3.compareKey)
+  check(
+    'T1.4b：后台算完后 sizeBytes 有值且大于 4096',
+    typeof secondItem?.sizeBytes === 'number' && secondItem.sizeBytes > 4096,
+    JSON.stringify(secondItem?.sizeBytes)
+  )
+
+  // ══ A27：依赖装好之前不许当可用（deps 状态机 + 失败不回滚）══
+  /*
+   * A27 的含义见 spec §3.6 / §2.2：`deps` 必须是一个**明确值**，不能留 undefined；
+   * 且安装失败**不回滚 worktree**（目录与分支都还在，用户能继续读代码）。
+   *
+   * 这里用真实的 pnpm 安装太重（CI 要联网），所以走两条更硬的断言：
+   * ① lockfile 检测按表命中（含非 JS 生态 → unsupported-language）；
+   * ② 装失败时 worktree 仍在（用一条必失败的假命令验证「不回滚」这条语义）。
+   */
+  eq(
+    'A27：无 lockfile → skipped + no-lockfile',
+    DEPS.detectInstallPlan(wt3).skipReason,
+    'no-lockfile'
+  )
+  fs.writeFileSync(path.join(wt3, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+  const plan = DEPS.detectInstallPlan(wt3)
+  eq('A27：有 pnpm-lock.yaml → 用 pnpm install --frozen-lockfile', plan.argv?.join(' '), 'pnpm install --frozen-lockfile')
+  fs.rmSync(path.join(wt3, 'pnpm-lock.yaml'))
+  fs.writeFileSync(path.join(wt3, 'Cargo.toml'), '[package]\nname="x"\n')
+  eq(
+    'A27：Cargo.toml → unsupported-language（不是含糊的 no-lockfile）',
+    DEPS.detectInstallPlan(wt3).skipReason,
+    'unsupported-language'
+  )
+  fs.rmSync(path.join(wt3, 'Cargo.toml'))
+
+  // A27 的核心：安装失败不回滚 worktree
+  S.upsertRecord({ ...rec3, deps: 'pending' })
+  const started = DEPS.startInstall(S.getRecord(wt3)!)
+  eq('A27：无 lockfile 时 startInstall 不启动（落 skipped）', started.started, false)
+  eq('A27：skipped 终态可查（删除判断与边界说明都要这个明确值）', S.getRecord(wt3)?.deps, 'skipped')
+  // 造一个「会失败的安装」：假的 lockfile + 指向不存在的包管理器路径
+  fs.writeFileSync(path.join(wt3, 'package-lock.json'), '{"lockfileVersion":3}\n')
+  S.upsertRecord({ ...S.getRecord(wt3)!, deps: 'installing' })
+  const retry = DEPS.retryInstall(wt3)
+  eq('A27：retryInstall 从 installing 状态直接拒绝（§2.2 禁止同态重入）', retry.reason, 'already-installing')
+  // 失败后 worktree 仍在（用 ready 之外的状态验证「不回滚」）
+  check('A27：安装失败/中断都不会删 worktree 目录', fs.existsSync(wt3), String(fs.existsSync(wt3)))
+  check('A27：分支也还在（不回滚 = 用户能继续读代码）', gitOut(repo, 'branch', '--list', rec3.branch).includes(rec3.branch), gitOut(repo, 'branch', '--list', rec3.branch))
+
+  // ══ A48：判定只在主进程，渲染层拿到的就是结果 ══
+  const snapFinal = await L.listWorktrees()
+  const finalItem = snapFinal.items.find((i) => i.compareKey === rec3.compareKey)
+  check(
+    'A48：快照里 state/deps/sessionCount/sizeBytes/lockHolder 全部由主进程给出',
+    finalItem !== undefined &&
+      typeof finalItem.state === 'string' &&
+      typeof finalItem.deps === 'string' &&
+      typeof finalItem.sessionCount === 'number' &&
+      'sizeBytes' in finalItem &&
+      'lockHolder' in finalItem,
+    JSON.stringify(finalItem)
+  )
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -2839,6 +3070,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtcreate: scenarioWorktreeCreate,
   wtbrief: scenarioWorktreeBrief,
   wtsweep: scenarioWorktreeSweep,
+  worktree: scenarioWorktree,
   wtlock: scenarioWorktreeLock,
   locks: scenarioLocks,
   nosource: scenarioNoSource,

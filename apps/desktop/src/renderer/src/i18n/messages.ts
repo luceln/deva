@@ -1658,7 +1658,94 @@ const zhCN: MessageTree = {
     mcpDeleteConfirm: '确定删除该 MCP 服务？此操作不可撤销。',
     skillDeleteConfirm: '技能文件夹（含其中的脚本与资料）将移到回收站，可从回收站还原。',
     skillDeleteConfirmMac: '技能文件夹（含其中的脚本与资料）将移到废纸篓，可从废纸篓还原。',
-    skillDeleteFailed: '删除失败：技能文件夹可能正被占用，可稍后重试或在文件夹中手动删除。'
+    skillDeleteFailed: '删除失败：技能文件夹可能正被占用，可稍后重试或在文件夹中手动删除。',
+    // 设置 › 工作区（worktree 列表）。文案口径见 spec §7.4，含 {占位符} 的在组件里替换。
+    wt: {
+      paneTitle: '工作区',
+      paneHint: '每个工作区是一个独立目录，有自己的一份依赖，改动互不影响。',
+      refresh: '刷新',
+      empty: '还没有独立工作区。在新建会话时选「独立工作区」即可创建。',
+      loadFailed: '读取工作区列表失败：{msg}',
+      notWired: '这个操作还没接通',
+      detached: '分离头指针',
+      unmanagedTitle: 'git 里登记、但不是 Deva 建的',
+      unmanagedHint: '只做展示，不参与任何操作。',
+      baseLabel: '切出自 {label}',
+      lockedBy: '{label} 正在操作这个目录的 git',
+      mergeInProgress: '合并进行中，还有 {n} 个冲突待处理',
+      sizePending: '统计中…',
+      sizeUnknown: '占用未知',
+      noSession: '无关联会话',
+      sessionCount: '{n} 个会话',
+      dirtyMeta: '{n} 个未提交改动',
+      memoryShared: '与主仓库 {repoRoot} 共享项目私有记忆',
+      rebuild: '重建',
+      state: {
+        ok: '正常',
+        dirMissing: '工作区目录已缺失',
+        prunable: '工作区目录已缺失（git 登记可清理）',
+        branchMismatch: '工作区已被切到 {actual}，不再是 {branch}'
+      },
+      deps: {
+        pending: '待安装依赖',
+        installing: '安装中',
+        ready: '依赖就绪',
+        failed: '依赖安装失败',
+        skipped: '无需安装依赖',
+        retry: '重试安装'
+      },
+      remove: {
+        title: '删除工作区',
+        installing: '正在安装依赖，等它结束或失败后再删。',
+        prune: '移除登记',
+        pruneHint: '不删除任何文件（目录本来就不存在），只清理 git 登记。',
+        branchKept: '分支 {branch} 会保留。'
+      },
+      merge: {
+        merge: '合并',
+        title: '合并回 {target}',
+        targetNotSet: '还没有合并目标。选一个本地分支作为目标。',
+        notCheckedOut: '分支当前没有被任何工作区检出，无法合并。',
+        sourceBranchChanged: '该工作区已不在原分支上，无法合并。'
+      },
+      reveal: '在文件管理器打开'
+    },
+    // 新建会话（spec §7.7、原型面 1 五屏）。三条硬要求见 NewSessionDialog.tsx 文件头。
+    new: {
+      title: '新建会话',
+      sub: '选择这次对话在哪个目录里进行',
+      primary: '主目录',
+      primaryBranch: '当前分支 {branch}',
+      worktree: '新工作区',
+      worktreeDesc: '从某个提交切出一份独立目录，改动不会碰到主目录',
+      base: '起点',
+      baseHint: '从哪个提交切出。选定后会冻结成 SHA，之后分支前进也不影响这个工作区。',
+      name: '名称',
+      nameHint: '同时用作分支名，会规范成合法分支名；重名时自动加序号，不会复用已有分支。',
+      path: '路径',
+      pathHint: '必须落在仓库外，否则「工作区不在仓库内」这条约束验不出来。',
+      browse: '浏览…',
+      dirty: '主目录有 {n} 个未提交文件，新工作区不会包含这些改动。',
+      dirtySub: '它们会原样留在主目录，也不会被 stash 或提交。',
+      many: '已有 {n} 个独立工作区，每个含一份依赖（约 15-25MB）。',
+      checking: '正在检查…',
+      disabledHint: '先填好名称和路径',
+      start: '开始对话',
+      startWorktree: '创建工作区并开始',
+      menuItem: '选择位置新建…',
+      reason: {
+        'not-a-repo': '这个目录不是 git 仓库。',
+        'bad-base': '起点无效，换一个分支或提交。',
+        'bad-branch': '名称不能用作分支名，换一个。',
+        'branch-exists': '这个分支名已存在。',
+        'path-exists': '这个目录已存在，不会覆盖或删除它。请换一个路径。',
+        'path-too-long': '路径太长，超过上限 180 字符。',
+        'path-inside-repo': '工作区不能放在仓库里面。',
+        'slug-collision': '这个名称和已有工作区冲突，换一个。',
+        'no-git': '没找到 git，请先安装。',
+        error: '检查失败，稍后再试。'
+      }
+    }
   },
   // 内置浏览器：「Deva 浏览器」窗口的外框与主窗口输入框上方的胶囊
   browser: {
@@ -3354,7 +3441,92 @@ const en: MessageTree = {
     skillDeleteConfirmMac:
       'The skill folder, including its scripts and files, will be moved to the Trash, where you can restore it.',
     skillDeleteFailed:
-      'Could not delete the skill. The folder may be in use; try again later or delete it manually.'
+      'Could not delete the skill. The folder may be in use; try again later or delete it manually.',
+    wt: {
+      paneTitle: 'Worktrees',
+      paneHint: 'Each worktree is its own folder with its own dependencies; changes do not affect each other.',
+      refresh: 'Refresh',
+      empty: 'No worktrees yet. Pick "separate worktree" when starting a new chat to create one.',
+      loadFailed: 'Could not load worktrees: {msg}',
+      notWired: 'This action is not wired up yet',
+      detached: 'detached HEAD',
+      unmanagedTitle: 'Registered in git but not created by Deva',
+      unmanagedHint: 'Shown for reference only; no actions apply.',
+      baseLabel: 'from {label}',
+      lockedBy: '{label} is running git in this folder',
+      mergeInProgress: 'Merge in progress, {n} conflicts left',
+      sizePending: 'Measuring…',
+      sizeUnknown: 'Size unknown',
+      noSession: 'No linked chats',
+      sessionCount: '{n} chats',
+      dirtyMeta: '{n} uncommitted changes',
+      memoryShared: 'Shares project memory with the main repo {repoRoot}',
+      rebuild: 'Rebuild',
+      state: {
+        ok: 'Healthy',
+        dirMissing: 'Worktree folder is missing',
+        prunable: 'Worktree folder is missing (git entry can be cleaned up)',
+        branchMismatch: 'Switched to {actual}, no longer on {branch}'
+      },
+      deps: {
+        pending: 'Dependencies pending',
+        installing: 'Installing',
+        ready: 'Dependencies ready',
+        failed: 'Dependency install failed',
+        skipped: 'No dependencies needed',
+        retry: 'Retry install'
+      },
+      remove: {
+        title: 'Remove worktree',
+        installing: 'Dependencies are installing; wait for it to finish or fail.',
+        prune: 'Remove git entry',
+        pruneHint: 'Deletes no files (the folder is already gone); only cleans the git entry.',
+        branchKept: 'Branch {branch} is kept.'
+      },
+      merge: {
+        merge: 'Merge',
+        title: 'Merge back into {target}',
+        targetNotSet: 'No merge target yet. Pick a local branch as the target.',
+        notCheckedOut: 'That branch is not checked out in any worktree, so it cannot be merged.',
+        sourceBranchChanged: 'This worktree is no longer on its original branch, so it cannot be merged.'
+      },
+      reveal: 'Show in file manager'
+    },
+    new: {
+      title: 'New chat',
+      sub: 'Pick the folder this chat runs in',
+      primary: 'Main folder',
+      primaryBranch: 'on branch {branch}',
+      worktree: 'New worktree',
+      worktreeDesc: 'Cut a separate folder from a commit; changes never touch the main folder',
+      base: 'Start from',
+      baseHint: 'The commit to cut from. It is frozen to a SHA, so later branch moves do not affect this worktree.',
+      name: 'Name',
+      nameHint: 'Also used as the branch name; normalised to a valid branch name. Duplicates get a suffix instead of reusing an existing branch.',
+      path: 'Path',
+      pathHint: 'Must be outside the repo, otherwise the "worktree is not inside the repo" rule cannot hold.',
+      browse: 'Browse…',
+      dirty: 'The main folder has {n} uncommitted files; the new worktree will not include them.',
+      dirtySub: 'They stay in the main folder untouched, not stashed and not committed.',
+      many: 'You already have {n} worktrees, each with its own dependencies (about 15-25MB).',
+      checking: 'Checking…',
+      disabledHint: 'Fill in the name and path first',
+      start: 'Start chat',
+      startWorktree: 'Create worktree and start',
+      menuItem: 'New chat in…',
+      reason: {
+        'not-a-repo': 'This folder is not a git repository.',
+        'bad-base': 'That start point is invalid; pick another branch or commit.',
+        'bad-branch': 'That name cannot be used as a branch name.',
+        'branch-exists': 'That branch name already exists.',
+        'path-exists': 'That folder already exists; it will not be overwritten or deleted. Pick another path.',
+        'path-too-long': 'The path is too long (limit 180 characters).',
+        'path-inside-repo': 'A worktree cannot live inside the repo.',
+        'slug-collision': 'That name collides with an existing worktree.',
+        'no-git': 'git was not found; install it first.',
+        error: 'Check failed; try again later.'
+      }
+    }
   },
   browser: {
     title: 'Deva Browser',

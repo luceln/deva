@@ -12,6 +12,7 @@ import {
   Cog,
   Folder,
   FolderMinus,
+  GitBranch,
   Globe,
   ListFilter,
   MessageCircle,
@@ -44,6 +45,7 @@ import {
   useHoverMenu,
   Avatar
 } from './shell-common'
+import { useWorktreeLabel } from './worktree-label'
 import { ContextMenu } from './ContextMenu'
 import { memberPersona } from './MemberBar'
 import { useDraftPreview } from './Composer'
@@ -210,6 +212,7 @@ export function Rail({
   onOpenThread,
   onOpenProfile,
   onStartPersona,
+  onNewSessionAt,
   onAddPersona,
   onAddPersonaByChat,
   onNewChatFromThread,
@@ -236,6 +239,8 @@ export function Rail({
   onOpenProfile: (id: string) => void
   /** 以该角色发起一条全新对话（复用 startWith）：角色行右键「开始对话」与搜索行「新建对话」浮层共用。 */
   onStartPersona: (id: string) => void
+  /** 打开「新建会话」对话框（选主目录 / 新工作区）：§7.7 的入口。 */
+  onNewSessionAt: () => void
   onAddPersona: () => void
   onAddPersonaByChat: () => void
   onNewChatFromThread: (id: string) => void
@@ -578,6 +583,7 @@ export function Rail({
               archivedCount={archivedSessions.length}
               archiveHint={archiveHint}
               onStart={(id) => startFresh(() => onStartPersona(id))}
+              onNewSessionAt={() => startFresh(onNewSessionAt)}
               onOpenArchive={() => {
                 setFilterOpen(false)
                 setArchiveView(true)
@@ -793,6 +799,7 @@ function NewChatMenu({
   archivedCount,
   archiveHint,
   onStart,
+  onNewSessionAt,
   onOpenArchive
 }: {
   personas: Persona[]
@@ -800,6 +807,8 @@ function NewChatMenu({
   /** 右键归档的次数（Rail 每归档一次加一）；变化时在 + 右上角短暂亮归档角标。 */
   archiveHint: number
   onStart: (personaId: string) => void
+  /** 打开「新建会话」对话框（选主目录 / 新工作区）。 */
+  onNewSessionAt: () => void
   onOpenArchive: () => void
 }): React.JSX.Element {
   const { t } = useI18n()
@@ -878,6 +887,13 @@ function NewChatMenu({
               ))}
             </div>
           )}
+          {/* 「新建会话…」：进入 §7.7 的位置选择对话框（主目录 / 新工作区）。
+              放在角色列表之后、已归档之前——它是「换个地方开新会话」，与「以某个角色开聊」是同一层动作。 */}
+          {personas.length > 0 && <div className="cf-addmenu__sep" />}
+          <button className="cf-addmenu__item" role="menuitem" onClick={() => choose(onNewSessionAt)}>
+            <GitBranch size={15} className="cf-addmenu__icon" />
+            <span className="cf-addmenu__label">{t('cf.new.menuItem')}</span>
+          </button>
           {/* 没有已归档对话时连同分隔线一起不显示。 */}
           {archivedCount > 0 && (
             <>
@@ -1040,6 +1056,9 @@ function ThreadRow({
   const { t } = useI18n()
   const rel = useRelativeTime()
   const draft = useDraftPreview(session.id)
+  // 副标题显示分支名而不是目录名（§1.7）：worktree 目录形如 deva-my-dev-a1b2c3，直接显示认不出。
+  // 不是 worktree（普通目录）时本 hook 回落 basename，行为与改动前一致。
+  const wsLabel = useWorktreeLabel(session.focusRoot ?? null)
   // 任务独占会话（sessionId = `task-…`）：行上打一枚静态「⏰ 定时」徽标以区别普通对话。
   // 「有新运行未读」（state.unread）与待你处理（state.attention）都在头像右上角打红点。
   const isTask = session.id.startsWith('task-')
@@ -1091,7 +1110,7 @@ function ThreadRow({
           ) : session.focusRoot ? (
             <div className="cf-thread__owner cf-thread__owner--ws" title={session.focusRoot}>
               <Folder size={11} />
-              <span className="cf-thread__wsname">{basename(session.focusRoot)}</span>
+              <span className="cf-thread__wsname">{wsLabel}</span>
             </div>
           ) : (
             <div className="cf-thread__owner">{owner?.name ?? ''}</div>

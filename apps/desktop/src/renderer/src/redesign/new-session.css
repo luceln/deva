@@ -1,0 +1,197 @@
+/* ===== 新建会话（spec §7.7、原型面 1 五屏） =====
+ * 字号：12px 给要读的（说明、警示、失败原因），11px 给元信息（分支名、路径尾注）。
+ * 颜色/圆角全部走 tokens.css 既有变量。 */
+.cf-new {
+  width: 560px;
+  max-width: calc(100vw - 48px);
+}
+.cf-new__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.cf-new__sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.cf-new__opts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cf-new__opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  text-align: left;
+  cursor: pointer;
+}
+.cf-new__opt:hover {
+  border-color: var(--border-strong);
+}
+.cf-new__opt.is-on {
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+/* 单选点：既有设计里没有共享的 radio 类，这里按 12px 圆点自绘（与 .cf-opt__dot 同形） */
+.cf-new__dot {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-top: 2px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-full);
+}
+.cf-new__opt.is-on .cf-new__dot {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--accent);
+}
+.cf-new__optmain {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.cf-new__optlabel {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.cf-new__optdesc {
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cf-new__loc {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+}
+.cf-new__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cf-new__label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.cf-new__inputrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.cf-new__inputrow:focus-within {
+  border-color: var(--accent);
+}
+.cf-new__ico {
+  flex: none;
+  color: var(--fg-subtle);
+}
+.cf-new__input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 12px;
+  outline: none;
+}
+/* 路径用等宽：Windows 路径里 \ 与 l、1 混排时，等宽更好读 */
+.cf-new__inputrow--mono .cf-new__input {
+  font-family: var(--font-mono);
+}
+.cf-new__browse {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  padding: 2px 6px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cf-new__browse:hover {
+  background: var(--bg-hover);
+}
+.cf-new__hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--fg-subtle);
+}
+.cf-new__warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cf-new__warnsub {
+  display: block;
+  color: var(--fg-muted);
+}
+.cf-new__note {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
+.cf-new__err {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  color: var(--danger);
+  font-size: 12px;
+}
+.cf-new__checking {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-subtle);
+}
+.cf-new__spin {
+  animation: cf-new-rotate 1s linear infinite;
+}
+@keyframes cf-new-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-new__spin {
+    animation: none;
+  }
+}

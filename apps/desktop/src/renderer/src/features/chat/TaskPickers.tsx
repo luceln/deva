@@ -4,6 +4,7 @@ import { useI18n } from '../../i18n/i18n'
 import { useModels } from '../../store/models'
 import { useExtensions } from '../../store/extensions'
 import { type SessionMeta, useChatState } from '../../store/chat'
+import { useWorktreeLabelOf } from '../../redesign/worktree-label'
 import { Select } from '../../components/Select'
 
 /**
@@ -174,6 +175,9 @@ export function TaskRunModeSelect({
   const { t } = useI18n()
   const { sessions } = useChatState()
   const { personas } = useExtensions()
+  // 第二行的目录名换成分支名（§1.7）：取一个「路径 → 显示名」的查找器，
+  // map 里逐个调用（hook 不能进 map 回调）。没有 Provider 时它回落 basename。
+  const wsLabelOf = useWorktreeLabelOf()
 
   const chats = useMemo(() => {
     const usable = sessions
@@ -185,9 +189,9 @@ export function TaskRunModeSelect({
   }, [sessions, taskSessionId, value])
   const current = value ? sessions.find((s) => s.id === value) : undefined
   const titleOf = (title: string): string => title || t('chat.untitled')
-  // 第二行：挂了文件夹写文件夹名，否则写角色名（同左侧对话列表）。
+  // 第二行：挂了文件夹写分支名（worktree）/ 目录名（普通目录），否则写角色名（同左侧对话列表）。
   const subOf = (s: SessionMeta): string | undefined => {
-    if (s.focusRoot) return s.focusRoot.split(/[\\/]/).filter(Boolean).pop()
+    if (s.focusRoot) return wsLabelOf(s.focusRoot)
     return personas.find((p) => p.id === s.personaId)?.name
   }
 

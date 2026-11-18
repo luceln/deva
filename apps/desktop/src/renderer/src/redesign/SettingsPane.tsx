@@ -17,10 +17,12 @@ import {
   Trash2,
   Unlock,
   Users,
-  X
+  X,
+  GitBranch
 } from 'lucide-react'
 import { UpdateSection } from './UpdateSection'
 import { ImportPane } from './ImportPane'
+import { WorktreePane } from './WorktreePane'
 import devaIcon from '../../../../build/icon.svg'
 import type { McpKV, McpServer, McpStatus, Persona, Skill } from '../mock/extensions'
 import { Markdown } from '../features/chat/Markdown'
@@ -36,7 +38,7 @@ import { ModelSettings } from '../features/settings/ModelSettings'
 import { clipName, IS_MAC, AvatarStack, Segmented, Toggle } from './shell-common'
 
 /* ============================ 系统设置（Part H） ============================ */
-type SettingsSection = 'general' | 'models' | 'extensions' | 'import' | 'about'
+type SettingsSection = 'general' | 'models' | 'extensions' | 'worktrees' | 'import' | 'about'
 
 /** 打开设置时的落点：哪一页，以及（扩展页）直接打开哪一项的详情。 */
 export type SettingsInit = { section?: SettingsSection; ext?: { kind: 'skill' | 'mcp'; id: string } }
@@ -50,6 +52,8 @@ export function Settings({ initial, onClose }: { initial?: SettingsInit; onClose
     { id: 'general', icon: <Cog size={15} />, label: t('settings.general') },
     { id: 'models', icon: <Brain size={15} />, label: t('settings.models') },
     { id: 'extensions', icon: <Puzzle size={15} />, label: t('activity.extensions') },
+    // 工作区排在扩展之后：它是「管理已有的」，与「导入」一样不是天天进，但要能在设置里找到。
+    { id: 'worktrees', icon: <GitBranch size={15} />, label: t('cf.wt.paneTitle') },
     // 「导入」排在扩展之后、关于之前：是一次性的迁移动作，不放最显眼（日常用不到），也不埋到最后。
     { id: 'import', icon: <Download size={15} />, label: t('settings.import.title') },
     { id: 'about', icon: <Info size={15} />, label: t('settings.about') }
@@ -84,6 +88,7 @@ export function Settings({ initial, onClose }: { initial?: SettingsInit; onClose
             {section === 'general' && <GeneralPane />}
             {section === 'models' && <ModelSettings />}
             {section === 'extensions' && <ExtensionsPane initialOpen={extTarget} />}
+            {section === 'worktrees' && <WorktreePane />}
             {section === 'import' && <ImportPane />}
             {section === 'about' && <AboutPane />}
           </div>

@@ -10,6 +10,7 @@ import { ToastProvider } from './components/ToastProvider'
 import { ModelsProvider } from './store/models'
 import { ExtensionsProvider } from './store/extensions'
 import { WorkspaceProvider } from './store/workspace'
+import { WorktreeProvider } from './store/worktree'
 import { ChatProvider } from './store/chat'
 import { TasksProvider } from './store/tasks'
 import { ProfileProvider } from './store/profile'
@@ -27,13 +28,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
             <ModelsProvider>
               <ExtensionsProvider>
                 <WorkspaceProvider>
-                  <ChatProvider>
-                    <TasksProvider>
-                      <ProfileProvider>
-                        <App />
-                      </ProfileProvider>
-                    </TasksProvider>
-                  </ChatProvider>
+                  <WorktreeProvider>
+                    <ChatProvider>
+                      <TasksProvider>
+                        <ProfileProvider>
+                          <App />
+                        </ProfileProvider>
+                      </TasksProvider>
+                    </ChatProvider>
+                  </WorktreeProvider>
                 </WorkspaceProvider>
               </ExtensionsProvider>
             </ModelsProvider>

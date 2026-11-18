@@ -159,8 +159,30 @@ const TASKS = [
     stage: 'P1',
     name: '新建会话 UI（位置单选 / 起点选择器 / dirty 只警示）',
     criteria: [
-      { kind: 'grep', file: 'apps/desktop/src/renderer/src/redesign/QuickStart.tsx', pattern: 'locationTouched', why: '缺 QuickStart.tsx 或其 locationTouched 联动' },
-      { kind: 'grep', file: QA, within: 'scenarioWorktree', pattern: 'A47', why: '缺 A47 断言' }
+      // spec §8 的 T1.1 写的是「`QuickStart.tsx`（**或**新建 `NewSessionDialog.tsx`）」——
+      // 两种落点都合法。判据原先把文件写死成 QuickStart.tsx，等于把 spec 的二选一砍成一选一，
+      // 会把「按 spec 允许的另一条路做完」误报成没做。这里两个文件**任一**命中即通过。
+      {
+        kind: 'grepAny',
+        files: [
+          'apps/desktop/src/renderer/src/redesign/QuickStart.tsx',
+          'apps/desktop/src/renderer/src/redesign/NewSessionDialog.tsx'
+        ],
+        pattern: 'locationTouched',
+        why: 'QuickStart.tsx 与 NewSessionDialog.tsx 里都没有 locationTouched 联动'
+      },
+      // A47 = 分支名为中文/含空格 → slug 回落 worktree；路径框可编辑，用户改写为合法值后创建成功。
+      // 主进程半边在 scenarioWorktreePaths 的 slug 用例，渲染层半边（路径可编辑）在 NewSessionDialog。
+      // 两处任一有 A47 都算这条被覆盖到了。
+      {
+        kind: 'grepAny',
+        files: [
+          '.deva/qa/test-main.ts',
+          'apps/desktop/src/renderer/src/redesign/NewSessionDialog.tsx'
+        ],
+        pattern: 'A47',
+        why: '缺 A47 断言（中文/空格分支名 → slug 回落 + 路径可编辑后创建成功）'
+      }
     ]
   },
   {
@@ -341,6 +363,24 @@ function readTree(rel) {
 function checkCriterion(c) {
   if (c.kind === 'file') {
     return { ok: exists(c.file), detail: exists(c.file) ? '' : c.why }
+  }
+  // `grepAny`：多个候选文件，**任一**命中即算满足。
+  //
+  // 为什么需要：有些任务的实现落点 spec 明确给了「A 或 B」（如 T1.1 的 `QuickStart.tsx` 或
+  // `NewSessionDialog.tsx`）。判据若写死单个文件，会把「按 spec 另一条路做完」误报成没做——
+  // 那是假红，和假绿一样让门禁失去意义。
+  if (c.kind === 'grepAny') {
+    const misses = []
+    for (const f of c.files) {
+      const raw = readFileSafe(f)
+      if (raw === null) {
+        misses.push(`${f}（读不到）`)
+        continue
+      }
+      if (raw.includes(c.pattern)) return { ok: true, detail: '' }
+      misses.push(f)
+    }
+    return { ok: false, detail: `${c.why}｜查过：${misses.join('、')}` }
   }
   const raw = c.kind === 'absent' ? readTree(c.file) : readFileSafe(c.file)
   if (raw === null) {
