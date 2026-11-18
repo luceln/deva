@@ -113,7 +113,11 @@ interface GitState {
 
 /**
  * 读取某工作区的 git 状态。不轮询（status 每次 spawn git 进程，且当前无文件监听）：
- * 只在「挂载 / 开菜单 / 每次写操作后」拉取。用 reqRef 防竞态——快速切换工作区时旧结果不覆盖新。
+ * 只在「挂载 / 切工作区 / 窗口重新获得焦点 / 开菜单 / 每次写操作后 / 一轮对话结束」拉取。
+ * 用 reqRef 防竞态——快速切换工作区时旧结果不覆盖新。
+ *
+ * 焦点刷新覆盖「在外部终端切了分支，再点回应用」这一最常见场景（用户实测反馈的 bug）；
+ * 窗口一直开着、外部改了分支却始终不切回来时，pill 仍是旧值，需点开菜单或触发上述任一时机才更新。
  */
 function useGitStatus(root: string | null): GitState {
   const [available, setAvailable] = useState(false)
@@ -150,6 +154,22 @@ function useGitStatus(root: string | null): GitState {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  // 窗口重新获得焦点时刷新一次：终端里切完分支再点回应用，pill 立刻跟上。
+  // 经 ref 取最新的 refresh，监听只注册一次——避免 root 变化时反复解绑重绑，也不会自激成循环。
+  const refreshRef = useRef(refresh)
+  useEffect(() => {
+    refreshRef.current = refresh
+  }, [refresh])
+  useEffect(() => {
+    const onFocus = (): void => {
+      // 窗口被遮挡/最小化时拿到的是 hidden，此时不拉，省一次 git 进程。
+      if (document.visibilityState !== 'visible' || !document.hasFocus()) return
+      void refreshRef.current()
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+  }, [])
 
   return { available, status, busy, refresh }
 }

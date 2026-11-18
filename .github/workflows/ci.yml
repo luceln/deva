@@ -58,3 +58,10 @@ jobs:
       # 输出会写明「当前卡在哪个阶段、不允许进入哪一阶段」。
       - name: 实施门槛
         run: node .deva/qa/spec-gate.cjs
+
+      # 分支 pill 刷新时机：用户报过「终端切完分支、点回应用 pill 还是旧值」。
+      # 这里查的是源码形状（注册 focus 监听 / 清理 / 调到 refresh / 未轮询 / 注释一致）。
+      # 运行时行为（pill 文本真的变、hidden 时真的跳过）要浏览器，CI 没有该依赖，
+      # 见 .deva/qa/git-pill/README.md 的手动步骤——不要把本步骤当成行为验证。
+      - name: 分支 pill 刷新时机
+        run: node .deva/qa/check-git-focus.cjs
