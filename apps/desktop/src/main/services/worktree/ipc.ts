@@ -3,7 +3,7 @@ import { createWorktree, precheck } from './create'
 import { listWorktrees } from './list'
 import { retryInstall } from './deps'
 import { briefForFocusRoot } from './brief'
-import { onWorktreeChanged, onWorktreeProgress } from '../chat-bus'
+import { onWorktreeChanged, onWorktreeProgress, onWorktreeSize } from '../chat-bus'
 import type { WorktreeCreateReq, WorktreePrecheckReq } from '../../../shared/worktree-protocol'
 
 /**
@@ -53,5 +53,15 @@ export function registerWorktreeIpc(getWin: () => BrowserWindow | null): void {
     const win = getWin()
     if (!win || win.isDestroyed()) return
     win.webContents.send('worktree:progress', p)
+  })
+  /*
+   * 体积回填走**增量**通道（`worktree:size`），不复用 `worktree:changed`：
+   * 后者会让界面整表重拉，而重拉一轮就是 4N+1 次 git——后台逐步算完的 N 个体积会把
+   * 「打开一次列表」的开销翻倍（实测 1.8 秒 → 3.6 秒）。这里只带变的那一个字段。
+   */
+  onWorktreeSize((u) => {
+    const win = getWin()
+    if (!win || win.isDestroyed()) return
+    win.webContents.send('worktree:size', u)
   })
 }

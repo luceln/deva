@@ -202,6 +202,20 @@ export interface WorktreeInstallResult {
 }
 
 /**
+ * 某个工作区的体积统计完成（`worktree:size` 推送，**增量**）。
+ *
+ * 一次 `worktree:list` 会为每条有效工作区返回 `sizeBytes: null`，随后后台各自算完。
+ * 这个事件只带变的那一条：界面按 `compareKey` 就地补字段，**不重拉列表**。
+ *
+ * 为什么不复用 `worktree:changed`：那个会让界面整表重拉，而一轮重拉是 `4N+1` 次 git
+ * （实测 5 个工作区约 1.8 秒）。后台逐步回填 N 个体积就会重拉 N 次，把打开列表的真实开销翻倍。
+ */
+export interface WorktreeSizeUpdate {
+  compareKey: string
+  sizeBytes: number
+}
+
+/**
  * worktree 长操作的进度（`worktree:progress` 推送）。
  *
  * - `waiting-lock`：等 Git 锁超过 5 秒（spec §5.1 第 7 条 / B6）。

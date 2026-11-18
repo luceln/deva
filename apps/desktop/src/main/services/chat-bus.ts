@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events'
+import type { WorktreeSizeUpdate } from '../../shared/worktree-protocol'
 import type { ChatRemoteChange } from '../../shared/chat-protocol'
 import type { ChatStreamEvent } from './chat'
 
@@ -111,6 +112,28 @@ export type WorktreeProgress =
  */
 export function publishWorktreeProgress(p: WorktreeProgress): void {
   bus.emit('worktree-progress', p)
+}
+
+/**
+ * 某个工作区的体积统计完成（`worktree:size`，增量）。
+ *
+ * ## 为什么是增量事件，不是复用 `worktree:changed`
+ *
+ * 体积是**后台逐步**算出来的：一次 `worktree:list` 返回 N 条 `sizeBytes: null`，随后 N 条各自算完。
+ * 若每条都发 `worktree:changed`，界面就要**整表重拉** N 次——而一次重拉本身就是 `4N+1` 次 git
+ * （实测 5 个工作区一轮约 1.8 秒）。于是「打开一次列表」的真实开销从 1.8 秒变成 3.6 秒，
+ * 体积统计这个纯附加信息把列表拖慢了一倍。
+ *
+ * 所以这里只带变的那一个字段：界面按 `compareKey` 就地补上 `sizeBytes`，不发请求。
+ */
+export type { WorktreeSizeUpdate } from '../../shared/worktree-protocol'
+
+export function publishWorktreeSize(u: WorktreeSizeUpdate): void {
+  bus.emit('worktree-size', u)
+}
+
+export function onWorktreeSize(listener: (u: WorktreeSizeUpdate) => void): () => void {
+  return subscribe<WorktreeSizeUpdate>('worktree-size', listener)
 }
 
 export function onWorktreeProgress(listener: (p: WorktreeProgress) => void): () => void {

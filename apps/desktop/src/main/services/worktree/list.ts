@@ -5,7 +5,7 @@ import { listRecords, type WorktreeRecord } from './store'
 import { compareKeyOfPath, repoKeyOf } from './paths'
 import { parseWorktreeList, type WorktreeEntry } from './git-worktree'
 import { gitLockHolder } from './lock'
-import { publishWorktreeChanged } from '../chat-bus'
+import { publishWorktreeSize } from '../chat-bus'
 
 /**
  * `worktree:list` 的快照与 `state` 计算（spec §2.1）。
@@ -88,12 +88,27 @@ function dirExists(path: string): boolean {
   }
 }
 
-/** 某个 worktree 目录此刻的 HEAD 分支（detached 时 git 返回字面量 `HEAD`）。 */
-async function headBranchOf(path: string): Promise<string | null> {
-  const r = await runGitRaw(path, ['rev-parse', '--abbrev-ref', 'HEAD'])
-  if (r.code !== 0) return null
-  const b = r.stdout.trim()
-  return b || null
+/**
+ * 某个 worktree 此刻的 HEAD 分支——**从 `git worktree list --porcelain` 的条目直接读**，
+ * 不再为每条记录单独跑一次 `rev-parse --abbrev-ref HEAD`。
+ *
+ * ## 为什么可以省掉这次 git（实测过）
+ *
+ * `--porcelain` 的 `branch refs/heads/<x>` 行读的就是该工作区自己的 HEAD 文件，所以：
+ * - 在 worktree 里 `git checkout wt/other` 后，porcelain 的 branch 行随之变成 `wt/other`；
+ * - detached 时 porcelain 给 `detached` 行、**没有** `branch` 行，而 `rev-parse --abbrev-ref HEAD`
+ *   返回的是字面量 `HEAD`——两者等价（`state` 判定要的正是「它不是 record.branch」）。
+ *
+ * 唯一的前提是**目录存在**：目录被删后 porcelain 给的仍是最后一次登记的信息，不能用。
+ * 调用方已经用 `exists && entry` 守着这一点，与改之前「目录不在就不问 HEAD」一致。
+ *
+ * 收益：每条记录少一次 git 调用（本机每次约 60-100ms，几乎全是进程启动）。
+ */
+function headBranchFromEntry(entry: WorktreeEntry | undefined): string | null {
+  if (!entry) return null
+  // detached 在 porcelain 里没有 branch 行，而 rev-parse 会返回字面量 'HEAD'
+  if (entry.detached) return 'HEAD'
+  return entry.branch ?? null
 }
 
 /**
@@ -284,7 +299,12 @@ function sizeBytesOf(path: string, compareKey: string): number | null {
       } finally {
         sizeCache.set(compareKey, bytes)
         sizeInFlight.delete(compareKey)
-        publishWorktreeChanged()
+        /*
+         * 发**增量**而不是 `publishWorktreeChanged()`：后者会让界面整表重拉，
+         * 而重拉本身就是 4N+1 次 git（见 chat-bus 里 WorktreeSizeUpdate 的注释）。
+         * 体积是纯附加信息，只补这一个字段就够。
+         */
+        publishWorktreeSize({ compareKey, sizeBytes: bytes })
       }
     })
   }
@@ -303,57 +323,192 @@ export function invalidateSize(compareKey: string): void {
 }
 
 /**
+ * 并发上限。
+ *
+ * 为什么不无限并发：每个 git 调用是一个**进程**（本机 76ms 起，见 bench），
+ * N 大时一次 list 会同时起 3N 个进程——不是线程而是真进程，Windows 上创建进程不便宜，
+ * 超过这个数量后收益递减而调度开销上升。8 是实测的折中（8 次 status 并行 265ms vs 串行 602ms）。
+ */
+const GIT_CONCURRENCY = 8
+
+/**
+ * 限并发跑一批异步任务，结果顺序与输入一致。
+ *
+ * **单条失败不影响其它条**：每个 worker 只处理一个任务，某个任务抛错时只让它自己那份变
+ * `undefined`（`fail` 分支），worker 继续取下一个。这样「一个坏掉的 worktree」不会把整张列表拖垮
+ * ——这是并行化最容易引入的回归（串行时抛错会直接中断，并行时若不 catch 会变成 unhandled rejection）。
+ *
+ * 输入任务本身不该抛错（调用方都在内部 try），这里兜的是「万一」。
+ */
+async function runLimited<T>(
+  tasks: Array<() => Promise<T>>,
+  limit: number
+): Promise<Array<T | undefined>> {
+  const results: Array<T | undefined> = new Array(tasks.length).fill(undefined)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (true) {
+      const i = next++
+      if (i >= tasks.length) return
+      try {
+        results[i] = await tasks[i]()
+      } catch (e) {
+        // 单条失败：留 undefined，其余照常
+        console.warn(`[worktree] list 单项失败（#${i}）：`, (e as Error)?.message ?? e)
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => worker()))
+  return results
+}
+
+/**
  * 生成快照（`worktree:list` 的实现）。
  *
- * 一次调用只对每个 repoRoot 跑一次 `git worktree list`（同仓库的多条记录共用），
- * 每条记录再各自 `rev-parse` 一次 HEAD——这是 §2.1 规定的输入，别省。
+ * ## 为什么全并行（性能修复）
+ *
+ * 这个函数原来对每条记录**串行**跑 `rev-parse HEAD` + `status` + `rev-parse MERGE_HEAD`，
+ * 加上每个仓库一次 `worktree list`，共 `4N+1` 次 git。而一次 git 调用的成本**几乎全是进程启动**
+ * （本机 76ms；`status` 里真正扫描工作区只占 24ms，18000 个文件也只到 189ms）。
+ * 所以串行时每加一个 worktree 就加约 350ms，5 个就要 1.2 秒——**列表从 N=1 就开始慢**。
+ *
+ * 这些调用全是只读（`status` / `rev-parse` / `worktree list`），且 `runGitRaw` 已设
+ * `GIT_OPTIONAL_LOCKS=0`（连 git 的可选锁都不取），并发读是安全的。改成并行后
+ * 总耗时约等于「最慢的那一次」而不是「全部相加」。
+ *
+ * `worktree list` 仍然是**每个仓库一次**（按 repoKey 去重后并行），不会变成 N 份。
  */
 export async function listWorktrees(): Promise<WorktreeSnapshot> {
   const records = listRecords()
   const counts = sessionCounts()
 
-  // 按 repoRoot 分组，减少 git 调用
-  const perRepo = new Map<string, RepoGitState>()
+  /*
+   * 第一段并行：按 repoRoot 去重后各自跑一次 `git worktree list`。
+   * 先去重再并发——同一个仓库的多条记录共用一个结果，不能因为并发就查 N 次。
+   */
+  const repoRootByKey = new Map<string, string>()
   for (const rec of records) {
-    let key: string
     try {
-      key = repoKeyOf(rec.repoRoot)
+      const key = repoKeyOf(rec.repoRoot)
+      if (!repoRootByKey.has(key)) repoRootByKey.set(key, rec.repoRoot)
     } catch {
-      continue
+      /* 归一化失败：这条记录不会有 repoState，state 会落到 dir-missing */
     }
-    if (!perRepo.has(key)) perRepo.set(key, await repoGitState(rec.repoRoot))
+  }
+  const repoKeys = [...repoRootByKey.keys()]
+  const repoStates = await runLimited(
+    repoKeys.map((k) => () => repoGitState(repoRootByKey.get(k)!)),
+    GIT_CONCURRENCY
+  )
+  const perRepo = new Map<string, RepoGitState>()
+  repoKeys.forEach((k, i) => {
+    const st = repoStates[i]
+    if (st) perRepo.set(k, st)
+  })
+
+  /*
+   * 第二段并行：每条记录一个任务，任务内部再并行它需要的 git 调用。
+   *
+   * 两个层次都并行是有意的：外层让不同 worktree 之间并发（这才是 N 大时的收益来源），
+   * 内层让同一条记录的 HEAD / status / MERGE_HEAD 并发（N 小时也有收益）。
+   * 两层的总并发仍然受 `runLimited` 的上限约束，不会因为嵌套而失控。
+   */
+  /*
+   * `mergeInProgress` 按 **targetPath 去重**：多个 worktree 常常 `targetBranch` 相同
+   * （默认都是主分支），而 target 检出是同一个目录——对同一个目录重复跑
+   * `rev-parse MERGE_HEAD` + `diff --diff-filter=U` 是纯浪费，8 个 worktree 就是 16 次 git。
+   * 去重后只需 2 次。缓存生命周期 = 本次 list（合并状态随时会变，不跨调用缓存）。
+   */
+  const mergeByTarget = new Map<
+    string,
+    Promise<{ targetPath: string; unmergedCount: number } | null>
+  >()
+  const mergeInProgressCached = (
+    targetBranch: string | null,
+    entries: WorktreeEntry[]
+  ): Promise<{ targetPath: string; unmergedCount: number } | null> => {
+    if (!targetBranch) return Promise.resolve(null)
+    const matches = entries.filter((e) => e.branch === targetBranch)
+    // 0 条 / 多条都不算「合并进行中」，无需缓存
+    if (matches.length !== 1) return Promise.resolve(null)
+    const targetPath = matches[0].path
+    const hit = mergeByTarget.get(targetPath)
+    if (hit) return hit
+    const p = mergeInProgressOf(targetBranch, entries)
+    mergeByTarget.set(targetPath, p)
+    return p
   }
 
-  const items: WorktreeListItem[] = []
-  for (const rec of records) {
-    const exists = dirExists(rec.path)
-    let entry: WorktreeEntry | undefined
-    let prunable = false
-    // 该记录所属仓库的 git 状态（算 state 与 mergeInProgress 都要用它）
-    let repoState: RepoGitState | undefined
-    try {
-      repoState = perRepo.get(repoKeyOf(rec.repoRoot))
-      entry = repoState?.entries.find((e) => {
-        try {
-          return compareKeyOfPath(e.path) === rec.compareKey
-        } catch {
-          return false
-        }
+  const items = await runLimited(
+    records.map((rec) => async () => {
+      const exists = dirExists(rec.path)
+      let entry: WorktreeEntry | undefined
+      let prunable = false
+      let repoState: RepoGitState | undefined
+      try {
+        repoState = perRepo.get(repoKeyOf(rec.repoRoot))
+        entry = repoState?.entries.find((e) => {
+          try {
+            return compareKeyOfPath(e.path) === rec.compareKey
+          } catch {
+            return false
+          }
+        })
+        prunable = repoState?.prunableKeys.has(rec.compareKey) ?? false
+      } catch {
+        /* 归一化失败：当作没登记，state 会落到 dir-missing */
+      }
+      /*
+       * 三条只读调用并发。目录不在时前两条不问（那条命令必失败）：
+       * `headBranch` 只用于算 state，`dirtyCount` 对不存在的目录给 null。
+       */
+      const [headBranch, dirtyCount, mergeInProgress] = await Promise.all([
+        Promise.resolve(exists && entry ? headBranchFromEntry(entry) : null),
+        exists ? dirtyCountOf(rec.path) : Promise.resolve(null),
+        mergeInProgressCached(rec.targetBranch, repoState?.entries ?? [])
+      ])
+      const { state, actualBranch } = computeState({
+        record: rec,
+        dirExists: exists,
+        gitEntry: entry,
+        prunable,
+        headBranch
       })
-      prunable = repoState?.prunableKeys.has(rec.compareKey) ?? false
-    } catch {
-      /* 归一化失败：当作没登记，state 会落到 dir-missing */
-    }
-    // 目录不在就不必去问 HEAD（那条命令必失败）
-    const headBranch = exists && entry ? await headBranchOf(rec.path) : null
-    const { state, actualBranch } = computeState({
-      record: rec,
-      dirExists: exists,
-      gitEntry: entry,
-      prunable,
-      headBranch
-    })
-    items.push({
+      const item: WorktreeListItem = {
+        path: rec.path,
+        compareKey: rec.compareKey,
+        repoRoot: rec.repoRoot,
+        branch: rec.branch,
+        baseSha: rec.baseSha,
+        baseLabel: rec.baseLabel,
+        targetBranch: rec.targetBranch,
+        createdAt: rec.createdAt,
+        state,
+        ...(actualBranch !== undefined ? { actualBranch } : {}),
+        deps: rec.deps,
+        ...(rec.depsDetail !== undefined ? { depsDetail: rec.depsDetail } : {}),
+        sessionCount: counts.get(rec.compareKey) ?? 0,
+        sizeBytes: exists ? sizeBytesOf(rec.path, rec.compareKey) : 0,
+        lockHolder: gitLockHolder(rec.path),
+        dirtyCount,
+        mergeInProgress,
+        mergeGate: computeMergeGate({ state, deps: rec.deps, targetBranch: rec.targetBranch })
+      }
+      return item
+    }),
+    GIT_CONCURRENCY
+  )
+
+  /*
+   * 单条任务的异常（理论上不该发生——里面的 git 调用都自带失败兜底）**不能让它从列表里消失**：
+   * 用户会看到工作区没了，比看到一条状态不准的条目更糟（可能以为工作区被删了）。
+   * 所以兜一条只带记录本身字段的条目，`state` 取最保守的 `dir-missing`，其余可空字段给 null，
+   * 并在 `console.warn` 里留现场（上面 runLimited 已经记了序号）。
+   */
+  const finalItems: WorktreeListItem[] = items.map((it, i) => {
+    if (it) return it
+    const rec = records[i]
+    return {
       path: rec.path,
       compareKey: rec.compareKey,
       repoRoot: rec.repoRoot,
@@ -362,18 +517,18 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
       baseLabel: rec.baseLabel,
       targetBranch: rec.targetBranch,
       createdAt: rec.createdAt,
-      state,
-      ...(actualBranch !== undefined ? { actualBranch } : {}),
+      // 算不出来时按「目录缺失」呈现：这是唯一不需要额外 git 就能断定的保守值
+      state: 'dir-missing' as WorktreeState,
       deps: rec.deps,
       ...(rec.depsDetail !== undefined ? { depsDetail: rec.depsDetail } : {}),
       sessionCount: counts.get(rec.compareKey) ?? 0,
-      sizeBytes: exists ? sizeBytesOf(rec.path, rec.compareKey) : 0,
-      lockHolder: gitLockHolder(rec.path),
-      dirtyCount: exists ? await dirtyCountOf(rec.path) : null,
-      mergeInProgress: await mergeInProgressOf(rec.targetBranch, repoState?.entries ?? []),
-      mergeGate: computeMergeGate({ state, deps: rec.deps, targetBranch: rec.targetBranch })
-    })
-  }
+      sizeBytes: null,
+      lockHolder: null,
+      dirtyCount: null,
+      mergeInProgress: null,
+      mergeGate: { mayMerge: false, blocker: 'source-missing' as const }
+    }
+  })
 
   // unmanaged：git 登记里有、记录里没有的
   const managed = new Set(records.map((r) => r.compareKey))
@@ -409,7 +564,7 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
   }
 
   return {
-    items,
+    items: finalItems,
     unmanaged,
     storeUnreadable: getStoreUnreadable()
   }

@@ -52,6 +52,7 @@ import type {
   WorktreePrecheckOk,
   WorktreePrecheckReq,
   WorktreeProgress,
+  WorktreeSizeUpdate,
   WorktreeSnapshot
 } from '../shared/worktree-protocol'
 
@@ -1048,6 +1049,17 @@ const api = {
       const listener = (): void => cb()
       ipcRenderer.on('worktree:changed', listener)
       return () => ipcRenderer.removeListener('worktree:changed', listener)
+    },
+    /**
+     * 订阅「某个工作区的体积算好了」（增量）。
+     *
+     * 收到后按 `compareKey` 就地把那一条的 `sizeBytes` 补上，**不要重拉列表**——
+     * 整表重拉一轮是 4N+1 次 git，后台逐步回填 N 个体积会让打开列表的开销翻倍。
+     */
+    onSize: (cb: (u: WorktreeSizeUpdate) => void): (() => void) => {
+      const listener = (_e: unknown, u: WorktreeSizeUpdate): void => cb(u)
+      ipcRenderer.on('worktree:size', listener)
+      return () => ipcRenderer.removeListener('worktree:size', listener)
     },
     /** 订阅长操作进度（等锁超过 5 秒 / 依赖安装中）。 */
     onProgress: (cb: (p: WorktreeProgress) => void): (() => void) => {
