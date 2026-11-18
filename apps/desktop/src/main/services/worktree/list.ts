@@ -1,7 +1,7 @@
 import { statSync, readdirSync, lstatSync } from 'fs'
 import { join } from 'path'
 import { runGitRaw } from '../git'
-import { listRecords, type WorktreeRecord, type DepsState } from './store'
+import { listRecords, type WorktreeRecord } from './store'
 import { compareKeyOfPath, repoKeyOf } from './paths'
 import { parseWorktreeList, type WorktreeEntry } from './git-worktree'
 import { gitLockHolder } from './lock'
@@ -27,46 +27,22 @@ import { publishWorktreeChanged } from '../chat-bus'
  * 只进 `unmanaged` 只读展示：不自动纳管、不自动删。这样四种 `state` 的语义才保持干净。
  */
 
-/** 四种 state（§2.1）。渲染层按它决定按钮可用性，不自行推断（A48）。 */
-export type WorktreeState = 'ok' | 'branch-mismatch' | 'dir-missing' | 'prunable'
-
-/** 快照里的一条（渲染层消费）。 */
-export interface WorktreeListItem {
-  path: string
-  compareKey: string
-  repoRoot: string
-  branch: string
-  baseSha: string
-  baseLabel: string
-  targetBranch: string | null
-  createdAt: number
-  state: WorktreeState
-  /** `branch-mismatch` 时的实际 HEAD 分支名（detached 时为 'HEAD'）。 */
-  actualBranch?: string
-  deps: DepsState
-  depsDetail?: string
-  /** 关联会话数（`focusRoot` 指向本路径的会话）。 */
-  sessionCount: number
-  /** 目录体积；null = 还在统计（界面显示「统计中…」）。 */
-  sizeBytes: number | null
-  /** 当前持锁者（另一个会话正在这个目录上跑 git 操作）。 */
-  lockHolder: { label: string; since: number } | null
-}
-
-/** 不受本功能管理的 git 登记项（只读展示）。 */
-export interface UnmanagedWorktree {
-  path: string
-  branch?: string
-  head?: string
-  prunable?: boolean
-}
-
-export interface WorktreeSnapshot {
-  items: WorktreeListItem[]
-  unmanaged: UnmanagedWorktree[]
-  /** 记录文件本身读坏了：此时 `items` 为空但**不代表没有工作区**，界面要提示「记录读不出」。 */
-  storeUnreadable: boolean
-}
+/*
+ * 快照类型定义在 `shared/worktree-protocol.ts`：渲染层与主进程共用同一份。
+ * 这里只 re-export，不另写一份——两份定义会漂移，而漂移的表现是静默的（界面读到一个不存在的字段）。
+ */
+export type {
+  WorktreeState,
+  WorktreeListItem,
+  UnmanagedWorktree,
+  WorktreeSnapshot
+} from '../../../shared/worktree-protocol'
+import type {
+  WorktreeState,
+  WorktreeListItem,
+  UnmanagedWorktree,
+  WorktreeSnapshot
+} from '../../../shared/worktree-protocol'
 
 /** 一次 `git worktree list` 的结果，按 repoRoot 复用（同仓库的多条记录只查一次）。 */
 interface RepoGitState {

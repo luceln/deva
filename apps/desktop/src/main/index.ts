@@ -439,7 +439,7 @@ if (!app.requestSingleInstanceLock()) {
    * 界面不会把它当可用工作区（§2.1 的 state 判定要求 phase==='active'）。
    */
   void sweepOnStartup()
-  registerWorktreeIpc()
+  registerWorktreeIpc(() => mainWindow)
 
   // Git 源代码管理（调用系统 git，对标 VS Code；凭据交系统 GCM）
   registerGitIpc()

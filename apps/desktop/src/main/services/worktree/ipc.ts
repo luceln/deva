@@ -1,22 +1,57 @@
-import { ipcMain } from 'electron'
+import { ipcMain, type BrowserWindow } from 'electron'
 import { createWorktree, precheck } from './create'
-import { listRecords } from './store'
+import { listWorktrees } from './list'
+import { retryInstall } from './deps'
 import { briefForFocusRoot } from './brief'
+import { onWorktreeChanged, onWorktreeProgress } from '../chat-bus'
 import type { WorktreeCreateReq, WorktreePrecheckReq } from '../../../shared/worktree-protocol'
 
 /**
  * worktree 的 IPC。
  *
- * 本步只注册这几个：`precheck`（无副作用，供创建弹窗边输边校验）、`create`、`list`、`brief`。
- * 合并 / 删除 / 依赖安装留给后续步骤——**先不注册空壳**，免得渲染层对着不存在的实现写代码。
+ * 注册的通道：`precheck`（无副作用，边输边校验）、`create`、`list`、`install-deps`、`brief`，
+ * 外加两条**主进程 → 渲染层**的推送：`worktree:changed`（列表该重取了）与 `worktree:progress`
+ * （等锁 / 装依赖的进度）。合并 / 删除 / 重建留给后续步骤——**先不注册空壳**，免得渲染层
+ * 对着不存在的实现写代码。
+ *
+ * 判定一律在主进程（`list` 返回已算好的 `state`）：渲染层不复算，两套规则迟早漂移（A48）。
  */
-export function registerWorktreeIpc(): void {
+export function registerWorktreeIpc(getWin: () => BrowserWindow | null): void {
   ipcMain.handle('worktree:precheck', (_e, req: WorktreePrecheckReq) => precheck(req))
   ipcMain.handle('worktree:create', (_e, req: WorktreeCreateReq) => createWorktree(req))
-  ipcMain.handle('worktree:list', () => listRecords())
+  /*
+   * 快照：`state` / `deps` / `sessionCount` / `sizeBytes` / `lockHolder` 全在这里算好。
+   * `sizeBytes` 首次为 null（后台统计中），算完会发 `worktree:changed` 让界面重取（T1.4b）。
+   */
+  ipcMain.handle('worktree:list', () => listWorktrees())
+  /*
+   * 「重试安装」/「重新安装」/「安装依赖」三个入口共用一个通道（§2.2 的转移表）：
+   * 三种状态下都进 `installing`，差别只在按钮文案。
+   */
+  ipcMain.handle('worktree:install-deps', (_e, path: string) => retryInstall(path))
   /*
    * 会话在 worktree 里跑时，渲染层要知道「这个 focusRoot 是哪个工作区」——**只用于显示标签**。
    * 判定（能不能建、state 是什么）一律在主进程做，渲染层不复算：两套规则迟早漂移。
    */
   ipcMain.handle('worktree:brief', (_e, focusRoot: string | null) => briefForFocusRoot(focusRoot))
+
+  /*
+   * 把总线上的两条 worktree 事件转给渲染层。
+   *
+   * 为什么必须有这一段：`publishWorktreeChanged()` 只发在**主进程内部**的总线上，渲染层是
+   * 另一个进程，不订阅它就永远收不到。少了这一段的表现是静默的——`sizeBytes` 后台算完了、
+   * 界面却一直显示「统计中…」，因为没人告诉它该重取（这正是验收指出的那段「降级探测」）。
+   *
+   * 窗口可能已销毁（退出收尾 / 托盘驻留时窗口被关）：丢掉即可，绝不因 send 抛错打断发布方。
+   */
+  onWorktreeChanged(() => {
+    const win = getWin()
+    if (!win || win.isDestroyed()) return
+    win.webContents.send('worktree:changed')
+  })
+  onWorktreeProgress((p) => {
+    const win = getWin()
+    if (!win || win.isDestroyed()) return
+    win.webContents.send('worktree:progress', p)
+  })
 }

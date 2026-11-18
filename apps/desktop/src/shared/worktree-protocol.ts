@@ -104,3 +104,73 @@ export interface WorktreeBriefView {
   /** 主目录未提交改动数；与创建弹窗里显示的是同一个数字（A17/A36 要求同源）。 */
   primaryDirtyCount: number
 }
+/**
+ * `worktree:list` 的返回值（快照）。
+ *
+ * `state` 由主进程算好，渲染层**只消费不复算**（A48）：两套规则迟早漂移，而漂移的表现是静默的——
+ * 界面显示「可合并」，点下去必失败。
+ */
+export type WorktreeState = 'ok' | 'branch-mismatch' | 'dir-missing' | 'prunable'
+
+export interface WorktreeListItem {
+  path: string
+  compareKey: string
+  repoRoot: string
+  branch: string
+  baseSha: string
+  baseLabel: string
+  targetBranch: string | null
+  createdAt: number
+  state: WorktreeState
+  /** `branch-mismatch` 时的实际 HEAD 分支名（detached 时为 'HEAD'）。 */
+  actualBranch?: string
+  deps: 'pending' | 'installing' | 'ready' | 'failed' | 'skipped'
+  depsDetail?: string
+  /** 关联会话数（`focusRoot` 指向本路径的会话数）。 */
+  sessionCount: number
+  /** 目录体积；null = 还在统计（界面显示「统计中…」）。 */
+  sizeBytes: number | null
+  /** 当前持锁者（另一个会话正在这个目录上跑 git 操作）。 */
+  lockHolder: { label: string; since: number } | null
+}
+
+/** 不受本功能管理的 git 登记项：只读展示，不参与任何操作。 */
+export interface UnmanagedWorktree {
+  path: string
+  branch?: string
+  head?: string
+  prunable?: boolean
+}
+
+export interface WorktreeSnapshot {
+  items: WorktreeListItem[]
+  unmanaged: UnmanagedWorktree[]
+  /** 记录文件本身读坏了：`items` 为空**不代表没有工作区**，界面要提示「记录读不出」。 */
+  storeUnreadable: boolean
+}
+
+/** 依赖安装的结果（`worktree:install-deps`）。 */
+export interface WorktreeInstallResult {
+  ok: boolean
+  /** 失败原因：`not-found` / `already-installing` / `no-lockfile` / `unsupported-language` / `write-failed`。 */
+  reason?: string
+  deps?: WorktreeListItem['deps']
+}
+
+/**
+ * worktree 长操作的进度（`worktree:progress` 推送）。
+ *
+ * - `waiting-lock`：等 Git 锁超过 5 秒（spec §5.1 第 7 条 / B6）。
+ * - `install-deps`：依赖安装进行中（spec §3.6 / B4）。
+ */
+export type WorktreeProgress =
+  | {
+      phase: 'waiting-lock'
+      holder: { label: string; since: number } | null
+    }
+  | {
+      phase: 'install-deps'
+      path: string
+      step: string
+      elapsedMs: number
+    }

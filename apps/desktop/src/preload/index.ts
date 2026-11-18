@@ -47,9 +47,12 @@ import type {
   WorktreeCreateFail,
   WorktreeCreateOk,
   WorktreeCreateReq,
+  WorktreeInstallResult,
   WorktreePrecheckFail,
   WorktreePrecheckOk,
-  WorktreePrecheckReq
+  WorktreePrecheckReq,
+  WorktreeProgress,
+  WorktreeSnapshot
 } from '../shared/worktree-protocol'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
@@ -1016,11 +1019,42 @@ const api = {
     /** 创建（Step 1 写意图 → Step 2 add → 失败清理 → Step 3 校验定稿）。 */
     create: (req: WorktreeCreateReq): Promise<WorktreeCreateOk | WorktreeCreateFail> =>
       ipcRenderer.invoke('worktree:create', req),
-    /** 全部已登记的工作区记录。 */
-    list: (): Promise<unknown[]> => ipcRenderer.invoke('worktree:list'),
+    /**
+     * 全部已登记的工作区的**快照**（`state` / `deps` / `sessionCount` / `sizeBytes` / `lockHolder`
+     * 都由主进程算好）。
+     *
+     * `sizeBytes` 首次可能是 null（后台统计中）：算完主进程会推 `onChanged`，届时重取即可。
+     * 别在渲染层自己写「降级探测」——那只是 `onChanged` 没接上时的权宜，会让体积永远停在「统计中…」。
+     */
+    list: (): Promise<WorktreeSnapshot> => ipcRenderer.invoke('worktree:list'),
+    /**
+     * 安装依赖（「重试安装」/「重新安装」/「安装依赖」三个入口共用）。
+     *
+     * 立刻返回、不等安装完成（安装几分钟）：成功发起后进度走 `onProgress`，
+     * 终态（ready / failed）等 `onChanged` 重取列表。
+     */
+    installDeps: (path: string): Promise<WorktreeInstallResult> =>
+      ipcRenderer.invoke('worktree:install-deps', path),
     /** 某个 focusRoot 对应的边界信息；不是工作区则 null。只用于显示标签。 */
     brief: (focusRoot: string | null): Promise<WorktreeBriefView | null> =>
-      ipcRenderer.invoke('worktree:brief', focusRoot)
+      ipcRenderer.invoke('worktree:brief', focusRoot),
+    /**
+     * 订阅「列表该重取了」。
+     *
+     * 主进程在会改变快照的任何事之后发它：依赖装完、`sizeBytes` 后台算完、创建/删除成功。
+     * 少了它，`sizeBytes` 会永远停在 null（界面显示「统计中…」），用户以为体积算不出来。
+     */
+    onChanged: (cb: () => void): (() => void) => {
+      const listener = (): void => cb()
+      ipcRenderer.on('worktree:changed', listener)
+      return () => ipcRenderer.removeListener('worktree:changed', listener)
+    },
+    /** 订阅长操作进度（等锁超过 5 秒 / 依赖安装中）。 */
+    onProgress: (cb: (p: WorktreeProgress) => void): (() => void) => {
+      const listener = (_e: unknown, p: WorktreeProgress): void => cb(p)
+      ipcRenderer.on('worktree:progress', listener)
+      return () => ipcRenderer.removeListener('worktree:progress', listener)
+    }
   },
   /** 集成终端：列出已装 shell、建 PTY、写输入、改尺寸、销毁；订阅数据/退出事件。 */
   terminal: {
