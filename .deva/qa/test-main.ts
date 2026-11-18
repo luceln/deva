@@ -3172,6 +3172,168 @@ async function scenarioWorktree(): Promise<void> {
     )
   }
 
+  // ══ 体积缓存：目录体积变化后必须能刷新（deps 转 ready/failed 时失效）══
+  /*
+   * 缓存的前提是「目录体积不会自己变小」，但**安装依赖会**——装完 node_modules 后体积能从
+   * 十几 MB 变成几百 MB。少了失效，表现是：装完依赖、列表也重拉了，但体积还是装之前的数字，
+   * 而且没有任何报错（因为重拉命中了旧缓存）。
+   */
+  {
+    L.clearSizeCacheForTest()
+    const firstSnap = await L.listWorktrees()
+    eq(
+      '体积缓存：首次是 null（后台统计）',
+      firstSnap.items.find((i) => i.compareKey === rec3.compareKey)?.sizeBytes,
+      null
+    )
+    await new Promise((r) => setTimeout(r, 600))
+    const warmSnap = await L.listWorktrees()
+    const warm = warmSnap.items.find((i) => i.compareKey === rec3.compareKey)?.sizeBytes
+    check('体积缓存：算完之后命中缓存（不再返回 null）', typeof warm === 'number', JSON.stringify(warm))
+
+    // 往目录里加一大块，模拟「安装依赖写了很多文件」
+    const blob = path.join(wt3, 'node_modules')
+    fs.mkdirSync(blob, { recursive: true })
+    fs.writeFileSync(path.join(blob, 'big.bin'), Buffer.alloc(200_000, 7))
+    const staleSnap = await L.listWorktrees()
+    eq(
+      '体积缓存：不失效时仍返回旧值（证明缓存确实在生效，不是每次都重算）',
+      staleSnap.items.find((i) => i.compareKey === rec3.compareKey)?.sizeBytes,
+      warm
+    )
+
+    // 显式失效（deps 转 ready 时就是这么做的）→ 下一次回到 null 并重算
+    L.invalidateSize(rec3.compareKey)
+    const afterInv = await L.listWorktrees()
+    eq(
+      '体积缓存：invalidateSize 之后回到 null（触发重算，而不是继续给旧值）',
+      afterInv.items.find((i) => i.compareKey === rec3.compareKey)?.sizeBytes,
+      null
+    )
+    await new Promise((r) => setTimeout(r, 600))
+    const newSnap = await L.listWorktrees()
+    const newSize = newSnap.items.find((i) => i.compareKey === rec3.compareKey)?.sizeBytes
+    check(
+      '体积缓存：重算后拿到新体积（比旧值大 200KB 以上）',
+      typeof newSize === 'number' && typeof warm === 'number' && newSize >= warm + 200_000,
+      `old=${warm} new=${newSize}`
+    )
+    fs.rmSync(blob, { recursive: true, force: true })
+    L.clearSizeCacheForTest()
+  }
+
+  // ══ 单条失败不兜假状态（只 warn + 从列表里滤掉）══
+  /*
+   * 这条是**结构性断言**（读源码），不是行为测试：单条任务抛错在正常代码里造不出来
+   * （里面每个 git 调用都自带失败兜底），所以没有可注入的失败点。
+   *
+   * 它守的是一个**已经删掉的坏兜底**：曾经在单条异常时兜一条 `state: 'dir-missing'` 的条目，
+   * 让一个目录其实存在的工作区显示「工作区目录已缺失」并给出「重建」按钮——
+   * 等 P2 的 rebuild 接通后，那就是「对存在的目录执行 git worktree add」。
+   */
+  {
+    const listSrc = fs.readFileSync(
+      path.join(process.cwd(), 'apps/desktop/src/main/services/worktree/list.ts'),
+      'utf8'
+    )
+    check(
+      "单条失败：不兜 state:'dir-missing' 的假条目（目录存在时说「已缺失」+ 给重建按钮是误导）",
+      !/state:\s*'dir-missing'\s*as\s*WorktreeState/.test(listSrc),
+      '看 list.ts 的 finalItems'
+    )
+    check(
+      '单条失败：undefined 被滤掉（不给假状态），而不是被映射成某种 state',
+      /items\.filter\(\(it\): it is WorktreeListItem => it !== undefined\)/.test(listSrc),
+      '看 list.ts 的 finalItems'
+    )
+    // computeState 的 dir-missing 只能由「目录不在」或「登记丢了」产生，与 git 调用成败无关
+    eq(
+      'state：目录存在 + 登记存在时，computeState 绝不会给出 dir-missing（git 失败也走不到这里）',
+      L.computeState({
+        record: { path: 'x', branch: 'b' },
+        dirExists: true,
+        gitEntry: { path: 'x', branch: 'b' },
+        prunable: false,
+        headBranch: null
+      }).state,
+      'branch-mismatch'
+    )
+  }
+  /*
+   * 上面那条只证明 `invalidateSize` 有效；这条证明 **deps.ts 在转 ready 时真的调了它**。
+   * 少了这一条，可以「实现了 invalidateSize 但没人调用」而测试全绿。
+   */
+  {
+    // 打包后 __dirname 指向 dist，用 cwd（driver 从仓库根跑）定位源码
+    const repoFile = path.join(
+      process.cwd(),
+      'apps/desktop/src/main/services/worktree/deps.ts'
+    )
+    const depsSrc = fs.readFileSync(repoFile, 'utf8')
+    check(
+      'deps：finish() 在 ready/failed 时会失效体积缓存（否则装完依赖体积永远停在旧值）',
+      /deps === 'ready' \|\| deps === 'failed'/.test(depsSrc) &&
+        /invalidateSize\(record\.compareKey\)/.test(depsSrc),
+      '看 deps.ts 的 finish()'
+    )
+  }
+
+  // ══ state 不被「git 坏掉」污染：目录在但 .git 坏了，不能显示成 dir-missing + 重建 ══
+  /*
+   * 这条对应验收的 ③，也是本轮 `headBranch` 优化的回归守卫：
+   *
+   * porcelain 里那条 `branch` 是**主仓库登记中的值**，与「这个工作区自己的 git 还能不能用」无关。
+   * 所以当 `status` 在这个目录里失败（`.git` 被删/改名）时，绝不能拿 porcelain 的 branch 当
+   * 「它还在自己的分支上」的证据——那样会落 `ok`，界面显示「正常」，用户完全看不出已坏。
+   *
+   * 现在的判据：status 失败 ⇒ headBranch 按 null 交 ⇒ 落 `branch-mismatch`（与优化前一致）。
+   * 关键是它**不能**落 `dir-missing`——那是「目录已缺失 + 重建按钮」，对存在的目录是误导。
+   */
+  {
+    const brokeWt = path.join(DST, 'wts', 'git-broken')
+    const rB = await CR.createWorktree({
+      repoRoot: repo,
+      branch: 'wt/gitbroken',
+      path: brokeWt,
+      skipDeps: true
+    })
+    if (!rB.ok) {
+      fail('git 坏掉场景：前置创建失败', JSON.stringify(rB))
+      return
+    }
+    const recB = S.getRecord(brokeWt)!
+    // 把该工作区的 .git（worktree 里是个文件）改名 → 目录还在，但 git 在这个目录里跑不了
+    const dotGit = path.join(brokeWt, '.git')
+    fs.renameSync(dotGit, dotGit + '-broken')
+    const snapB = await L.listWorktrees()
+    const itB = snapB.items.find((i) => i.compareKey === recB.compareKey)
+    info('git 坏掉时的快照', JSON.stringify({ state: itB?.state, dirtyCount: itB?.dirtyCount }))
+    check(
+      'git 坏掉：目录仍在 → **不是** dir-missing（否则会显示「目录已缺失」+「重建」）',
+      itB?.state !== 'dir-missing',
+      String(itB?.state)
+    )
+    eq('git 坏掉：dirtyCount 为 null（status 跑不了，无法统计）', itB?.dirtyCount, null)
+    check(
+      'git 坏掉：state 落 branch-mismatch（与 headBranch 优化前的行为一致，不伪装成正常）',
+      itB?.state === 'branch-mismatch',
+      String(itB?.state)
+    )
+    eq(
+      'git 坏掉：mergeGate 因此禁用（source-branch-changed），不会引导用户去合并',
+      itB?.mergeGate,
+      { mayMerge: false, blocker: 'source-branch-changed' }
+    )
+    // 还原，别影响后面的断言
+    fs.renameSync(dotGit + '-broken', dotGit)
+    const snapBack = await L.listWorktrees()
+    eq(
+      'git 修好之后立刻回到 ok（每次现算）',
+      snapBack.items.find((i) => i.compareKey === recB.compareKey)?.state,
+      'ok'
+    )
+  }
+
   // ══ mergeGate 四个 blocker（spec §7.5）══
   /*
    * `mergeGate` 是「按钮能不能点」的唯一依据（A48：渲染层不复算）。四个 blocker 各构造一次：
