@@ -13,6 +13,7 @@ import {
 } from './precheck'
 import { addWorktree, cleanupFailedCreate, verifyWorktree } from './git-worktree'
 import { withGitLock } from './lock'
+import { startInstall } from './deps'
 
 /**
  * Step 1-3：创建主流程（spec §3.2-§3.5）。
@@ -24,6 +25,8 @@ import { withGitLock } from './lock'
 export interface CreateRequest extends PrecheckRequest {
   /** 用户已确认「主目录有未提交改动」也要建（0.9 的 needsConfirm）。 */
   confirmedDirty?: boolean
+  /** 用户勾了「不安装依赖」（§3.6）：deps 直接落 skipped。 */
+  skipDeps?: boolean
 }
 
 export interface CreateOk {
@@ -71,11 +74,18 @@ export async function createWorktree(req: CreateRequest): Promise<CreateOk | Cre
    * **锁只包一层**：`addWorktree` / `cleanupFailedCreate` 内部都**不**再调 `withGitLock`——
    * 它们都在本函数的锁内执行，内层再加同一把锁就是死锁（§5.1 明令禁止嵌套）。
    */
-  return withGitLock([pre.repoRoot, finalPath], 'create', () => doCreate(pre, finalPath))
+  const skipDeps = req.skipDeps === true
+  return withGitLock([pre.repoRoot, finalPath], 'create', () =>
+    doCreate(pre, finalPath, { skipDeps })
+  )
 }
 
 /** 创建的实际步骤（Step 1-3）。**调用方必须已在 `[repoRoot, path]` 的锁内**。 */
-async function doCreate(pre: PrecheckOk, finalPath: string): Promise<CreateOk | CreateFail> {
+async function doCreate(
+  pre: PrecheckOk,
+  finalPath: string,
+  opts: { skipDeps: boolean }
+): Promise<CreateOk | CreateFail> {
 
   /*
    * ── Step 1：写意图（phase: 'creating'）──
@@ -194,6 +204,18 @@ async function doCreate(pre: PrecheckOk, finalPath: string): Promise<CreateOk | 
 
   // 让 worktree 列表刷新（§7.3）
   publishWorktreeChanged()
+
+  /*
+   * ── Step 4：依赖安装（§3.6，异步、可降级）──
+   *
+   * 放在最后、**不 await**：`pnpm install` 冷缓存要跑几分钟，等它就是让创建请求卡住（A27 要求
+   * 「依赖装好之前不许当可用」——注意这条说的是**界面不能把没装好依赖的工作区当成可用**，
+   * 而不是「创建要等安装完」。工作区本身已可用（能读代码、能开会话），只是依赖还没就位）。
+   *
+   * 失败只降级成 `deps:'failed'`，**不回滚 worktree**：用户可能已经在里面改文件了。
+   */
+  startInstall(finalRecord, { skipDeps: opts.skipDeps })
+
   return { ok: true, record: finalRecord }
 }
 

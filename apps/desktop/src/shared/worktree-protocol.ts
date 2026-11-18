@@ -18,7 +18,15 @@ export interface WorktreePrecheckReq {
 }
 
 /** 创建请求（比探测多一个确认位）。 */
-export interface WorktreeCreateReq extends WorktreePrecheckReq {}
+export interface WorktreeCreateReq extends WorktreePrecheckReq {
+  /**
+   * 用户勾了「不安装依赖」（spec §3.6）。
+   *
+   * 为 true 时 deps 直接落 `skipped`（`depsDetail: 'user-skipped'`），**不探测命令是否存在**——
+   * 用户已经明确表示不要，再去 `pnpm --version` 是多余动作，而失败还要编个理由。
+   */
+  skipDeps?: boolean
+}
 
 /**
  * 探测成功的结果。
