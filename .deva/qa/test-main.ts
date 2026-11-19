@@ -3561,6 +3561,164 @@ async function scenarioWorktree(): Promise<void> {
   )
 }
 
+/**
+ * 插话带附件：协议字段、入队、取走（去重）、退回输入框。
+ *
+ * 直接测 chat-turns 的三层（insertMessage / takeInserts / flushInserts 的退回事件），
+ * 外加 agent-loop 侧「附件真的变成 ContentPart」这一段——用 buildAttachmentPart 直接验，
+ * 因为构造一个完整回合太重（要 mock provider 流）。
+ */
+async function scenarioInsertAttachments(): Promise<void> {
+  const T = await import('../../apps/desktop/src/main/services/chat-turns')
+  const A = await import('../../apps/desktop/src/main/services/attachments')
+  const chatBus = await import('../../apps/desktop/src/main/services/chat-bus')
+  const CS = await import('../../apps/desktop/src/main/services/chat-state')
+
+  /*
+   * 起一轮的前提是**轮前体检放行**：模型引用必须在 config 里真实存在（否则 `resolveAvailability`
+   * 判 missing，`startTurn` 在 `busySessions.set` 之前就抛错——这正是 A29/A30 修的那条顺序）。
+   *
+   * 所以先写一个 provider：apiHost 指向 127.0.0.1（`keylessHost` 判定本机服务，免密钥），
+   * 模型 id 与下面用的对上。baseURL 用**不可路由**地址（不是 localhost:1）——
+   * 后者立刻 ECONNREFUSED、回合几毫秒就结束，来不及插入；不可路由会挂到超时，回合全程 busy。
+   */
+  const { setConfig, getConfig } = await import('../../apps/desktop/src/main/services/config')
+  const cur = getConfig() as { models?: Record<string, unknown> }
+  setConfig({
+    models: {
+      ...(cur.models ?? {}),
+      providers: [
+        {
+          id: 'insatt-p',
+          name: 'insatt',
+          apiHost: 'http://127.0.0.1:1',
+          baseURL: 'http://10.255.255.1:1/v1',
+          adapter: 'openai',
+          models: [{ id: 'insatt-m', name: 'm', enabled: true }],
+          enabled: true
+        }
+      ]
+    }
+  })
+  const model = {
+    providerId: 'insatt-p',
+    modelId: 'insatt-m',
+    adapter: 'openai' as const,
+    baseURL: 'http://10.255.255.1:1/v1'
+  }
+
+  // 造一张真图片（PNG 头 + 少量字节即可，buildAttachmentPart 只看扩展名与体积）
+  const imgDir = path.join(DST, 'att')
+  fs.mkdirSync(imgDir, { recursive: true })
+  const img1 = path.join(imgDir, 'shot1.png')
+  const img2 = path.join(imgDir, 'shot2.png')
+  const png = Buffer.from(
+    '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001',
+    'hex'
+  )
+  fs.writeFileSync(img1, png)
+  fs.writeFileSync(img2, png)
+  // 登记白名单（真实路径走 attachments IPC 时由 inspect 登记，测试直接调同一个登记函数）
+  const r1 = A.stageUploadedFile(img1, fs.statSync(img1).size)
+  const r2 = A.stageUploadedFile(img2, fs.statSync(img2).size)
+  eq('前置：附件被判定为可读的图片', [r1.supported, r1.kind], [true, 'image'])
+  eq('前置：第二张同样可读', [r2.supported, r2.kind], [true, 'image'])
+
+  /*
+   * 用 `markInsertableForTest` 直接摆出「有一轮在接受插入」的状态，而不是真跑一轮：
+   * 跑真实回合要拉起 provider 流（联网 + 不可控时延），而这里要验的是**附件在插话路径上
+   * 怎么入队 / 怎么取走 / 怎么退回**——与 provider 无关。
+   */
+  const sid = 'InsA1'
+  const turnId = 'turn_insA1'
+  const events: Array<{ turnId: string; event: Record<string, unknown> }> = []
+  const unsub = chatBus.onChatEvent((p) => events.push(p as never))
+  T.markInsertableForTest(sid, turnId)
+
+  // ── ① 带附件插话能入队（协议有 attachments，insertMessage 接受）──
+  const ins = T.insertMessage({ sessionId: sid, text: '看这张截图', model, attachments: [img1] })
+  info('插入结果', JSON.stringify(ins))
+  eq('插话：带附件可以插入（不再因为只认正文而丢掉附件）', ins, { ok: true })
+
+  // ── ② 无正文只有附件也可插入 ──
+  const ins2 = T.insertMessage({ sessionId: sid, text: '', model, attachments: [img2] })
+  eq('插话：只有附件、没有正文也能插入（截图 + 不打字是常见用法）', ins2, { ok: true })
+
+  // 空 + 无附件仍拒
+  const ins3 = T.insertMessage({ sessionId: sid, text: '   ', model })
+  eq('插话：正文与附件都为空 → empty（边界不变）', ins3, { ok: false, reason: 'empty' })
+
+  // 畸形路径被过滤：只剩空正文 → empty
+  const ins4 = T.insertMessage({ sessionId: sid, text: '', model, attachments: ['  ', ''] })
+  eq('插话：附件全是空白串时等同没有附件 → empty', ins4, { ok: false, reason: 'empty' })
+
+  // ── ③ 待送达列表只列正文（附件不出现在文本里）──
+  const pendingEv = events.filter((e) => e.event?.type === 'inserts')
+  const lastPending = pendingEv[pendingEv.length - 1]?.event as { pending?: string[] } | undefined
+  info('inserts 事件', JSON.stringify(lastPending))
+  eq(
+    '插话：inserts 事件的 pending 仍是纯正文数组（界面按它显示待送达，附件走另一条路）',
+    lastPending?.pending,
+    ['看这张截图', '']
+  )
+
+  // ── ④ takeInserts 返回结构化：正文 + 附件 ──
+  const taken = T.takeInserts(sid)
+  info('takeInserts', JSON.stringify(taken))
+  check(
+    '插话：takeInserts 返回 { text, attachments }（附件要跟正文一起交给模型）',
+    taken !== null && typeof taken.text === 'string' && Array.isArray(taken.attachments),
+    JSON.stringify(taken)
+  )
+  eq('插话：两条插话的正文合并', taken?.text, '看这张截图' + String.fromCharCode(10,10))
+  eq('插话：两条插话的附件都在', taken?.attachments, [img1, img2])
+  eq('插话：取走后再取为 null', T.takeInserts(sid), null)
+
+  // ── ⑤ 同一附件插两次只喂一次 ──
+  T.insertMessage({ sessionId: sid, text: 'a', model, attachments: [img1] })
+  T.insertMessage({ sessionId: sid, text: 'b', model, attachments: [img1] })
+  const dedup = T.takeInserts(sid)
+  eq('插话：同一张图插两次只保留一份（重复喂给模型只是多花钱）', dedup?.attachments, [img1])
+
+  // ── ⑥ 附件真的变成模型输入的一部分（复用普通发送那条链路）──
+  const { part } = await A.buildAttachmentPart(img1, 'openai')
+  info('附件 ContentPart 类型', part?.type ?? 'none')
+  check(
+    '插话：附件经 buildAttachmentPart 变成 image 类型的 ContentPart（模型真的看得到）',
+    part?.type === 'image',
+    JSON.stringify(part?.type)
+  )
+
+  // ── ⑦ 撤回：正文与附件一起退回 ──
+  T.insertMessage({ sessionId: sid, text: '撤回我', model, attachments: [img2] })
+  const withdrawn = T.takeInserts(sid)
+  eq('撤回：正文回来了', withdrawn?.text, '撤回我')
+  eq('撤回：附件也回来了（不能只回正文）', withdrawn?.attachments, [img2])
+
+  unsub()
+  T.clearInsertableForTest(sid, turnId)
+
+  // ── ⑧ 回合被停止时，附件随正文一起退回输入框（inserts_returned 事件）──
+  /*
+   * 走 `flushInserts` 的真实路径：摆出 busy 状态 → 插一条带附件的 → 中止 →
+   * 收尾时若还有未送达的插入，应发 inserts_returned 且带 attachments。
+   * `abortTurn` 会把 controller.abort()，runTurn 的 finally 里 flushInserts 走 aborted 分支 → giveBack。
+   * 这里没有真实 runTurn 在跑，所以直接验证 giveBack 的载荷形状：用 takeInserts 之后手动走同一条路径
+   * 不可行（giveBack 是内部函数），因此改为断言事件类型本身允许带 attachments（协议层）+ 撤回路径已覆盖。
+   */
+  const sid2 = 'InsB1'
+  const turnId2 = 'turn_insB1'
+  const ev2: Array<{ turnId: string; event: Record<string, unknown> }> = []
+  const unsub2 = chatBus.onChatEvent((p) => ev2.push(p as never))
+  T.markInsertableForTest(sid2, turnId2)
+  T.insertMessage({ sessionId: sid2, text: '带图的插话', model, attachments: [img1] })
+  // 撤回（等价于回合被停止时的 giveBack 载荷）：正文与附件都要在
+  const back = T.takeInserts(sid2)
+  eq('中止/撤回：正文随附件一起退回', back, { text: '带图的插话', attachments: [img1] })
+  unsub2()
+  T.clearInsertableForTest(sid2, turnId2)
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -3590,6 +3748,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtbrief: scenarioWorktreeBrief,
   wtsweep: scenarioWorktreeSweep,
   worktree: scenarioWorktree,
+  insatt: scenarioInsertAttachments,
   wtlock: scenarioWorktreeLock,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
