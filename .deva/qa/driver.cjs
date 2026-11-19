@@ -22,7 +22,7 @@ const ELECTRON_BIN = path.join(REPO, 'node_modules', 'electron', 'dist', 'electr
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
 /**
  * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
@@ -70,7 +70,15 @@ const ENV_OF = {
   cfgcorrupt: { scenario: 'cfgcorrupt', env: { P13_KIND: 'corrupt' } },
   cfgabsent: { scenario: 'cfgcorrupt', env: { P13_KIND: 'absent' } },
   secretscorrupt: { scenario: 'secretskind', env: { S42_KIND: 'corrupt' } },
-  secretsabsent: { scenario: 'secretskind', env: { S42_KIND: 'absent' } }
+  secretsabsent: { scenario: 'secretskind', env: { S42_KIND: 'absent' } },
+  /*
+   * 反向验证：假装没装插件（托管集判空），跑同一段 full。
+   * 期望结果是**变红**——证明「插件托管豁免」不是放行所有悬空，这条断言真的在守东西。
+   *
+   * 它不该出现在 ALL 里（默认必须全绿），要单独跑：
+   *   node .deva/qa/driver.cjs noplugin   → 期望非 0 退出码 + 那几条 FAIL
+   */
+  noplugin: { scenario: 'full', env: { QA_NO_PLUGIN: '1' } }
 }
 
 function runOne(name) {

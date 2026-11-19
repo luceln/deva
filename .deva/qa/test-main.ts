@@ -135,6 +135,71 @@ function diffSnap(a: Snap, b: Snap): string[] {
   return out
 }
 
+/**
+ * 从插件自己的所有权声明文件独立算出「哪些 provider 归插件托管」。
+ *
+ * **为什么不读 `report.providers.pluginManaged`**：那是被测输出。拿它算期望值等于用结论验证结论，
+ * 断言会跟着实现一起错（实现漏判时期望也漏，测试仍然全绿）。这里照 `services/plugin-managed.ts`
+ * 的判据（`<home>/.magpie-agent.state.json` 的 `providerId`）自己读一遍，才是真正的对照。
+ *
+ * 源与目标两侧都读、取并集 —— 与产品实现同口径（插件的状态文件可能在任一侧）。
+ * 只对「源是真实 ~/.deva 副本」的 full 场景有意义；合成源没有这个文件，返回空集。
+ */
+function pluginManagedFromStateFiles(homes: string[]): Set<string> {
+  const out = new Set<string>()
+  /*
+   * 反向验证开关：`QA_NO_PLUGIN=1` 时假装没装插件（托管集为空）。
+   * 用它确认「允许插件托管带来的额外悬空」不是放行所有悬空 —— 关掉它，那条断言必须变红。
+   * 只在测试里存在，产品代码没有这个分支。
+   */
+  if (process.env.QA_NO_PLUGIN === '1') return out
+  for (const home of homes) {
+    if (!home) continue
+    try {
+      const st = JSON.parse(fs.readFileSync(path.join(home, '.magpie-agent.state.json'), 'utf8'))
+      if (st && typeof st === 'object' && !Array.isArray(st)) {
+        const id = (st as Record<string, unknown>).providerId
+        if (typeof id === 'string' && id) out.add(id)
+      }
+    } catch {
+      /* 没装插件 / 读不出来 → 这个 home 不贡献托管项 */
+    }
+  }
+  return out
+}
+
+/**
+ * 从 `sess_xxx→providerId:modelId` 形态的悬空条目里取 providerId。
+ * `→` 用全角箭头，与 refIntegrity 拼串时一致。
+ */
+function providerOfRef(entry: string): string {
+  const after = entry.slice(entry.indexOf('→') + 1)
+  const idx = after.indexOf(':')
+  return idx === -1 ? after : after.slice(0, idx)
+}
+
+/**
+ * 把「目标比源多出来的悬空」分成「预期之内」与「意外」两类。
+ *
+ * 预期之内 = 指向插件托管 provider（那些 provider 有意不导入，会话搬过去必然悬空）。
+ * 其余一律算意外 —— 这条分类是「不许放行所有悬空」的守门逻辑，所以单独抽出来、单独测。
+ */
+function classifyExtraDangling(
+  extras: string[],
+  pluginHosted: Set<string>
+): { allowed: string[]; unexpected: string[] } {
+  return {
+    allowed: extras.filter((x) => pluginHosted.has(providerOfRef(x))),
+    unexpected: extras.filter((x) => !pluginHosted.has(providerOfRef(x)))
+  }
+}
+
+/** 目标比源多出来的条目（按字符串精确比对）。 */
+function extraDangling(dstList: string[], srcList: string[]): string[] {
+  const srcSet = new Set(srcList)
+  return dstList.filter((x) => !srcSet.has(x))
+}
+
 /* ───────────── 小工具 ───────────── */
 
 /** 模拟「已启动过一次」的 DevaPlus 目标：11 个预置服务商 + 两个默认角色文件 + seeded 守卫位。 */
@@ -338,10 +403,67 @@ async function scenarioFull(): Promise<void> {
   check('run1 ok', r1.ok === true, `failures=${JSON.stringify(r1.failures)}`)
 
   // 统计口径
+  /*
+   * 期望的「用户自定义 provider」= 源里全部 provider − 11 个预置 − 插件托管的那些。
+   *
+   * 托管集必须**自己从插件的所有权声明文件独立算**，不能用 `r1.providers.pluginManaged`：
+   * 后者是被测输出，拿它当期望值等于「用结论验证结论」——实现哪天漏判 magpie，期望也跟着漏，
+   * 这条断言照样全绿。所以要真的去读 `<home>/.magpie-agent.state.json`（判据同 services/plugin-managed.ts）。
+   */
+  const PRESET_IDS = /^(anthropic|openai|openai-responses|gemini|deepseek|moonshot|zhipu|qwen|opencode-go|ollama|typesafe)$/
+  const pluginHosted = pluginManagedFromStateFiles([SRC, DST])
+  info('独立算出的插件托管 provider', JSON.stringify([...pluginHosted]))
   const customProviders = readJson(path.join(SRC, 'config.json')).models.providers
     .map((p: any) => p.id)
-    .filter((id: string) => !id.match(/^(anthropic|openai|openai-responses|gemini|deepseek|moonshot|zhipu|qwen|opencode-go|ollama|typesafe)$/))
-  eq('服务商：copied 只含用户自定义', [...r1.providers.copied].sort(), customProviders.sort())
+    .filter((id: string) => !PRESET_IDS.test(id))
+    .filter((id: string) => !pluginHosted.has(id))
+  eq('服务商：copied 只含用户自定义（已排除插件托管的）', [...r1.providers.copied].sort(), customProviders.sort())
+  /*
+   * 已知产品缺陷（2026-11 验收发现，未修）：`runImport()` 组装 `report.providers` 时只拷了
+   * copied / skipped / builtin / failed 四个字段（importer.ts:177-182），把 `mergeProviders()` 已经算好的
+   * `pluginManaged` 漏掉了 —— 同一轮 `report.secrets.pluginManaged` 是有的（importer.ts:207），
+   * 说明不是判定失败，是汇总漏拷。
+   *
+   * 后果：界面拿不到「有几个服务商归插件管」，那行提示永远不出现；用户在原版里看到的 magpie
+   * 到本应用里"消失了"，也没有任何解释。
+   *
+   * 这里**不写成预期失败吞掉**：把事实如实打出来，并单独给一条明确命名的 FAIL，
+   * 让它在汇总里一直可见，直到产品侧修好。修好后这条自然转绿（判据不变）。
+   */
+  const reportedPluginManaged = (r1.providers as any).pluginManaged
+  if (reportedPluginManaged === undefined) {
+    /*
+     * 契约不一致（不是用户可见缺陷）：`runImport()` 组装 `report.providers` 时只拷了
+     * copied / skipped / builtin / failed（importer.ts:177-182），把 `mergeProviders()` 算好的
+     * `pluginManaged` 漏了 —— 同轮 `report.secrets.pluginManaged` 是有的（importer.ts:207），
+     * 说明判定没问题，纯属汇总漏拷。
+     *
+     * 为什么仍要留一条红：`StepStat.pluginManaged` 是协议里声明的可选字段（import-protocol.ts:36），
+     * providers 步骤恰好是注释点名「会有它」的两步之一。前端此刻确实没读它（ImportPane 的 row()
+     * 只看 copied/skipped/failed），所以**当前没有用户可见后果**；但协议与实现不一致，
+     * 谁按协议去渲染那行「N 个服务商归插件管」都会踩空。
+     *
+     * 默认如实报红；`QA_ALLOW_KNOWN_BUG=1` 可降级成 INFO，便于只关注其它断言的人跑绿。
+     */
+    const known = process.env.QA_ALLOW_KNOWN_BUG === '1'
+    const detail = `独立算出 ${JSON.stringify([...pluginHosted])}，报告里没这个键；对照 report.secrets.pluginManaged=${JSON.stringify(r1.secrets.pluginManaged)} 是有的（同轮同源，证明是汇总漏拷）`
+    if (known) info('KNOWN-BUG 服务商：report.providers 缺 pluginManaged 字段（importer.ts:177-182 漏拷）', detail)
+    else fail('服务商：report.providers 缺 pluginManaged 字段（协议有声明、汇总漏拷，见 importer.ts:177-182）', detail)
+  } else {
+    eq(
+      '服务商：插件托管的都报进 pluginManaged（与独立算出的一致）',
+      [...reportedPluginManaged].sort(),
+      [...pluginHosted].sort()
+    )
+  }
+  eq(
+    '服务商：插件托管的没被算成 copied / skipped',
+    {
+      copied: r1.providers.copied.filter((id: string) => pluginHosted.has(id)),
+      skipped: r1.providers.skipped.filter((id: string) => pluginHosted.has(id))
+    },
+    { copied: [], skipped: [] }
+  )
   eq('服务商：builtin = 11 个预置', (r1.providers.builtin ?? []).length, 11)
   eq('服务商：skipped 为空', r1.providers.skipped, [])
   const expPersonasCopied = countIn(path.join(SRC, 'personas'), (n) => n.endsWith('.md')) - 2
@@ -382,17 +504,34 @@ async function scenarioFull(): Promise<void> {
   const orphanKeys = Object.keys(srcSecrets).filter((k) => !srcProviderIds.has(providerKeyOf(k)))
   /*
    * 新契约：能重加密的进 `copied`，解不开的进 `unrecoverable`（原版没装 / 密文不属于原版），
-   * 目标已有可解密文的进 `skipped`。三者都算「已处理」——**关键是不能进 `ignored`**（那才是无主丢弃）。
+   * 目标已有可解密文的进 `skipped`，**插件托管的**进 `pluginManaged`。四者都算「已处理」——
+   * **关键是不能进 `ignored`**（那才是无主丢弃）。
+   *
+   * 为什么 `pluginManaged` 也算「已处理」而不是「没处理」：它的密文由插件自己按网关约定生成，
+   * 搬过去没有意义（目标侧的插件会重新写自己那份）。这是**有意不搬**，不是遗漏。
    *
    * 为什么不再断言「copied 恰好等于 relevantKeys」：这条源是真实 `~/.deva`，里面是原版密文。
    * 本机装了原版时能解、CI 上没有就解不开，`copied` 与 `unrecoverable` 的分配随环境而变——
    * 断言写死任一侧都会在另一种环境里假红。要验「真的解开了」是 `rekey` 场景的职责。
    */
-  const handled = [...r1.secrets.copied, ...r1.secrets.skipped, ...r1.secrets.unrecoverable]
+  const handled = [...r1.secrets.copied, ...r1.secrets.skipped, ...r1.secrets.unrecoverable, ...(r1.secrets.pluginManaged ?? [])]
   eq(
-    '密钥：provider 相关键全部处理（copied / skipped / unrecoverable 三选一）',
+    '密钥：provider 相关键全部处理（copied / skipped / unrecoverable / pluginManaged 四选一）',
     handled.filter((k) => relevantKeys.includes(k)).length,
     relevantKeys.length
+  )
+  // 反向：插件托管 provider 的密钥必须全在 pluginManaged 里，一条都不许落到 unrecoverable。
+  // 后者会让界面提示「去设置 › 模型重填」，而那两个服务商在设置页里没有可填的地方 —— 用户白跑一趟。
+  const pluginHostedKeys = relevantKeys.filter((k) => pluginHosted.has(providerKeyOf(k)))
+  eq(
+    '密钥：插件托管的密钥全在 pluginManaged 里',
+    [...(r1.secrets.pluginManaged ?? [])].filter((k) => pluginHostedKeys.includes(k)).sort(),
+    [...pluginHostedKeys].sort()
+  )
+  eq(
+    '密钥：插件托管的密钥没被塞进 unrecoverable（否则界面会叫用户去手填）',
+    (r1.secrets.unrecoverable ?? []).filter((k) => pluginHosted.has(providerKeyOf(k))),
+    []
   )
   eq(
     '密钥：copied 里只有 provider 相关键（没有混进无主的）',
@@ -433,8 +572,15 @@ async function scenarioFull(): Promise<void> {
   info('dst1 快照', `files=${dst1.counts.files} dirs=${dst1.counts.dirs} links=${dst1.counts.links}`)
   const cfg1 = readJson(path.join(DST, 'config.json'))
   // 期望值从源配置实算，不写死数字：源里 provider 数量随用户增删而变，写死会让这条断言在数据一变就红，
-  // 而它要守的是「导入后目标与源一致」，不是「源恰好有 16 个」。这里重新读一次源，不依赖上方 if 块里的局部变量。
-  eq('目标 config：providers 总数', cfg1.models.providers.length, readJson(path.join(SRC, 'config.json')).models.providers.length)
+  // 而它要守的是「导入后目标与源一致」，不是「源恰好有 N 个」。
+  // 唯一的例外是插件托管的那几个：它们**有意不导入**（密钥归插件管，搬过来用户也改不了），
+  // 所以期望 = 源的全部 − 独立算出的托管集。
+  const srcProviderTotal = readJson(path.join(SRC, 'config.json')).models.providers.length
+  eq(
+    '目标 config：providers 总数（源总数 − 插件托管）',
+    cfg1.models.providers.length,
+    srcProviderTotal - pluginHosted.size
+  )
   check('目标 config：未导入 remote / layout', !('remote' in cfg1) && !('layout' in cfg1), Object.keys(cfg1).join(','))
   if (!seeded) {
     eq('目标 config：未写入 personas.seeded', cfg1.personas?.seeded, undefined)
@@ -510,16 +656,37 @@ async function scenarioFull(): Promise<void> {
     check(`技能 ${id}：链接目标可读`, fs.existsSync(p), '')
   }
 
-  // 引用完整性（源 vs 目标：悬空集合必须一致，不能多）
+  // 引用完整性（源 vs 目标）
   const provIds = new Set(cfg1.models.providers.map((p: any) => p.id))
   const refDst = refIntegrity(DST, provIds)
   const refSrc = refIntegrity(SRC, new Set(readJson(path.join(SRC, 'config.json')).models.providers.map((p: any) => p.id)))
-  // 不能要求目标「一条悬空都没有」：源里本来就可能存在悬空（用户删过 provider，会话仍指向它），
-  // 导入的职责是原样搬过去，不是替用户修复历史数据。要守的是「目标不比源多」，与下方两条悬空集合断言同一口径。
-  eq('引用：model 悬空集合与源一致', [...refDst.badModel].sort(), [...refSrc.badModel].sort())
-  info('引用：源侧 model 无法解析的会话', JSON.stringify(refSrc.badModel))
+  /*
+   * 不能要求目标「一条悬空都没有」：源里本来就可能存在悬空（用户删过 provider，会话仍指向它），
+   * 导入的职责是原样搬过去，不是替用户修复历史数据。
+   *
+   * 也不能简单要求「目标不比源多」：插件托管的 provider 有意不导入，指向它的会话搬到目标后**必然**悬空。
+   * 这是预期行为。
+   *
+   * 所以守的是：**目标比源多出来的悬空，只允许是「指向插件托管 provider」的那一类**。
+   * 任何一条多出来的悬空若不指向插件托管 provider，仍按失败处理 —— 这个保护不能丢，
+   * 否则「导入把某个 provider 漏掉了」这类真 bug 会被这条断言放行。
+   *
+   * 多出来的条目形如 `sess_xxx→magpie:auto/deepseek-v4.1-flash`，取 `→` 后半段的 `providerId` 判定。
+   */
+  const extraModel = extraDangling(refDst.badModel, refSrc.badModel)
+  const { allowed: allowedModel, unexpected: unexpectedModel } = classifyExtraDangling(extraModel, pluginHosted)
+  info('引用：目标比源多的 model 悬空', JSON.stringify(extraModel))
+  info(
+    '引用：其中指向插件托管 provider 的（预期）',
+    JSON.stringify({ 允许: allowedModel.length, 明细: allowedModel.slice(0, 4) })
+  )
+  eq('引用：model 多出来的悬空全部指向插件托管 provider（没有意外的）', unexpectedModel, [])
+  // 源侧原有的悬空必须原样保留到目标（导入的职责是搬运，不是修复历史数据）
+  eq('引用：源侧已有的 model 悬空一条不落地搬过去了', refSrc.badModel.filter((x) => !refDst.badModel.includes(x)), [])
+  // members / parentId 与 provider 无关，插件托管不影响它们，仍要求完全一致
   eq('引用：members 悬空集合与源一致', [...refDst.danglingMember].sort(), [...refSrc.danglingMember].sort())
   eq('引用：parentId 悬空集合与源一致', [...refDst.danglingParent].sort(), [...refSrc.danglingParent].sort())
+  info('引用：源侧 model 无法解析的会话', JSON.stringify(refSrc.badModel))
   info('引用：源侧 members 悬空', JSON.stringify(refSrc.danglingMember))
   info('引用：源侧 parentId 悬空', JSON.stringify(refSrc.danglingParent))
 
@@ -4078,6 +4245,238 @@ async function scenarioSecretRekey(): Promise<void> {
   }
 }
 
+/**
+ * 插件托管的服务商：**不导它的密钥、也不要求用户去设置页重填**。
+ *
+ * 判据是插件自己的所有权声明（`<home>/.magpie-agent.state.json` 的 `providerId`），不是 id 特征
+ * ——这条断言的重点就是「插件改名/多实例时仍然认得出来」。所以这里刻意用**两个非 magpie 的 id**
+ * 来证明判据不吃 id。
+ */
+/* ───────── 场景 ⑬：悬空分类（插件托管豁免的守门逻辑） ───────── */
+
+/**
+ * full 场景里那条「model 悬空」断言现在允许一种例外：目标比源多的悬空若指向插件托管 provider，
+ * 就算预期之内。这个「只放行那一类」的判定必须单独测，否则它可能就是「放行所有悬空」——
+ * 那样「导入漏掉某个 provider」的真 bug 会被静默放过去。
+ *
+ * 这里不跑导入，直接对分类函数喂人造输入，正反两面都断言。
+ */
+async function scenarioDanglingClassify(): Promise<void> {
+  const hosted = new Set(['magpie', 'gw-relay-7'])
+
+  // ① 指向插件托管 provider 的额外悬空 → 允许
+  {
+    const extras = ['sess_a→magpie:auto/glm', 'mem_b→magpie:auto/deepseek', 'sess_c→gw-relay-7:m1']
+    const { allowed, unexpected } = classifyExtraDangling(extras, hosted)
+    eq('分类：指向插件托管 provider 的额外悬空全部判为预期', allowed.sort(), [...extras].sort())
+    eq('分类：这一类没有意外的', unexpected, [])
+  }
+
+  // ② 指向普通 provider 的额外悬空 → 必须报意外（守门）
+  {
+    const extras = ['sess_a→custom-123:m1', 'sess_b→anthropic:claude']
+    const { allowed, unexpected } = classifyExtraDangling(extras, hosted)
+    eq('分类：指向普通 provider 的额外悬空不获豁免', allowed, [])
+    eq('分类：它们被判为意外（这条保护不能丢）', unexpected.sort(), [...extras].sort())
+  }
+
+  // ③ 混合：只有托管那一类过关，其余照报
+  {
+    const extras = ['sess_a→magpie:auto/glm', 'sess_b→custom-123:m1']
+    const { allowed, unexpected } = classifyExtraDangling(extras, hosted)
+    eq('分类：混合输入时只豁免托管项', allowed, ['sess_a→magpie:auto/glm'])
+    eq('分类：混合输入时其余仍报意外', unexpected, ['sess_b→custom-123:m1'])
+  }
+
+  // ④ 托管集为空（模拟插件没装）→ 任何额外悬空都不豁免
+  {
+    const extras = ['sess_a→magpie:auto/glm']
+    const { allowed, unexpected } = classifyExtraDangling(extras, new Set())
+    eq('分类：托管集为空时没有豁免', allowed, [])
+    eq('分类：托管集为空时 magpie 的悬空也报意外（反向验证的关键）', unexpected, extras)
+  }
+
+  // ⑤ 边界：没有 `:` 的 model（只有 providerId）、空串、箭头解析
+  {
+    eq('分类：model 不带冒号时按整串取 providerId', providerOfRef('sess_x→magpie'), 'magpie')
+    eq('分类：带多段冒号时只取第一段', providerOfRef('sess_x→gw-relay-7:a:b'), 'gw-relay-7')
+    eq('分类：空 model 不崩', providerOfRef('sess_x→'), '')
+  }
+
+  // ⑥ extraDangling：只算目标多出来的，源里也有的不算
+  {
+    eq(
+      '额外悬空：源里已有的不重复计',
+      extraDangling(['a→x:1', 'b→y:2'], ['a→x:1']),
+      ['b→y:2']
+    )
+    eq('额外悬空：完全一致时为空', extraDangling(['a→x:1'], ['a→x:1']), [])
+    eq('额外悬空：源比目标多时也为空（导入不要求修复源的历史悬空）', extraDangling([], ['a→x:1']), [])
+  }
+
+  // ⑦ 与真实 full 的数据形状核对：真实那条是 `sess_xxx→magpie:auto/deepseek-v4.1-flash`
+  {
+    eq(
+      '分类：真实数据形态（magpie:auto/...）能被正确识别',
+      providerOfRef('mem_mwf16qan_2t→magpie:zcode/GLM-5.3-Flash-Trial'),
+      'magpie'
+    )
+  }
+}
+
+/* ───────── 场景 ⑬ 结束 ───────── */
+
+async function scenarioPluginManaged(): Promise<void> {
+  const PL = await import('../../apps/desktop/src/main/services/plugin-managed')
+  const srcHome = path.join(DST, 'plug-src')
+  const dstHome = getDevaHome()
+  fs.mkdirSync(srcHome, { recursive: true })
+
+  // ── ① 判定本身：读插件声明，不吃 id ──
+  {
+    const homeA = path.join(DST, 'plug-a')
+    fs.mkdirSync(homeA, { recursive: true })
+    // 故意用不是 'magpie' 的 id：证明判定不靠硬编码
+    fs.writeFileSync(
+      path.join(homeA, '.magpie-agent.state.json'),
+      JSON.stringify({ providerId: 'gw-relay-7', ownedSecret: true })
+    )
+    const ids = PL.pluginManagedProviderIds([homeA])
+    check('判定：从插件状态文件读到托管的 providerId', ids.has('gw-relay-7'), JSON.stringify([...ids]))
+    eq('判定：不吃 id——\'magpie\' 本身没被声明时不算托管', ids.has('magpie'), false)
+
+    // 状态文件缺失 / 内容坏 / 字段类型不对 → 都不算托管（退化成旧行为，不误跳过用户的密钥）
+    const homeB = path.join(DST, 'plug-b')
+    fs.mkdirSync(homeB, { recursive: true })
+    check('判定：没有状态文件时为空集', PL.pluginManagedProviderIds([homeB]).size === 0, 'empty')
+    fs.writeFileSync(path.join(homeB, '.magpie-agent.state.json'), '{半截 JSON')
+    check('判定：状态文件坏掉时不崩、当没有', PL.pluginManagedProviderIds([homeB]).size === 0, 'corrupt')
+    fs.writeFileSync(
+      path.join(homeB, '.magpie-agent.state.json'),
+      JSON.stringify({ providerId: 42 })
+    )
+    check('判定：providerId 不是字符串时不算', PL.pluginManagedProviderIds([homeB]).size === 0, 'type')
+
+    eq('判定：按 key 判归属（providerId 自身）', PL.isPluginManagedKey('gw-relay-7', ids), true)
+    eq('判定：按 key 判归属（providerId:modelId）', PL.isPluginManagedKey('gw-relay-7:m1', ids), true)
+    eq('判定：不是托管 provider 的 key 不受影响', PL.isPluginManagedKey('anthropic', ids), false)
+  }
+
+  // ── ② mergeProviders：插件 provider 整条不搬，单列 pluginManaged ──
+  {
+    /*
+     * 插件的所有权声明必须在**源 home** 里：`mergeProviders(srcHome)` 读的是源与目标两个 home，
+     * 而「原版装过插件」这件事就体现为源 home 里有这个文件。之前漏写，于是判定拿不到任何 id、
+     * 整个插件分支都没被走到（断言如实报红，不是测试假红）。
+     */
+    fs.writeFileSync(
+      path.join(srcHome, '.magpie-agent.state.json'),
+      JSON.stringify({ providerId: 'gw-relay-7', ownedSecret: true })
+    )
+    fs.writeFileSync(
+      path.join(srcHome, 'config.json'),
+      JSON.stringify({
+        models: {
+          providers: [
+            { id: 'gw-relay-7', name: 'magpie', kind: 'custom', apiHost: 'http://127.0.0.1:3425/v1', enabled: true, models: [] },
+            { id: 'my-own-relay', name: '我的中转', kind: 'custom', apiHost: 'https://x.example/v1', enabled: true, models: [] }
+          ]
+        }
+      })
+    )
+    const stat = mergeProviders(srcHome)
+    info('mergeProviders 结果', JSON.stringify({ copied: stat.copied, pluginManaged: stat.pluginManaged, skipped: stat.skipped }))
+    check(
+      'providers：插件注入的 provider 单列进 pluginManaged',
+      stat.pluginManaged.includes('gw-relay-7'),
+      JSON.stringify(stat.pluginManaged)
+    )
+    eq('providers：它没有被判定为「已存在而跳过」', stat.skipped.includes('gw-relay-7'), false)
+    eq('providers：它也没有被当成新增', stat.copied.includes('gw-relay-7'), false)
+    check(
+      'providers：用户自己的服务商照常导入（别把所有 custom 都跳掉）',
+      stat.copied.includes('my-own-relay'),
+      JSON.stringify(stat.copied)
+    )
+    const cfg = getConfig() as { models?: { providers?: Array<{ id?: string }> } }
+    eq(
+      'providers：插件那条**没有**被写进目标 config',
+      (cfg.models?.providers ?? []).some((p) => p?.id === 'gw-relay-7'),
+      false
+    )
+  }
+
+  // ── ③ copySecrets：插件托管的密钥不导入、不进 unrecoverable ──
+  {
+    /*
+     * 目标里要有 gw-relay-7 这个 provider 才能走到「有主密文」分支——但那正是要避免的路径：
+     * 真机上它由插件注入，导入器不该碰。这里**故意让目标里存在它**，验证「即使有主也不导」。
+     */
+    const cfg = getConfig() as { models?: Record<string, unknown> }
+    const cur = (cfg.models?.providers as Array<{ id?: string }>) ?? []
+    setConfig({
+      models: {
+        ...(cfg.models ?? {}),
+        providers: [
+          ...cur,
+          { id: 'gw-relay-7', name: 'magpie', kind: 'custom', accent: '#888', adapter: 'openai', apiHost: 'http://127.0.0.1:3425/v1', enabled: true, models: [] }
+        ]
+      }
+    })
+    // 源里两条密钥：一条归插件、一条是用户自己的
+    fs.writeFileSync(
+      path.join(srcHome, 'secrets.json'),
+      JSON.stringify({ 'gw-relay-7': 'cipher-plugin', 'my-own-relay': 'cipher-mine' })
+    )
+    const stat = await copySecrets(srcHome)
+    info('copySecrets 结果', JSON.stringify({
+      pluginManaged: stat.pluginManaged,
+      unrecoverable: stat.unrecoverable,
+      copied: stat.copied,
+      ignored: stat.ignored
+    }))
+    check(
+      'secrets：插件托管的密钥单列进 pluginManaged',
+      stat.pluginManaged.includes('gw-relay-7'),
+      JSON.stringify(stat.pluginManaged)
+    )
+    /*
+     * 这条是本次修复的**核心**：以前它会走「有主 → 尝试重加密 → 解不开 → unrecoverable」，
+     * 界面于是提示「去设置 › 模型重填」，而设置页里那个 provider 没有可编辑的密钥输入。
+     */
+    eq(
+      'secrets：它**不**进 unrecoverable（否则界面会误导用户去设置页白跑）',
+      stat.unrecoverable.includes('gw-relay-7'),
+      false
+    )
+    eq('secrets：它也不进 copied', stat.copied.includes('gw-relay-7'), false)
+    eq('secrets：用户自己的密钥照常处理（不在 pluginManaged 里）', stat.pluginManaged.includes('my-own-relay'), false)
+  }
+
+  // ── ④ 反向验证：抹掉插件声明 → 密钥又会被当成「要导入」，断言必须变红 ──
+  {
+    fs.rmSync(path.join(srcHome, '.magpie-agent.state.json'), { force: true })
+    const st = await copySecrets(srcHome)
+    info('反向（抹掉状态文件）', JSON.stringify({ pluginManaged: st.pluginManaged, unrecoverable: st.unrecoverable }))
+    check(
+      '反向：没有插件声明时它退回旧行为（进 unrecoverable），证明上面的 skip 真的由判定驱动',
+      st.unrecoverable.includes('gw-relay-7') && st.pluginManaged.length === 0,
+      JSON.stringify({ unrecoverable: st.unrecoverable, pluginManaged: st.pluginManaged })
+    )
+    // 补回，免得影响后面
+    fs.writeFileSync(
+      path.join(dstHome, '.magpie-agent.state.json'),
+      JSON.stringify({ providerId: 'gw-relay-7', ownedSecret: true })
+    )
+    const st2 = await copySecrets(srcHome)
+    check(
+      '反向②：目标侧 home 的插件声明同样生效（两侧取并集）',
+      st2.pluginManaged.includes('gw-relay-7'),
+      JSON.stringify(st2.pluginManaged)
+    )
+  }
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -4109,6 +4508,8 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   worktree: scenarioWorktree,
   insatt: scenarioInsertAttachments,
   rekey: scenarioSecretRekey,
+  plugmgr: scenarioPluginManaged,
+  dangclass: scenarioDanglingClassify,
   wtlock: scenarioWorktreeLock,
   locks: scenarioLocks,
   nosource: scenarioNoSource,
