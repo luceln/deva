@@ -380,18 +380,18 @@ export const ConvMessage = memo(function ConvMessage({
   // 成员交差的通知：不显示（其后主角色的回复就是交差内容），只留一个不占高度的锚点——它仍是一轮的起点，
   // 跳转定位 / 右键删轮都靠 is-user + data-turn。
   if (msg.role === 'user' && msg.notify && msg.quiet)
-    return <div className="cf-msg is-user is-quiet" data-turn={dataTurn} aria-hidden="true" />
+    return <div className="cf-msg is-user is-quiet" data-turn={dataTurn} data-msg-id={msg.id} aria-hidden="true" />
   // 绑定的定时任务交来要处理的结果：居中一行「任务名 摘要」，点开看全文；其后是主角色的回复（对比稿 M2）。
   if (msg.role === 'user' && msg.notify && msg.handoff)
     return (
-      <div className="cf-msg is-user is-notify" data-turn={dataTurn}>
+      <div className="cf-msg is-user is-notify" data-turn={dataTurn} data-msg-id={msg.id}>
         <HandoffNotice handoff={msg.handoff} />
       </div>
     )
   if (msg.role === 'user' && msg.notify) {
     const text = msg.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('')
     return (
-      <div className="cf-msg is-user is-notify" data-turn={dataTurn}>
+      <div className="cf-msg is-user is-notify" data-turn={dataTurn} data-msg-id={msg.id}>
         <div className="cf-notify">
           <Bot size={13} />
           <span>{text || t('chat.subagent.notify')}</span>
@@ -403,7 +403,7 @@ export const ConvMessage = memo(function ConvMessage({
   const only = msg.blocks.length === 1 ? msg.blocks[0] : undefined
   if (msg.role === 'assistant' && only?.kind === 'compaction' && only.steps === undefined) {
     return (
-      <div className="cf-msg is-compaction" data-turn={dataTurn}>
+      <div className="cf-msg is-compaction" data-turn={dataTurn} data-msg-id={msg.id}>
         <CompactionNotice summary={only.summary} first={only.first} />
       </div>
     )
@@ -413,7 +413,7 @@ export const ConvMessage = memo(function ConvMessage({
     const task = msg.task
     const from = taskOwner?.name ?? task.owner
     return (
-      <div className="cf-msg is-task" data-turn={dataTurn}>
+      <div className="cf-msg is-task" data-turn={dataTurn} data-msg-id={msg.id}>
         <Avatar persona={taskOwner} size={32} />
         <div className="cf-msg__body">
           <div className="cf-msg__head">
@@ -456,7 +456,7 @@ export const ConvMessage = memo(function ConvMessage({
   if (msg.role === 'user') {
     const text = msg.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('')
     return (
-      <div className="cf-msg is-user" data-turn={dataTurn}>
+      <div className="cf-msg is-user" data-turn={dataTurn} data-msg-id={msg.id}>
         <div className="cf-msg__body">
           {msg.attachments && msg.attachments.length > 0 && (
             <AttachmentList
@@ -532,7 +532,7 @@ export const ConvMessage = memo(function ConvMessage({
   // 有工作过程时，角色名与折叠条同一行（「Deva › 已处理 … · N 步」）；没有时单独一行。
   const name = <span className="cf-msg__name">{taskSpeaker ?? owner?.name ?? t('cf.assistant')}</span>
   return (
-    <div className="cf-msg" data-turn={dataTurn}>
+    <div className="cf-msg" data-turn={dataTurn} data-msg-id={msg.id}>
       {taskSpeaker ? <TaskSpeakerFace persona={taskPersona} size={32} /> : <Avatar persona={owner} size={32} />}
       <div className="cf-msg__body">
         {!split && <div className="cf-msg__head">{name}</div>}

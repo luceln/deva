@@ -48,8 +48,28 @@ import {
 } from './ConvMessage'
 import { type SlashCommand, type ComposerPrefill, MemberProgressNotice, Composer } from './Composer'
 
-/** 距底 ≤ 此像素即视为「贴住底部」，留缓冲避免临界抖动。 */
-const BOTTOM_THRESHOLD = 64
+/**
+ * 「回到底部」按钮的显隐阈值：距底 ≤ 此像素即隐藏按钮（= 视为已在底部）。
+ *
+ * 与 {@link STICK_RESUME_PX} 分开是刻意的——以前一个 64 兼两种职责，结果是按钮出现得太晚
+ * （要滚到离底 64px 才出现，而那时用户其实早就不在底部了）。
+ * 200px 的依据：三家实现交叉验证的取值，约等于「一行消息 + 呼吸间距」的视觉距离，
+ * 用户在这个范围内仍算「在看最新内容」，不必打扰；一旦超过，按钮就该出现给他退路。
+ */
+const BOTTOM_THRESHOLD = 200
+
+/**
+ * 恢复「自动跟随」的阈值：距底 ≤ 此像素才算真的回到底部。
+ *
+ * 必须比 {@link BOTTOM_THRESHOLD} 小得多：按钮的显隐是「提示」可以宽松，
+ * 恢复跟随是「接管滚动」必须严格——差 200px 就跟上，会让用户明明还在看倒数第二条时被拽走。
+ * 8px：取 1px 精确贴底之上一点点，容纳亚像素舍入与滚动条舍入（实测 Chrome 在 125% 缩放下
+ * 贴底后 scrollHeight - scrollTop - clientHeight 仍可能是 1~2）。
+ */
+const STICK_RESUME_PX = 8
+
+/** 距已渲染内容的顶部不足此像素时补一段更早的历史（见 WINDOW_TURNS）。 */
+const LOAD_MORE_PX = 120
 
 /**
  * 长对话分段渲染：打开对话时只渲染最后 WINDOW_TURNS 轮，滚到离已渲染内容的顶边（或跳转后的底边）
@@ -58,7 +78,35 @@ const BOTTOM_THRESHOLD = 64
  */
 const WINDOW_TURNS = 10
 
-const LOAD_MORE_PX = 600
+/**
+ * 写滚动位置，并把「已知的上一位置」基线一起更新。
+ *
+ * 为什么必须成对：`scroll` 事件分不出是用户滚的还是程序滚的（浏览器不给来源）。
+ * 我们靠「这次 scrollTop 比上次记的小 → 用户在往上滚」来判断脱离跟随（见 onScroll 的兜底分支）；
+ * 如果程序自己写完位置不改基线，下一个 scroll 事件就会被读成「用户上滚」，
+ * 于是补段的落位、贴底跟随这些自己的动作会把跟随状态打断——表现是「输出时莫名停止跟随」。
+ *
+ * 所有 `el.scrollTop = …` 都必须走这里（`scrollTo` 的平滑那个除外，它走 scrollend 收尾，见 jumpToLatest）。
+ */
+function writeScrollTop(el: HTMLDivElement, top: number): void {
+  el.scrollTop = top
+  // 记的是**浏览器实际采纳的值**，不是传进来的：越界值会被夹到 [0, scrollHeight - clientHeight]，
+  // 记原值会让基线偏大，下一个 scroll 事件就误判成「用户往下滚了」。
+  lastTopOf(el, el.scrollTop)
+}
+
+/**
+ * 每个滚动容器「已知的上一位置」。用 WeakMap 而不是 ref 传参：
+ * writeScrollTop 是模块级函数，被 useLayoutEffect / 事件回调多处调用，走 ref 会让每处都得带一个参数。
+ */
+const lastTopMap = new WeakMap<HTMLElement, number>()
+function lastTopOf(el: HTMLElement, next?: number): number {
+  if (next !== undefined) {
+    lastTopMap.set(el, next)
+    return next
+  }
+  return lastTopMap.get(el) ?? el.scrollTop
+}
 
 /**
  * 右侧「对话轮次索引」面板参数。纯渲染层视觉常量：不持久化、不给设置项。
@@ -279,6 +327,17 @@ export function Conversation({
   // 恢复跟随。ref 供滚动副作用同步读取（避免闭包过期、其变化不触发副作用重跑），state 仅驱动浮标显隐。
   const stickRef = useRef(true)
   const [atBottom, setAtBottom] = useState(true)
+  /** 补段闸门：一次只跑一个，渲染落位完成前不再触发（惯性滚动会在一个手势里刷出几十个 scroll 事件）。 */
+  const loadingRef = useRef(false)
+  /**
+   * 补段用的元素锚点：补之前记下「首个底边越过视口顶边的那条消息」的 id 与它相对视口顶的偏移，
+   * 补完把它摆回同一位置。
+   *
+   * 为什么不能用「距底距离」：内容是在**上方**插入的，而距底距离把底部的增长也算进补偿里；
+   * 更要命的是它与「用户此刻在看哪一行」无关——实测按距底距离落位后，用户视野从第 17 个问题跳到了第 13 个。
+   * 元素锚点只受「锚点以上的变化」影响，正是这里想要的语义。
+   */
+  const anchorRef = useRef<{ id: string; offset: number } | null>(null)
 
   // 选择态（按轮删除）：selecting=是否在选择模式；selected=选中的轮下标集合（0 基，与 groupTurns 一致）。
   const [selecting, setSelecting] = useState(false)
@@ -337,16 +396,55 @@ export function Conversation({
   const to = range && range.to !== null ? endOfTurn(range.to) : messages.length - 1
   /** 已渲染到最新一条：不在时（跳转到较早的轮后）不跟随新内容、不显示底部状态行，「回到最新」常显。 */
   const isTail = to === messages.length - 1
-  // 补上更早一段后要保持的「距底距离」（内容加在上方，按距底距离落位，看着的内容不动）。
-  const restoreRef = useRef<number | null>(null)
   // 跳转目标轮还没渲染：先换范围，渲染后再落位。
   const pendingJumpRef = useRef<number | null>(null)
   // 从中间一段回到最新：换回最后几轮后直接落到底。
   const pendingBottomRef = useRef(false)
+
+  /**
+   * 记下当前视野顶部的消息作锚点（补段前后按它摆位，见 anchorRef）。
+   * 用 `data-msg-id`（稳定 id，见 ConvMessage）而不是 `data-turn`：同一轮里有多条消息（用户气泡、
+   * 助手回复、卡片），turn 会重复，作为锚点分不清是哪一条。
+   */
+  const captureAnchor = (el: HTMLDivElement): void => {
+    const vTop = el.getBoundingClientRect().top
+    for (const n of el.querySelectorAll<HTMLElement>('[data-msg-id]')) {
+      const r = n.getBoundingClientRect()
+      // 首个「底边还在视口顶边之下」的消息就是视野里的第一条。
+      if (r.bottom > vTop) {
+        anchorRef.current = { id: n.dataset.msgId ?? '', offset: r.top - vTop }
+        return
+      }
+    }
+    anchorRef.current = null
+  }
+
+  /**
+   * 把锚点消息摆回补段前的位置（补段渲染后、绘制前调用）。
+   *
+   * delta 是「锚点现在离视口顶的距离」与「它补段前离视口顶的距离」之差：正值说明它往下跑了，
+   * 把 scrollTop 加上这个差值就把它拉回来。不按「距底距离」算，因为底部新增的内容与用户看哪儿无关。
+   */
+  const restoreAnchor = (el: HTMLDivElement): void => {
+    const a = anchorRef.current
+    anchorRef.current = null
+    if (!a || !a.id) return
+    const n = el.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(a.id)}"]`)
+    if (!n) return
+    const vTop = el.getBoundingClientRect().top
+    const delta = n.getBoundingClientRect().top - vTop - a.offset
+    if (Math.abs(delta) >= 1) writeScrollTop(el, el.scrollTop + delta)
+  }
+
   const loadEarlier = (): void => {
-    if (!range || from <= 0) return
+    // 闸门：一次只补一段，补完（useLayoutEffect 落位）之前不再触发。
+    // 惯性滚动一次手势能刷出几十个 scroll 事件，没有闸门时 setWin 会被连调，锚点被后一次覆盖、前面的补偿全丢。
+    if (!range || from <= 0 || loadingRef.current) return
     const el = scrollRef.current
-    if (el) restoreRef.current = el.scrollHeight - el.scrollTop
+    if (el) {
+      captureAnchor(el)
+      loadingRef.current = true
+    }
     setWin({ ...range, from: range.from - WINDOW_TURNS })
   }
   const loadLater = (): void => {
@@ -478,12 +576,12 @@ export function Conversation({
     )
     // 贴底态按目标位置同步算，不能等 onScroll 回填：目标与当前位置相同时一次 scroll 都不会触发，
     // 贴底态会卡在错值（§4.8 流式跟随据此决策）。
-    const atBot = isTail && el.scrollHeight - top - el.clientHeight <= BOTTOM_THRESHOLD
+    const atBot = isTail && el.scrollHeight - top - el.clientHeight <= STICK_RESUME_PX
     stickRef.current = atBot
     setAtBottom(atBot)
     jumpedRef.current = turn
     // 直接落位，不用 behavior:"smooth"：长对话里一路滚过去既慢又晃眼。
-    el.scrollTop = top
+    writeScrollTop(el, top)
     setActiveTurn(turn)
   }
   // 跳到某一轮：已渲染就直接滚过去；还没渲染则改为从该轮起渲染一段（不把中间的轮全渲染出来），渲染后再落位，
@@ -499,14 +597,15 @@ export function Conversation({
     pendingJumpRef.current = turn
     setWin({ sid: currentSessionId, from: turn, to: end >= lastTurn ? null : end })
   }
-  // 换了渲染范围之后、绘制之前落位：补上更早一段时保持距底距离，跳转则滚到目标轮，回到最新则落到底。
+  // 换了渲染范围之后、绘制之前落位：补上更早一段时按**元素锚点**摆回原位，跳转则滚到目标轮，回到最新则落到底。
+  // 用 layout effect 而不是 effect：新内容已在 DOM 里，必须在绘制前落位，否则会闪一帧错位置。
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (!el) return
-    if (restoreRef.current !== null) {
-      el.scrollTop = el.scrollHeight - restoreRef.current
-      restoreRef.current = null
-    }
+    // 补段落位：把补段前视野顶部那条消息摆回同一位置（锚点在 loadEarlier 里记下）。
+    restoreAnchor(el)
+    // 闸门放开：这一段渲染 + 落位已完成，下次滚动可以再补。
+    loadingRef.current = false
     if (pendingJumpRef.current !== null) {
       const turn = pendingJumpRef.current
       pendingJumpRef.current = null
@@ -514,7 +613,7 @@ export function Conversation({
     }
     if (pendingBottomRef.current) {
       pendingBottomRef.current = false
-      el.scrollTop = el.scrollHeight
+      writeScrollTop(el, el.scrollHeight)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win])
@@ -572,13 +671,19 @@ export function Conversation({
   }, [messages.length, selecting])
 
   // 新内容到达：仅当仍贴底才自动滚到底；用户上滚查看历史时保持不动。
-  useEffect(() => {
-    scheduleActive()
+  // 用 layout effect：新 chunk 已在 DOM 里，必须在**绘制前**落底，否则会闪一帧「最新几行还压在折痕下面」。
+  useLayoutEffect(() => {
     if (!stickRef.current) return
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el) writeScrollTop(el, el.scrollHeight)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, streaming])
+
+  // 轮次索引高亮另算：它是纯视觉的，晚一帧没关系，也不必占绘制的同步时间。
+  useEffect(() => {
+    scheduleActive()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages])
 
   // 切换会话（Conversation 不按会话重挂载）：复位贴底并直接滚到底；同时退出选择态（选择只属当前对话）。
   useEffect(() => {
@@ -589,11 +694,12 @@ export function Conversation({
     setCtxMenu(null)
     setRewind(null)
     setActiveTurn(-1)
-    restoreRef.current = null
+    anchorRef.current = null
+    loadingRef.current = false
     pendingJumpRef.current = null
     pendingBottomRef.current = false
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    if (el) writeScrollTop(el, el.scrollHeight)
   }, [currentSessionId])
 
   // 换了渲染范围或消息整份重建后（刚打开 / 刚补过一段 / 刚跳转 / 删轮后）离边缘仍不远（内容填不满一屏等）：
@@ -606,14 +712,84 @@ export function Conversation({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win, messages])
 
-  // 监听用户滚动：据距底距离更新「是否贴底」，离已渲染内容的边缘不远时补一段。程序化滚到底同样触发，结果仍为贴底、幂等。
+  /**
+   * 脱离跟随（由**输入方向**驱动，不看位置）。
+   *
+   * 为什么是方向不是距离：LibreChat 的源码注释把这件事讲透了——「Heading up lets go at once and stays
+   * let go, however close to the end the reader still is; anything position-based drags them back before
+   * they have cleared the band, which reads as the thread refusing to be scrolled.」
+   *
+   * 位置判断只在「真的到不了顶部」时才有意义（比如内容刚好撑满一屏、上滚不产生位移），
+   * 那种情况由 onScroll 的兜底分支处理。这里只管「用户明确表达了要往上看」。
+   */
+  const detach = useCallback((): void => {
+    if (!stickRef.current) return
+    stickRef.current = false
+    setAtBottom(false)
+  }, [])
+
+  /**
+   * 监听输入事件来判脱离跟随。
+   *
+   * 三类输入都要覆盖（LobeChat / assistant-ui / LibreChat 都是这么做的）：
+   *  - `wheel`      ：鼠标滚轮，deltaY < 0 即向上滚；
+   *  - `touchmove`  ：触屏拖动，手指往下移（clientY 增大）= 内容往上走；
+   *  - `keydown`    ：键盘翻页/上移（ArrowUp / PageUp / Home / Shift+Space）。
+   * 另外 `scroll` 的方向判断作兜底（拖滚动条不走上面任何事件）。
+   *
+   * 输入框里的按键不算：用户可能在编辑一条很长的消息，按 ArrowUp 是在移动光标，不是想滚对话。
+   */
+  useEffect(() => {
+    const onWheel = (e: WheelEvent): void => {
+      if (e.deltaY < 0) detach()
+    }
+    let touchY: number | null = null
+    const onTouchStart = (e: TouchEvent): void => {
+      touchY = e.touches[0]?.clientY ?? null
+    }
+    const onTouchMove = (e: TouchEvent): void => {
+      const y = e.touches[0]?.clientY
+      if (y === undefined || touchY === null) return
+      // 手指往下拖 = 看更早的内容
+      if (y > touchY + 2) detach()
+      touchY = y
+    }
+    const onKey = (e: KeyboardEvent): void => {
+      // 正在输入的地方（输入框、可编辑区）不判：那是编辑文字，不是滚对话。
+      const t = e.target as HTMLElement | null
+      if (t?.closest?.('textarea, input, [contenteditable="true"]')) return
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home' || (e.key === ' ' && e.shiftKey)) detach()
+    }
+    window.addEventListener('wheel', onWheel, { passive: true })
+    window.addEventListener('touchstart', onTouchStart, { passive: true })
+    window.addEventListener('touchmove', onTouchMove, { passive: true })
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('wheel', onWheel)
+      window.removeEventListener('touchstart', onTouchStart)
+      window.removeEventListener('touchmove', onTouchMove)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [detach])
+
+  // 监听滚动：更新「按钮显不显示」、在真的回到最底时恢复跟随、离边缘不远时补一段。
   const onScroll = (): void => {
     const el = scrollRef.current
     if (!el) return
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-    const atBot = isTail && dist <= BOTTOM_THRESHOLD
-    stickRef.current = atBot
-    setAtBottom((prev) => (prev === atBot ? prev : atBot))
+    const prevTop = lastTopOf(el)
+    const top = el.scrollTop
+    // 基线跟上当前位置（这条既是「程序滚动的收尾」，也是兜底方向判断的比较基准）。
+    lastTopOf(el, top)
+    // 恢复跟随只看「真的到最底」（STICK_RESUME_PX=8）：差 200px 就跟上会把还在看倒数第二条的用户拽走。
+    const atBot = isTail && dist <= STICK_RESUME_PX
+    if (atBot) stickRef.current = true
+    // 脱离的兜底：拖滚动条不走 wheel / touch / key，只能看方向。
+    // 只在「本次 scroll 是往上走的」时判，且不覆盖刚被输入事件 / 贴底恢复设过的状态。
+    else if (top < prevTop - 1 && stickRef.current) stickRef.current = false
+    // 按钮显隐用宽松阈值：它只是给用户一个退路，不该等到快贴底才出现。
+    const showJump = !(isTail && dist <= BOTTOM_THRESHOLD)
+    setAtBottom(!showJump)
     scheduleActive()
     if (from > 0 && el.scrollTop < LOAD_MORE_PX) loadEarlier()
     else if (!isTail && dist < LOAD_MORE_PX) loadLater()
@@ -626,14 +802,26 @@ export function Conversation({
     const el = scrollRef.current
     const inner = el?.firstElementChild
     if (!el || !inner || !isTail) return
+    /** 上一次观察到内容高度。用来判断这次尺寸变化是「变矮」还是「变高」。 */
+    let prevH: number | null = el.scrollHeight
     const ro = new ResizeObserver(() => {
       // 贴底时可视区变矮（如输入框上方多出一排胶囊：浏览器 / 待办 / 后台任务，消息区底部随之加出留白，内容区变矮）：立刻贴回底部。否则最新的步骤、思考
       // 被挤到可视区下面，要等下一次内容更新才滚回来——Deva 正在执行耗时的步骤时，那一行会一直被挡着
       if (stickRef.current) {
-        if (el.scrollHeight - el.scrollTop - el.clientHeight > 1) el.scrollTop = el.scrollHeight
+        if (el.scrollHeight - el.scrollTop - el.clientHeight > 1) writeScrollTop(el, el.scrollHeight)
         return
       }
-      if (el.scrollHeight - el.scrollTop - el.clientHeight > BOTTOM_THRESHOLD) return
+      /*
+       * 只有「内容真的变矮」（折叠块收起、步骤折叠）才在这里恢复跟随。
+       *
+       * 不能只看「现在距底 ≤ 阈值」：用户按 PageUp / 滚轮往上时，如果本来就贴在底部，
+       * 那一次按键**没有任何位移**（已经在最底了），dist 仍是 0——只看位置就会当场把
+       * 刚脱开的跟随状态改回去，用户按了 PageUp 却什么也没发生（实测 S7）。
+       * 「位置碰巧在底部」与「用户想回到底部」是两件事。
+       */
+      if (prevH !== null && el.scrollHeight >= prevH) return
+      prevH = el.scrollHeight
+      if (el.scrollHeight - el.scrollTop - el.clientHeight > STICK_RESUME_PX) return
       stickRef.current = true
       setAtBottom(true)
     })
@@ -648,8 +836,19 @@ export function Conversation({
     if (!el) return
     stickRef.current = true
     setAtBottom(true)
-    if (isTail) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-    else resetToTail()
+    if (!isTail) {
+      resetToTail()
+      return
+    }
+    // 这里是唯一保留 `behavior: 'smooth'` 的地方：点按钮是明确的「带我去底部」，动画让用户看得见去向。
+    // （`.cf-msgs` 上已显式 `scroll-behavior: auto`，不会污染别处对 scrollTop 的直接赋值。）
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    // 平滑滚动期间不会被 writeScrollTop 记基线，落定后补记一次，免得下一次用户滚动被算成「从旧位置出发」。
+    const done = (): void => {
+      lastTopOf(el, el.scrollTop)
+      el.removeEventListener('scrollend', done)
+    }
+    el.addEventListener('scrollend', done, { once: true })
   }
 
   // 发送后必看到自己的消息与回复：无论此刻是否上滚，都恢复贴底跟随。

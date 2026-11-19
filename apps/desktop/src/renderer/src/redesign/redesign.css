@@ -1743,6 +1743,24 @@ body.cf-resizing-y * {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  /*
+   * 自己接管滚动位置，关掉浏览器的滚动锚定。
+   *
+   * 这段消息流本来就有一整套手写的跟随 / 补段落位（见 Conversation.tsx 的 stickRef、anchorRef），
+   * 而浏览器默认的 overflow-anchor: auto 会在内容变化时**再补一次** scrollTop。
+   * 两边各算一遍就打架：补段插进 10 轮更早内容时，我们按锚点摆回原位，锚定又按它自己的判断挪一次，
+   * 结果是「用户上滚想看历史，画面却跳到很久之前」（实测 scrollTop 单拍暴涨 2198px）。
+   * 自己接管位置时，锚定就是噪声。
+   *
+   * 同类实现（Open WebUI 的 issue 33282）实测：关掉后回跳次数 2 → 0，且能正常滚到顶。
+   */
+  overflow-anchor: none;
+  /*
+   * 显式写 auto：`scroll-behavior: smooth` 会拦截 `el.scrollTop = x` 这类直接赋值，
+   * 把本该瞬时的落位变成动画，跟随就会拖帧（use-stick-to-bottom PR #36 记录了这个坑）。
+   * 这里写死 auto，将来全局加 smooth 也污染不到消息流。
+   */
+  scroll-behavior: auto;
   /* 始终留出滚动条的位置：内容刚超出一屏（展开工作过程、回复写满一屏）时滚动条冒出来，居中的消息列会整体左移
      半个滚动条宽，收起又移回去，看起来像在抖 */
   scrollbar-gutter: stable;
