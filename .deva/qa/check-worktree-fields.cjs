@@ -34,6 +34,23 @@ const problems = []
 const ok = (n, d) => passes.push(d ? `${n} —— ${d}` : n)
 const bad = (n, d) => problems.push(d ? `${n} —— ${d}` : n)
 
+/**
+ * 从 `from`（指向 `{` 的位置）起按花括号配平，返回含外层花括号的整段。
+ * 配不平（到文件尾还没闭合）返回 null —— 那说明源码本身是坏的，不该当成「找到了」。
+ */
+function sliceBraced(text, from) {
+  if (text[from] !== '{') return null
+  let depth = 0
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === '{') depth++
+    else if (text[i] === '}') {
+      depth--
+      if (depth === 0) return text.slice(from, i + 1)
+    }
+  }
+  return null
+}
+
 const read = (p) => {
   try {
     return fs.readFileSync(p, 'utf8')
@@ -51,27 +68,41 @@ const BLOCKERS = ['target-not-set', 'source-missing', 'source-branch-changed', '
 
 if (pane !== null && msg !== null) {
   // ── G1：合并按钮的 disabled 绑 mergeGate.mayMerge ──
-  // 找合并按钮那一段（`onClick={() => onNotWired('merge')}` 之前 400 字符内），检查 disabled 表达式。
-  const mergeIdx = pane.indexOf("onNotWired('merge')")
+  /*
+   * 锚点不能写死成某个占位字符串：`onNotWired('merge')` 只在按钮**还没接上**时存在，
+   * 真接上（`onClick={() => setMergeOpen(true)}`）之后它就没了——检查会从「按钮接得对不对」
+   * 退化成「按钮是不是还没接」，界面做完了反而报红。
+   *
+   * 改为按语义找：`disabled` 直接读 `mergeGate.mayMerge` 的那个按钮就是合并按钮。
+   * 这恰好也是 G1 要验的东西（可用性只能由主进程的 mergeGate 决定），
+   * 所以找不到它本身就是失败，不需要另设锚点。
+   */
+  const mergeBtn = /disabled=\{([^}]*mergeGate\s*\.\s*mayMerge[^}]*)\}/.exec(pane)
+  const mergeIdx = mergeBtn ? mergeBtn.index : -1
   if (mergeIdx === -1) {
-    bad('G1 找得到合并按钮', "没有 onNotWired('merge')")
+    bad(
+      'G1 找得到合并按钮',
+      '没有 disabled 读 mergeGate.mayMerge 的按钮（合并按钮未接，或可用性改成界面自己算）'
+    )
   } else {
-    const seg = pane.slice(Math.max(0, mergeIdx - 600), mergeIdx)
-    const dis = seg.match(/disabled=\{([^}]*)\}/)
-    if (!dis) {
-      bad('G1 合并按钮的 disabled 绑 mergeGate', '没找到 disabled 属性（按钮永远可点）')
-    } else if (/mergeGate\s*\.\s*mayMerge/.test(dis[1]) && /!\s*view\s*\.\s*mergeGate\s*\.\s*mayMerge/.test(dis[1])) {
-      ok('G1 合并按钮的 disabled 绑 mergeGate', dis[1].trim())
+    const seg = pane.slice(Math.max(0, mergeIdx - 600), mergeIdx + 900)
+    const expr = mergeBtn[1].trim()
+    if (/mergeGate\s*\.\s*mayMerge/.test(expr) && /!\s*view\s*\.\s*mergeGate\s*\.\s*mayMerge/.test(expr)) {
+      ok('G1 合并按钮的 disabled 绑 mergeGate', expr)
     } else {
-      bad('G1 合并按钮的 disabled 绑 mergeGate', `实际是 ${dis[1].trim()}`)
+      bad('G1 合并按钮的 disabled 绑 mergeGate', `实际是 ${expr}`)
     }
 
     // ── G2：title 从 blocker 取文案 ──
-    const title = seg.match(/title=\{([\s\S]{0,300}?)\}\n/)
-    if (!title) bad('G2 合并按钮的 title 取 blocker 文案', '没找到 title')
-    else if (/mergeGate\s*\.\s*blocker/.test(seg) && /BLOCKER_KEY\[/.test(seg)) {
-      ok('G2 合并按钮的 title 取 blocker 文案', seg.includes('BLOCKER_KEY[') ? 'BLOCKER_KEY[...]' : '')
-    } else bad('G2 合并按钮的 title 取 blocker 文案', '没有引用 mergeGate.blocker / BLOCKER_KEY')
+    /*
+     * 不写死「`}` 后紧跟换行」：title 表达式跨多行、后面还跟着别的属性时那种形状就匹配不上，
+     * 会报「没找到 title」——而 title 其实好好地在。改为从 `title={` 起按花括号配平取到闭合处。
+     */
+    const titleStart = seg.indexOf('title={')
+    const titleExpr = titleStart === -1 ? null : sliceBraced(seg, titleStart + 'title='.length)    if (titleExpr === null) bad('G2 合并按钮的 title 取 blocker 文案', '没找到 title')
+    else if (/mergeGate\s*\.\s*blocker/.test(titleExpr) && /BLOCKER_KEY\[/.test(titleExpr)) {
+      ok('G2 合并按钮的 title 取 blocker 文案', 'mergeGate.blocker → BLOCKER_KEY[...]')
+    } else bad('G2 合并按钮的 title 取 blocker 文案', `实际是 ${titleExpr.slice(0, 120)}`)
   }
 
   // ── G6：不按 state 自己推算合并可用性（A48 的另一半）──
