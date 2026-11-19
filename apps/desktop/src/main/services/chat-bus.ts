@@ -105,6 +105,17 @@ export type WorktreeProgress =
       /** 已用毫秒。 */
       elapsedMs: number
     }
+  | {
+      /** 合并已开始（检查通过、正在执行 merge）。 */
+      phase: 'merging'
+      /** 哪个工作区被合并（不是 target 目录：进度按用户点的那个归属）。 */
+      path: string
+    }
+  | {
+      /** 收尾。**必须发**：否则界面进度条永远差一截（与导入的 `done` 同一理由）。 */
+      phase: 'done'
+      path: string
+    }
 
 /**
  * 发一条 worktree 进度。用于「等锁超过 5 秒」这类场景（spec §5.1 第 7 条 / B6）：

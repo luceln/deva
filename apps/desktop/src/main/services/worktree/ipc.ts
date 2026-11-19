@@ -4,20 +4,23 @@ import { listWorktrees } from './list'
 import { retryInstall } from './deps'
 import { briefForFocusRoot } from './brief'
 import { removeWorktree } from './remove'
+import { mergeWorktree, setMergeTarget } from './merge'
 import { onWorktreeChanged, onWorktreeProgress, onWorktreeSize } from '../chat-bus'
 import type {
   WorktreeCreateReq,
+  WorktreeMergeReq,
   WorktreePrecheckReq,
-  WorktreeRemoveReq
+  WorktreeRemoveReq,
+  WorktreeSetTargetReq
 } from '../../../shared/worktree-protocol'
 
 /**
  * worktree 的 IPC。
  *
  * 注册的通道：`precheck`（无副作用，边输边校验）、`create`、`list`、`install-deps`、`brief`、
- * `remove`，外加两条**主进程 → 渲染层**的推送：`worktree:changed`（列表该重取了）与
- * `worktree:progress`（等锁 / 装依赖的进度）。合并 / 重建仍留给后续步骤——**先不注册空壳**，
- * 免得渲染层对着不存在的实现写代码。
+ * `remove`、`merge`、`merge-dryrun`、`set-target`，外加两条**主进程 → 渲染层**的推送：
+ * `worktree:changed`（列表该重取了）与 `worktree:progress`（等锁 / 装依赖 / 合并的进度）。
+ * 重建仍留给后续步骤——**先不注册空壳**，免得渲染层对着不存在的实现写代码。
  *
  * 为什么 `remove` 排在 merge 之前：`deps.ts` 会真装 `node_modules`（几百 MB），没有删除能力时
  * 谁建的都删不掉，是「自动制造删不掉的大目录」。
@@ -47,6 +50,27 @@ export function registerWorktreeIpc(getWin: () => BrowserWindow | null): void {
    * 返回值里必须看 `warnings`：删一半（比如分支被别处检出而保留）时 `ok` 仍可能是 true。
    */
   ipcMain.handle('worktree:remove', (_e, req: WorktreeRemoveReq) => removeWorktree(req))
+  /*
+   * 合并（spec §4 / §7.1）。加锁 `[repoRoot, sourcePath]`——真合并要写 `.git/` 共享区与 target 检出。
+   * 检查阶段**重新跑一遍**、不复用 dryrun 的结果（§7.5）：两次之间用户可能清了改动、agent 也可能又提交了。
+   */
+  ipcMain.handle('worktree:merge', (_e, req: WorktreeMergeReq) =>
+    mergeWorktree(req.path, { stashFirst: req.stashFirst === true })
+  )
+  /*
+   * 预检：只跑 C-1~C6、不执行 merge、**不加锁**（只读，spec §7.1）。
+   * 界面用它画四个圆点；`mergeAttempted` 恒 false。
+   */
+  ipcMain.handle('worktree:merge-dryrun', (_e, req: WorktreeMergeReq) =>
+    mergeWorktree(req.path, { dryRun: true })
+  )
+  /*
+   * 写回合并目标（C-1 的出口）。创建时主目录 detached → `targetBranch` 为 null，
+   * 用户在合并面板选一个本地分支后调这里，再重新走合并。**不得由主进程自动挑一个**。
+   */
+  ipcMain.handle('worktree:set-target', (_e, req: WorktreeSetTargetReq) =>
+    setMergeTarget(req.path, req.targetBranch)
+  )
 
   /*
    * 把总线上的两条 worktree 事件转给渲染层。

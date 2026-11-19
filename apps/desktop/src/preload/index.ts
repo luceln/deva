@@ -52,10 +52,14 @@ import type {
   WorktreePrecheckOk,
   WorktreePrecheckReq,
   WorktreeProgress,
+  WorktreeMergeReq,
   WorktreeRemoveReq,
   WorktreeRemoveResult,
+  WorktreeSetTargetReq,
+  WorktreeSetTargetResult,
   WorktreeSizeUpdate,
-  WorktreeSnapshot
+  WorktreeSnapshot,
+  MergeResult
 } from '../shared/worktree-protocol'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
@@ -1083,6 +1087,35 @@ const api = {
      */
     remove: (req: WorktreeRemoveReq): Promise<WorktreeRemoveResult> =>
       ipcRenderer.invoke('worktree:remove', req),
+    /**
+     * 合并（spec §4）。检查阶段**重新跑一遍**，不复用 `mergeDryRun` 的结论——
+     * 两次之间用户可能清了改动、agent 也可能又提交了，复用旧结论等于跳过检查。
+     *
+     * `stashFirst` 是**用户在 C5 提示上显式选的**「先存起来再合并」：
+     * 不传就绝不 stash（自动 stash 是明确禁止项）。走过时会带 `stash`（含 pop 是否冲突、
+     * 哪些文件原本 staged 现在变回 unstaged）。
+     *
+     * 返回里 `ok:true` 但 `upToDate:true` 表示目标分支已包含全部提交（没有合并提交，别显示 SHA）。
+     * `ok:false` 时 `message` 是 git 原文（**唯一不本地化**的字符串），`checks` 恒 4 项。
+     */
+    merge: (req: WorktreeMergeReq): Promise<MergeResult> =>
+      ipcRenderer.invoke('worktree:merge', req),
+    /**
+     * 合并预检：只跑 C-1~C6，**不执行 merge、不加锁**（只读）。
+     *
+     * 用户点开合并面板时用它拿四项结果画四个圆点。`mergeAttempted` 恒 false；
+     * 成功分支的 `upToDate` 已经判好，别自己从 `sourceSha` 推。
+     */
+    mergeDryRun: (req: WorktreeMergeReq): Promise<MergeResult> =>
+      ipcRenderer.invoke('worktree:merge-dryrun', req),
+    /**
+     * 写回合并目标分支（C-1 的出口）：创建时主目录 detached → `targetBranch` 为 null，
+     * 合并面板只出选择器。用户选一个**本地**分支后调这里，再重新走合并。
+     *
+     * 远端分支不能作目标：它没被检出，无法作为 merge 的 cwd。
+     */
+    setTarget: (req: WorktreeSetTargetReq): Promise<WorktreeSetTargetResult> =>
+      ipcRenderer.invoke('worktree:set-target', req),
     /**
      * 安装依赖（「重试安装」/「重新安装」/「安装依赖」三个入口共用）。
      *

@@ -220,6 +220,10 @@ export interface WorktreeSizeUpdate {
  *
  * - `waiting-lock`：等 Git 锁超过 5 秒（spec §5.1 第 7 条 / B6）。
  * - `install-deps`：依赖安装进行中（spec §3.6 / B4）。
+ * - `merging`：合并已开始（检查阶段通过、正在执行 merge）。
+ *
+ * 必须照抄 `importer-ipc.ts` 的 `throttledSend`：100ms 节流 + 换 `phase` 立即发 + 收尾
+ * `phase === 'done'` 必发 + `timer.unref()`。不节流会淹没渲染层，丢最后一次会让进度条永远差一截。
  */
 export type WorktreeProgress =
   | {
@@ -231,6 +235,15 @@ export type WorktreeProgress =
       path: string
       step: string
       elapsedMs: number
+    }
+  | {
+      phase: 'merging'
+      /** 工作区路径（不是 targetPath：进度按用户点的那个工作区归属）。 */
+      path: string
+    }
+  | {
+      phase: 'done'
+      path: string
     }
 
 /**
@@ -266,3 +279,162 @@ export interface WorktreeRemoveResult {
   branchRemoved: boolean
   warnings: string[]
 }
+
+/* ─────────────────────────── 合并（spec §4 / §7.2） ─────────────────────────── */
+
+/** 四项检查的 id。顺序固定为 `C1, C2, C4, C5`（与界面四个圆点一一对应）。 */
+export type MergeCheckId = 'C1' | 'C2' | 'C4' | 'C5'
+
+/**
+ * 单项检查（spec §7.2）。
+ *
+ * `status` 的颜色语义：`ok`=绿、`warn`=黄、`bad`=红、`skipped`=灰。
+ *
+ * ⚠️ `warn` 是本次新增：`C1`（source 有未提交改动）用它——**不阻断合并，但必须在界面上可见**。
+ * 早先规格把 C1 写成硬拦，等于对用户说「你必须先提交」，在长期带改动开发的仓库里这一步会让用户
+ * 绕过工具直奔终端（那就更没保护了）。定稿是「明确告知」而不是「静默放行」。
+ */
+export interface MergeCheck {
+  id: MergeCheckId
+  status: 'ok' | 'bad' | 'warn' | 'skipped'
+  /**
+   * 稳定键，渲染层据此取 i18n。取值：
+   * `'dirty'` | `'branch-changed'` | `'busy'` | `'source-missing'` | `'not-checked-out'`
+   * | `'overlap'` | `'unknown'`。
+   *
+   * `C3`/`C6`（进行中操作）**不占独立圆点**，并入 `C1`/`C2`（source 侧）或 `C5`（target 侧）的
+   * `'busy'`，且 `busy` **优先于** `dirty` 展示——「上次合并没收尾」比「有 3 个改动」更根本。
+   */
+  reason?: string
+  /**
+   * 判据用到的数字 / 名称。键名固定：
+   * `dirtyCount` | `dirtyPaths` | `overlapPaths` | `actualBranch` | `busyOp` | `targetPath`
+   * | `primaryBranch`。
+   */
+  detail?: Record<string, string | number | string[]>
+}
+
+/**
+ * 合并的入参。
+ *
+ * ⚠️ **`stashFirst` 是界面要接的参数**：C5 报 `target-overlap` 时，界面的二选一里
+ * 「先存起来再合并」就传 `{ path, stashFirst: true }` 重调 `worktree:merge`。
+ * 它是**用户显式选择**的载体——不传就绝不 stash（自动 stash 是明确禁止项）。
+ */
+export interface MergeOptions {
+  /**
+   * 用户在 C5 的提示上选了「先存起来再合并」：走显式 stash 三步
+   * （`stash push --include-untracked` → `merge` → `stash pop`，spec §4.9.5）。
+   *
+   * 它改变的是 C5 的判定：交集非空时 C5 仍**通过**（用户的显式选择化解了它），
+   * 而不是拦下来。
+   */
+  stashFirst?: boolean
+}
+
+/** 合并请求（`worktree:merge` / `worktree:merge-dryrun`）。 */
+export interface WorktreeMergeReq extends MergeOptions {
+  /** worktree 的绝对路径（`WorktreeListItem.path`）。 */
+  path: string
+}
+
+/**
+ * 显式 stash 流程的结果（只有 `stashFirst` 走过才有）。
+ *
+ * 这三项是**必须告知用户**的：`popConflict` 为真时工作区是冲突态、stash 条目**保留**（不会自动
+ * drop）；`unstagedLost` 是因为 `stash pop` 默认不带 `--index`，原本 `git add` 过的文件会变回
+ * 未暂存 —— 界面要把清单列出来，让用户自己决定是否重新 `git add`。
+ */
+export interface MergeStashInfo {
+  /** stash 提交的 SHA（`refs/stash`）。用户想手工恢复时要用。 */
+  sha: string | null
+  /** pop 时有冲突：改动**都在文件里**，同时 stash 条目也还在（可再次 pop）。 */
+  popConflict: boolean
+  /** pop 后从「已暂存」变成「未暂存」的文件清单。 */
+  unstagedLost: string[]
+}
+
+/**
+ * 合并结果（spec §7.2）。
+ *
+ * ⚠️ 成功分支多了 `checks`：执行了 merge 时也要把检查结果给界面，否则成功面板无法显示
+ * 「当时有 2 个未提交改动没被合并」这类告知。
+ */
+export type MergeResult =
+  | {
+      ok: true
+      /** 目标分支已包含该工作区的全部提交：**没有**产生合并提交，界面不显示 SHA 与原文。 */
+      upToDate: boolean
+      targetPath: string
+      targetBranch: string
+      sourceBranch: string
+      /** 冻结的 SHA（执行 merge 用的就是它）。 */
+      sourceSha: string
+      mergeCommit: string | null
+      /** git merge 的 stdout+stderr 原样（`Merge made by the 'ort' strategy.` 与文件统计）；upToDate 时为空串。 */
+      gitOutput: string
+      /**
+       * 窗口的另一半：合并成功后 source 又有了新提交。
+       * 界面追加「期间该工作区又有 N 个新提交尚未合并，可再次合并」。**不自动重试**。
+       */
+      behindNote?: { pendingSha: string; pendingCount: number }
+      /** 本次的检查结论（含 C1 的 dirtyCount）。 */
+      checks?: MergeCheck[]
+      /** 走过 stash 流程时给出。 */
+      stash?: MergeStashInfo
+    }
+  | {
+      ok: false
+      /** 合并是否执行过。false = 卡在检查阶段（含 target-not-set），target **未被触碰**。 */
+      mergeAttempted: boolean
+      /**
+       * **零或四项**：`target-not-set` 时为 `[]`，进入检查阶段后恒为 4 项。
+       * 不得短路、不得按 status 过滤（界面按数组顺序画四个圆点）。
+       */
+      checks: MergeCheck[]
+      reason:
+        | 'target-not-set'
+        | 'source-missing'
+        | 'source-branch-changed'
+        | 'source-busy'
+        | 'target-not-checked-out'
+        | 'target-overlap'
+        | 'target-busy'
+        | 'conflict'
+        | 'merge-failed'
+      /**
+       * `conflict` / `merge-failed` 时是 git 的 `${stdout}\n${stderr}` **原样**
+       * （本需求里**唯一不能本地化**的字符串：用户要的是 `CONFLICT (content): Merge conflict in x.ts`）。
+       * 检查阶段失败时为**空串** —— 文案由渲染层按 `checks[].reason` + `detail` 从 i18n 取。
+       */
+      message: string
+      /** `conflict` / `merge-failed` 时与 `message` 同值，便于界面统一展开。 */
+      gitOutput?: string
+      targetBranch: string | null
+      sourceBranch: string
+      /** C4 之后才有；界面用它做「中止合并 / 打开终端 / 打开目录」的目标。 */
+      targetPath?: string
+      /** 已冻结时给出，供「复制 git 命令」与手工执行。 */
+      sourceSha?: string
+      /** 走过 stash 流程时给出（`mergeAttempted` 为真才有意义）。 */
+      stash?: MergeStashInfo
+      /**
+       * 兜底解析出的「被拦下的文件」（spec §4.9.7 的稳健提取）。
+       *
+       * ⚠️ 可能为空：git 的提示被 `advice.*` 配置改掉时提取不出路径。**提取为空不等于没有路径**
+       * ——界面此时必须退回「原始 gitOutput + 三个出口」，不能显示「没有被拦的文件」。
+       */
+      blockedPaths?: string[]
+    }
+
+/** `worktree:set-target` 的入参（spec §7.1）：把 `record.targetBranch` 写回。 */
+export interface WorktreeSetTargetReq {
+  path: string
+  /** 本地分支名（远端分支没被检出，不能作为 merge 的 cwd）。 */
+  targetBranch: string
+}
+
+/** `worktree:set-target` 的结果。 */
+export type WorktreeSetTargetResult =
+  | { ok: true; targetBranch: string }
+  | { ok: false; reason: 'not-found' | 'bad-branch' | 'write-failed'; message: string }

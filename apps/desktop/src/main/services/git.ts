@@ -479,7 +479,13 @@ async function diffUntracked(absPath: string): Promise<GitDiffLine[]> {
 
 // ── 错误归类 ─────────────────────────────────────────────────────────────────
 
-function classifyRemoteError(stderr: string): GitFailReason {
+/**
+ * 把 git 的错误输出分类。
+ *
+ * 导出是因为 worktree 合并（`worktree/merge.ts`）要用同一套判定 —— spec §4.6 明确要求
+ * 「直接复用该函数，不另写一套正则（两套判定必然漂移）」。
+ */
+export function classifyRemoteError(stderr: string): GitFailReason {
   const s = stderr
   if (/Authentication failed|could not read Username|Permission denied|Invalid username or password|terminal prompts disabled|403 Forbidden|401 Unauthorized|access denied/i.test(s))
     return 'auth'

@@ -3925,6 +3925,66 @@ async function scenarioWorktree(): Promise<void> {
       JSON.stringify(forceRes.warnings)
     )
   }
+
+  /*
+   * ══ P2 合并的契约断言（A37 / A42 / A94 / A97）══
+   *
+   * 完整的合并场景在 `scenarioWorktreeMerge`（`wtmerge`）里，这里只钉住四条与**接口形状**有关的
+   * 契约，因为它们是界面直接依赖的：
+   *  - A37：`--no-ff` 造出两条父提交的合并提交（成功面板要显示它的 SHA）
+   *  - A42：失败时四个出口所需的目标（`targetPath`）必须给出，且 `checks` 恒 4 项
+   *  - A94：显式 stash 流程的入参是 `stashFirst`（用户显式选择才 stash）
+   *  - A97：stderr 稳健解析不写死缩进（`\t` 与两空格都要认）
+   */
+  {
+    const MG = await import('../../apps/desktop/src/main/services/worktree/merge')
+    // A37：合并提交有两条父提交 —— 由 `--no-ff` 保证；这里核源码里确实是这个参数
+    const mergeSrc = fs.readFileSync(
+      path.join(process.cwd(), 'apps/desktop/src/main/services/worktree/merge.ts'),
+      'utf8'
+    )
+    check('A37：merge 用了 --no-ff（即使能快进也造合并提交）', /'--no-ff'/.test(mergeSrc), '看 merge.ts')
+    check(
+      'A37：成功返回带 mergeCommit 与 gitOutput（界面要能核验）',
+      /mergeCommit/.test(mergeSrc) && /gitOutput/.test(mergeSrc),
+      ''
+    )
+    // A42：失败出口需要 targetPath，且 checks 恒 4 项
+    check(
+      'A42：失败结果带 targetPath（「中止合并/打开终端/打开目录」的目标）',
+      /targetPath\?: string/.test(
+        fs.readFileSync(path.join(process.cwd(), 'apps/desktop/src/shared/worktree-protocol.ts'), 'utf8')
+      ),
+      '看 worktree-protocol.ts'
+    )
+    check(
+      'A42：检查阶段不短路（checks 恒 4 项）',
+      /checks: MergeCheck\[\]/.test(
+        fs.readFileSync(path.join(process.cwd(), 'apps/desktop/src/shared/worktree-protocol.ts'), 'utf8')
+      ),
+      ''
+    )
+    // A94：stash 流程由 `stashFirst` 显式触发
+    check('A94：stash 流程由 stashFirst 显式触发（不是自动 stash）', /stashFirst/.test(mergeSrc), '')
+    check('A94：stash 带 --include-untracked（untracked 也要保住）', /--include-untracked/.test(mergeSrc), '')
+    check('A94：pop 不带 --index（带它时冲突会什么都不恢复）', !/'--index'/.test(mergeSrc), '')
+    // A97：稳健解析认两种缩进
+    eq(
+      'A97：\\t 缩进能提取',
+      MG.parseBlockedPaths(
+        'error: Your local changes to the following files would be overwritten by merge:\n\tf.txt\nAborting'
+      ),
+      ['f.txt']
+    )
+    eq(
+      'A97：两空格缩进也能提取（不写死 \\t）',
+      MG.parseBlockedPaths(
+        'error: Your local changes to the following files would be overwritten by merge:\n  g.txt\nAborting'
+      ),
+      ['g.txt']
+    )
+    eq('A97：提不出路径时返回空（调用方退回原始 stderr，绝不放行）', MG.parseBlockedPaths('error: x'), [])
+  }
 }
 
 /**
@@ -5110,6 +5170,489 @@ async function scenarioMemCondense(): Promise<void> {
   }
 }
 
+/**
+ * 合并（P2 / spec §4）。用**真实 git 仓库**跑，不 mock `runGitRaw`：
+ * 判定依赖 `merge-base` / `diff --name-only -z` / `is-ancestor` 的真实语义，
+ * mock 掉就只能验「我怎么处理返回值」，而漏掉的恰恰是「git 到底怎么回」。
+ *
+ * 覆盖规格点名的全部要求，重点在四处最容易写错的：
+ *  ① 四项全列（构造 C2 bad + C5 bad 同时成立 → `checks.length === 4`）
+ *  ② 三点 diff 的四格（ff / non-ff 双改 / 目标独改 / 混合）
+ *  ③ stash 三步的成功与 pop 冲突两态
+ *  ④ stderr 解析的两种缩进
+ */
+async function scenarioWorktreeMerge(): Promise<void> {
+  /*
+   * `mergeWorktree` 内部走 `runGitRaw`，它继承 `process.env`。`git merge --no-ff` 要造合并提交，
+   * 没有身份就会 `Committer identity unknown` → 我们这边看到的是 `merge-failed`，
+   * 而实际是**测试环境缺身份**（不是产品 bug）。这里补上，和 makeRepo 里那套一致。
+   */
+  process.env.GIT_AUTHOR_NAME ??= 'q'
+  process.env.GIT_AUTHOR_EMAIL ??= 'q@q'
+  process.env.GIT_COMMITTER_NAME ??= 'q'
+  process.env.GIT_COMMITTER_EMAIL ??= 'q@q'
+  const M = await import('../../apps/desktop/src/main/services/worktree/merge')
+  const CR = await import('../../apps/desktop/src/main/services/worktree/create')
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+
+  /** 在 cwd 跑 git（写文件、提交、造脏），失败直接抛出——测试里不该静默。 */
+  const git = (cwd: string, ...args: string[]): { code: number; out: string } => {
+    const r = require('node:child_process').spawnSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'q',
+        GIT_AUTHOR_EMAIL: 'q@q',
+        GIT_COMMITTER_NAME: 'q',
+        GIT_COMMITTER_EMAIL: 'q@q'
+      }
+    })
+    return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` }
+  }
+  const write = (dir: string, name: string, body: string): void => {
+    fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true })
+    fs.writeFileSync(path.join(dir, name), body)
+  }
+  const commit = (dir: string, msg: string): void => {
+    git(dir, 'add', '-A')
+    const r = git(dir, 'commit', '-qm', msg)
+    if (r.code !== 0) throw new Error(`commit 失败：${r.out}`)
+  }
+
+  // ── 纯函数：parseStatusPaths ──
+  {
+    // 常规：` M path` / `?? path`
+    eq(
+      '解析：普通改动与 untracked 都算脏',
+      M.parseStatusPaths(' M a.txt\0?? b.txt\0'),
+      ['a.txt', 'b.txt']
+    )
+    /*
+     * rename：`R  new\0old\0` —— `-z` 下 rename 条目后面**额外**跟一段旧路径。
+     * 不跳过它就会把旧路径当成一个独立条目（凭空多一个脏文件）。
+     */
+    eq(
+      '解析：rename 取新路径、且不把旧路径当独立条目',
+      M.parseStatusPaths('R  new.txt\0old.txt\0 M other.txt\0'),
+      ['new.txt', 'other.txt']
+    )
+    eq('解析：空输出 → 空数组', M.parseStatusPaths(''), [])
+    eq('解析：暂存态（M 在第一位）也算脏', M.parseStatusPaths('M  staged.txt\0'), ['staged.txt'])
+  }
+
+  // ── 纯函数：parseBlockedPaths（两种缩进 + advice 空行）──
+  {
+    // unstaged：`\t` 缩进
+    const tabIndent = [
+      'error: Your local changes to the following files would be overwritten by merge:',
+      '\tf.txt',
+      'Please commit your changes or stash them before you merge.',
+      'Aborting'
+    ].join('\n')
+    eq('解析：\\t 缩进的被拦路径', M.parseBlockedPaths(tabIndent), ['f.txt'])
+
+    // staged：两个空格缩进（F6 实测）
+    const spaceIndent = [
+      'error: Your local changes to the following files would be overwritten by merge:',
+      '  other.txt',
+      '  third.txt',
+      'Please commit your changes or stash them before you merge.'
+    ].join('\n')
+    eq('解析：两空格缩进的被拦路径', M.parseBlockedPaths(spaceIndent), ['other.txt', 'third.txt'])
+
+    // untracked 另一条报错
+    const untracked = [
+      'error: The following untracked working tree files would be overwritten by merge:',
+      '\tnew.txt',
+      'Please move or remove them before you merge.',
+      'Aborting'
+    ].join('\n')
+    eq('解析：untracked 版本同样能提取', M.parseBlockedPaths(untracked), ['new.txt'])
+
+    /*
+     * advice 配置让提示行变空行：提取结果可能为空。
+     * **空不等于「没有路径」** —— 调用方必须退回「原始 stderr + 出口」，这条断言守住这个前提。
+     */
+    eq('解析：提不出路径时返回空数组（调用方据此退回原始输出）', M.parseBlockedPaths('error: something else'), [])
+  }
+
+  // ── 真实仓库：A 组（ff / upToDate / behindNote）──
+  {
+    const repo = makeRepo(path.join(DST, 'mrepo-a'), { 'a.txt': 'a\n' })
+    const wt = path.join(DST, 'mwts', 'a')
+    const created = await CR.createWorktree({
+      repoRoot: repo,
+      branch: 'wt/merge-a',
+      path: wt,
+      skipDeps: true
+    })
+    if (!created.ok) {
+      fail('合并：前置创建失败', JSON.stringify(created))
+      return
+    }
+    const rec = S.getRecord(wt)!
+    eq('前置：targetBranch = 主检出分支', rec.targetBranch, 'my/dev')
+
+    // ① upToDate：worktree 没有新提交 → 目标已包含它
+    const up = await M.mergeWorktree(wt)
+    check('upToDate：ok=true', up.ok === true, JSON.stringify(up).slice(0, 300))
+    if (up.ok) {
+      eq('upToDate：upToDate 为真', up.upToDate, true)
+      eq('upToDate：没有合并提交（界面不显示 SHA）', up.mergeCommit, null)
+      eq('upToDate：gitOutput 为空串', up.gitOutput, '')
+      /*
+       * git 的 `worktree list` 输出正斜杠，测试里 `path.join` 造的是反斜杠。
+       * 比**归一化键**而不是原串——这也是产品里判「是不是同一个目录」的正确方式。
+       */
+      {
+        const N = await import('../../apps/desktop/src/main/services/worktree/paths')
+        eq(
+          'upToDate：反查到 targetPath = 主检出',
+          N.normalizeWorktreePath(up.targetPath).compareKey,
+          N.normalizeWorktreePath(repo).compareKey
+        )
+      }
+    }
+
+    // ② ff 场景：worktree 有新提交，目标没动 → 仍然 `--no-ff` 造合并提交
+    write(wt, 'f.txt', 'feat\n')
+    commit(wt, 'feat: 加 f.txt')
+    const merged = await M.mergeWorktree(wt)
+    check('ff：ok=true', merged.ok === true, JSON.stringify(merged).slice(0, 300))
+    if (merged.ok) {
+      eq('ff：upToDate 为假（这次真合了）', merged.upToDate, false)
+      check('ff：产生了合并提交', typeof merged.mergeCommit === 'string' && merged.mergeCommit.length === 40, String(merged.mergeCommit))
+      // --no-ff 是硬要求：即使能快进也要有两条父提交（A37 验的就是这个）
+      eq(
+        'ff：--no-ff 造出了两条父提交的合并提交',
+        git(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').out.trim().split(/\s+/).length,
+        3
+      )
+      check('ff：gitOutput 带 git 原文', /Merge made by|ort/i.test(merged.gitOutput), merged.gitOutput.slice(0, 120))
+      /*
+       * 窗口另一半：合并成功后 source 又有新提交 → behindNote。
+       * 这里在合并前就把新提交造好，模拟「检查时是 X、合并后 source 已经到 Y」。
+       */
+    }
+
+    // ③ behindNote：先造新提交，再合并一次（这次目标已含旧的，source 又多一个）
+    write(wt, 'g.txt', 'more\n')
+    commit(wt, 'feat: 加 g.txt')
+    // 手工把目标推进到「已包含 g.txt 之前那个提交」，模拟窗口
+    const before = git(repo, 'rev-parse', 'HEAD').out.trim()
+    const second = await M.mergeWorktree(wt)
+    if (second.ok) {
+      // 正常情况下这里会真合并 g.txt；behindNote 只在「合并期间 source 又动了」时出现，
+      // 单线程测试里造不出来，所以只断言它**不误报**（没有新提交就不该有 behindNote）
+      eq('behindNote：没有期间新提交时不给 behindNote', second.behindNote, undefined)
+      check('behindNote：目标 HEAD 确实前进了', git(repo, 'rev-parse', 'HEAD').out.trim() !== before, '')
+    }
+  }
+
+  // ── 真实仓库：B 组（C2 bad + C5 bad 同时成立 → checks 仍是 4 项）──
+  {
+    const repo = makeRepo(path.join(DST, 'mrepo-b'), { 'shared.txt': 'base\n', 'both.txt': 'base\n' })
+    const wt = path.join(DST, 'mwts', 'b')
+    const created = await CR.createWorktree({
+      repoRoot: repo,
+      branch: 'wt/merge-b',
+      path: wt,
+      skipDeps: true
+    })
+    if (!created.ok) {
+      fail('合并 B：前置创建失败', JSON.stringify(created))
+      return
+    }
+    // source 侧：改 both.txt 并提交（让 C5 有交集）
+    write(wt, 'both.txt', 'from-worktree\n')
+    commit(wt, 'feat: 改 both.txt')
+    // target 侧（主检出）：脏了 both.txt（撞路径）
+    write(repo, 'both.txt', 'dirty-in-target\n')
+    /*
+     * source 侧再留一个**未提交**改动：上面那个 commit 让 source 干净了，
+     * 不补这一笔就验不到「C1 恒通过但脏时 warn」（会得到 ok）。
+     */
+    write(wt, 'untracked-in-source.txt', 'wip\n')
+    // source 再切到别的分支，让 C2 挂
+    git(wt, 'checkout', '-q', '-b', 'other/branch')
+
+    const r = await M.mergeWorktree(wt)
+    check('四项全列：失败时 ok=false', r.ok === false, JSON.stringify(r).slice(0, 200))
+    if (!r.ok) {
+      /*
+       * **这是本组最重要的一条**：C2 bad（分支变了）与 C5 bad（路径撞了）同时成立时，
+       * checks 仍必须是 4 项、顺序固定。短路的话这里只有 1~2 项，界面四个圆点只画得出一个，
+       * 用户清完一处再点又冒一处。
+       */
+      eq('四项全列：checks 长度恒为 4（不短路）', r.checks.length, 4)
+      eq(
+        '四项全列：顺序固定 C1, C2, C4, C5',
+        r.checks.map((c) => c.id),
+        ['C1', 'C2', 'C4', 'C5']
+      )
+      const c2 = r.checks.find((c) => c.id === 'C2')!
+      eq('四项全列：C2 是 bad（分支已变）', c2.status, 'bad')
+      eq('四项全列：C2 reason = branch-changed', c2.reason, 'branch-changed')
+      eq('四项全列：C2 detail 带 actualBranch', c2.detail?.actualBranch, 'other/branch')
+      const c5 = r.checks.find((c) => c.id === 'C5')!
+      eq('四项全列：C5 也是 bad（脏路径与合并路径撞了）', c5.status, 'bad')
+      eq('四项全列：C5 reason = overlap', c5.reason, 'overlap')
+      // 完整清单，不只第一个
+      eq('四项全列：C5 detail.overlapPaths 是完整清单', c5.detail?.overlapPaths, ['both.txt'])
+      eq('四项全列：主因取第一个 not-ok 的项（C2）', r.reason, 'source-branch-changed')
+      eq('四项全列：检查阶段失败 message 为空串（文案由渲染层拼）', r.message, '')
+      eq('四项全列：mergeAttempted=false（target 未被触碰）', r.mergeAttempted, false)
+      eq('四项全列：C1 恒通过（脏时 warn）', r.checks.find((c) => c.id === 'C1')!.status, 'warn')
+    }
+  }
+
+  // ── 真实仓库：C 组（三点 diff 的四格）──
+  {
+    /*
+     * 四格是 C5 判据的核心。逐格造一个独立仓库，避免互相污染。
+     * 预期（§4.9.3 实测表）：ff→列出、双改→只列 source 改的、目标独改→不列、混合→只列 source 改的。
+     */
+    const mkCase = async (name: string): Promise<{ repo: string; wt: string } | null> => {
+      const repo = makeRepo(path.join(DST, `mrepo-c-${name}`), {
+        'f.txt': 'base\n',
+        'masteronly.txt': 'base\n',
+        'both.txt': 'base\n',
+        'shared.txt': 'base\n'
+      })
+      const wt = path.join(DST, 'mwts', `c-${name}`)
+      const r = await CR.createWorktree({ repoRoot: repo, branch: `wt/c-${name}`, path: wt, skipDeps: true })
+      return r.ok ? { repo, wt } : null
+    }
+
+    // 格 1：ff（master 不动、wt 领先）
+    {
+      const c = await mkCase('ff')
+      if (c) {
+        write(c.wt, 'f.txt', 'feat\n')
+        commit(c.wt, 'feat: f')
+        // 主检出把 f.txt 弄脏：ff 场景下真实 merge 会拦它（F5 实测 exit 1）
+        write(c.repo, 'f.txt', 'dirty\n')
+        const frozen = git(c.wt, 'rev-parse', 'HEAD').out.trim()
+        const overlap = await M.overlapPathsOf(c.repo, 'my/dev', frozen)
+        eq('三点 diff 格1（ff）：列出 f.txt', overlap, ['f.txt'])
+      }
+    }
+    // 格 2：non-ff 双改（master 改 shared、wt 改 both）
+    {
+      const c = await mkCase('both')
+      if (c) {
+        write(c.wt, 'both.txt', 'from-wt\n')
+        commit(c.wt, 'feat: both')
+        write(c.repo, 'shared.txt', 'from-master\n')
+        commit(c.repo, 'feat: master shared')
+        // 两个都脏：三点 diff 只该把 both.txt 算进「合并要改的路径」
+        write(c.repo, 'shared.txt', 'dirty-shared\n')
+        write(c.repo, 'both.txt', 'dirty-both\n')
+        const frozen = git(c.wt, 'rev-parse', 'HEAD').out.trim()
+        const overlap = await M.overlapPathsOf(c.repo, 'my/dev', frozen)
+        eq('三点 diff 格2（双改）：只列 source 改的 both.txt', overlap, ['both.txt'])
+      }
+    }
+    // 格 3：目标独改（master 改 masteronly、wt 没碰）
+    {
+      const c = await mkCase('masteronly')
+      if (c) {
+        write(c.wt, 'f.txt', 'feat\n')
+        commit(c.wt, 'feat: f')
+        write(c.repo, 'masteronly.txt', 'from-master\n')
+        commit(c.repo, 'feat: master only')
+        // 两个都脏：masteronly.txt 是目标自己改的，不该被算进交集
+        write(c.repo, 'masteronly.txt', 'dirty-master-only\n')
+        write(c.repo, 'f.txt', 'dirty-f\n')
+        const frozen = git(c.wt, 'rev-parse', 'HEAD').out.trim()
+        const overlap = await M.overlapPathsOf(c.repo, 'my/dev', frozen)
+        /*
+         * **这条是「必须三点」的理由**：两点 diff 会把 masteronly.txt 也列进来（master 自己改过），
+         * 于是去拦一个 git 根本不会拦的合并。三点语义下它不该出现。
+         */
+        eq('三点 diff 格3（目标独改）：不列 masteronly.txt（两点 diff 会误报）', overlap, ['f.txt'])
+      }
+    }
+    // 格 4：混合（master 改 shared、wt 改 both，两者都脏）
+    {
+      const c = await mkCase('mixed')
+      if (c) {
+        write(c.wt, 'both.txt', 'from-wt\n')
+        commit(c.wt, 'feat: both')
+        write(c.repo, 'shared.txt', 'from-master\n')
+        commit(c.repo, 'feat: master shared')
+        // 两者都脏
+        write(c.repo, 'shared.txt', 'dirty-shared\n')
+        write(c.repo, 'both.txt', 'dirty-both\n')
+        const frozen = git(c.wt, 'rev-parse', 'HEAD').out.trim()
+        const overlap = await M.overlapPathsOf(c.repo, 'my/dev', frozen)
+        eq('三点 diff 格4（混合）：只拦 both.txt，不拦 shared.txt', overlap, ['both.txt'])
+      }
+    }
+  }
+
+  // ── 真实仓库：D2 组（pop 冲突：untracked 与合并新增撞路径）──
+  {
+    /*
+     * 造 pop 冲突：target 有一个 **untracked** 的 `u.txt`（会被 `--include-untracked` 一起 stash），
+     * 而 source 的提交里**新增**同名文件。merge 把 `u.txt` 写进工作区之后，pop 恢复那个 untracked
+     * 文件就会撞上已存在的同名文件 → `pop exit != 0`。
+     *
+     * 这一格验的是规格最看重的差别（§4.9.5）：pop 冲突时 stash 条目**保留**（不自动 drop），
+     * 而 `--autostash` 在这种情况下是 exit 0 + 用户看不出失败。
+     */
+    const repo = makeRepo(path.join(DST, 'mrepo-d2'), { 'base.txt': 'base\n' })
+    const wt = path.join(DST, 'mwts', 'd2')
+    const created = await CR.createWorktree({ repoRoot: repo, branch: 'wt/merge-d2', path: wt, skipDeps: true })
+    if (created.ok) {
+      write(wt, 'u.txt', 'from-source\n')
+      commit(wt, 'feat: 新增 u.txt')
+      // target 侧：同名的 untracked 文件（未提交）
+      write(repo, 'u.txt', 'untracked-in-target\n')
+      const r = await M.mergeWorktree(wt, { stashFirst: true })
+      info('pop 冲突结果', JSON.stringify(r).slice(0, 500))
+      check('pop 冲突：合并本身成功（ok=true）', r.ok === true, JSON.stringify(r).slice(0, 200))
+      if (r.ok) {
+        eq('pop 冲突：stash.popConflict 为真', r.stash?.popConflict, true)
+        check(
+          'pop 冲突：stash 条目**保留**（不自动 drop —— 与 --autostash 的关键差别）',
+          /deva-merge-wip/.test(git(repo, 'stash', 'list').out),
+          git(repo, 'stash', 'list').out
+        )
+      }
+    }
+  }
+
+  // ── 真实仓库：D 组（stash 三步：成功 / pop 冲突 / pop 后 unstaged 清单）──
+  {
+    const repo = makeRepo(path.join(DST, 'mrepo-d'), { 'conflict.txt': 'base\n' })
+    const wt = path.join(DST, 'mwts', 'd')
+    const created = await CR.createWorktree({ repoRoot: repo, branch: 'wt/merge-d', path: wt, skipDeps: true })
+    if (!created.ok) {
+      fail('合并 D：前置创建失败', JSON.stringify(created))
+      return
+    }
+    // source 改 conflict.txt 并提交（合并会改这个路径）
+    write(wt, 'conflict.txt', 'from-wt\n')
+    commit(wt, 'feat: conflict')
+    // target 脏同一个文件 → C5 有交集
+    write(repo, 'conflict.txt', 'dirty-in-target\n')
+
+    // 不带 stashFirst → C5 bad，且**绝不**自动 stash（明确禁止项）
+    const noStash = await M.mergeWorktree(wt)
+    check('stash：不传 stashFirst 时 C5 拦下', noStash.ok === false, JSON.stringify(noStash).slice(0, 200))
+    if (!noStash.ok) {
+      eq('stash：reason = target-overlap', noStash.reason, 'target-overlap')
+      eq('stash：mergeAttempted=false', noStash.mergeAttempted, false)
+      eq('stash：**没有**自动 stash（stash 列表仍空）', git(repo, 'stash', 'list').out.trim(), '')
+      eq(
+        'stash：target 的脏改动原样保留（绝不被自动清掉）',
+        fs.readFileSync(path.join(repo, 'conflict.txt'), 'utf8'),
+        'dirty-in-target\n'
+      )
+    }
+
+    // 带 stashFirst → C5 通过，走三步
+    const withStash = await M.mergeWorktree(wt, { stashFirst: true })
+    info('stash 结果', JSON.stringify(withStash).slice(0, 400))
+    check('stash：带 stashFirst 后合并尝试执行', withStash.mergeAttempted === true || withStash.ok === true, JSON.stringify(withStash).slice(0, 200))
+    if (!withStash.ok) {
+      // 合并本身可能冲突（两边都改了同一文件）→ 应落 conflict，且 stash 里改动安全
+      eq('stash：两边改同一文件 → reason = conflict', withStash.reason, 'conflict')
+      check('stash：conflict 时 message 是 git 原文（含 CONFLICT）', /CONFLICT/.test(withStash.message), withStash.message.slice(0, 200))
+      check('stash：给出了 stash 信息（改动可恢复）', withStash.stash !== null, JSON.stringify(withStash.stash))
+      if (withStash.stash) {
+        check('stash：stashSha 非空', typeof withStash.stash.sha === 'string' && withStash.stash.sha.length === 40, String(withStash.stash.sha))
+        /*
+         * pop 冲突时 git **保留** stash 条目（与 --autostash 的关键差别）。
+         * 我们不自动 drop —— 万一用户想重来。
+         */
+        check('stash：pop 冲突时 stash 条目仍在（不自动 drop）', /deva-merge-wip/.test(git(repo, 'stash', 'list').out), git(repo, 'stash', 'list').out)
+      }
+      // 收尾：这条改动确实在文件里（没丢）
+      check(
+        'stash：用户改动 100% 在文件里（含冲突标记）',
+        /dirty-in-target|<<<<<<</.test(fs.readFileSync(path.join(repo, 'conflict.txt'), 'utf8')),
+        fs.readFileSync(path.join(repo, 'conflict.txt'), 'utf8').slice(0, 200)
+      )
+    }
+  }
+
+  // ── 真实仓库：E 组（C-1 target-not-set / C0 source-missing / C4 not-checked-out）──
+  {
+    const repo = makeRepo(path.join(DST, 'mrepo-e'), { 'a.txt': 'a\n' })
+    const wt = path.join(DST, 'mwts', 'e')
+    const created = await CR.createWorktree({ repoRoot: repo, branch: 'wt/merge-e', path: wt, skipDeps: true })
+    if (!created.ok) {
+      fail('合并 E：前置创建失败', JSON.stringify(created))
+      return
+    }
+    // C-1：targetBranch 置 null
+    {
+      const rec = S.getRecord(wt)!
+      S.upsertRecord({ ...rec, targetBranch: null })
+      const r = await M.mergeWorktree(wt)
+      check('C-1：target-not-set 时 ok=false', r.ok === false, JSON.stringify(r).slice(0, 200))
+      if (!r.ok) {
+        eq('C-1：reason = target-not-set', r.reason, 'target-not-set')
+        eq('C-1：checks 为空（不做任何检查）', r.checks.length, 0)
+        eq('C-1：mergeAttempted=false（没执行 merge）', r.mergeAttempted, false)
+        eq('C-1：targetBranch 回 null', r.targetBranch, null)
+        eq('C-1：message 为空串（文案由渲染层拼）', r.message, '')
+        // **不得自动挑 main**：记录必须仍是 null
+        eq('C-1：没有自动挑一个目标分支', S.getRecord(wt)!.targetBranch, null)
+      }
+    }
+    // set-target 写回
+    {
+      const st = M.setMergeTarget(wt, 'my/dev')
+      eq('set-target：写回成功', st.ok, true)
+      eq('set-target：记录里已是 my/dev', S.getRecord(wt)!.targetBranch, 'my/dev')
+      eq('set-target：坏分支名被拒', M.setMergeTarget(wt, 'has space').ok, false)
+      eq('set-target：不存在的记录被拒', M.setMergeTarget(path.join(DST, 'nope'), 'my/dev').ok, false)
+    }
+    // C0：source 目录没了 → C1/C2 skipped，C4/C5 照常
+    {
+      const rec = S.getRecord(wt)!
+      fs.rmSync(wt, { recursive: true, force: true })
+      const r = await M.mergeWorktree(wt)
+      check('C0：source 缺失时 ok=false', r.ok === false, JSON.stringify(r).slice(0, 200))
+      if (!r.ok) {
+        eq('C0：checks 仍是 4 项（C4/C5 照常算）', r.checks.length, 4)
+        eq('C0：C1 skipped + source-missing', r.checks.find((c) => c.id === 'C1')!.status, 'skipped')
+        eq('C0：C1 reason = source-missing', r.checks.find((c) => c.id === 'C1')!.reason, 'source-missing')
+        eq('C0：C2 同样 skipped', r.checks.find((c) => c.id === 'C2')!.status, 'skipped')
+        // 主检出仍检出 my/dev → C4 通过
+        eq('C0：C4 照常通过（target 侧仍可判）', r.checks.find((c) => c.id === 'C4')!.status, 'ok')
+        eq('C0：reason = source-missing', r.reason, 'source-missing')
+        void rec
+      }
+    }
+  }
+
+  // ── dryrun：只跑检查、不执行 merge ──
+  {
+    const repo = makeRepo(path.join(DST, 'mrepo-f'), { 'a.txt': 'a\n' })
+    const wt = path.join(DST, 'mwts', 'f')
+    const created = await CR.createWorktree({ repoRoot: repo, branch: 'wt/merge-f', path: wt, skipDeps: true })
+    if (created.ok) {
+      write(wt, 'new.txt', 'n\n')
+      commit(wt, 'feat: new')
+      const headBefore = git(repo, 'rev-parse', 'HEAD').out.trim()
+      const dry = await M.mergeWorktree(wt, { dryRun: true })
+      check('dryrun：ok=true', dry.ok === true, JSON.stringify(dry).slice(0, 200))
+      if (dry.ok) {
+        eq('dryrun：没有合并提交', dry.mergeCommit, null)
+        eq('dryrun：gitOutput 为空', dry.gitOutput, '')
+        eq('dryrun：带四项检查结果', dry.checks?.length, 4)
+        eq('dryrun：upToDate 已判好（不是最新）', dry.upToDate, false)
+      }
+      eq('dryrun：**没有**真的合并（目标 HEAD 未变）', git(repo, 'rev-parse', 'HEAD').out.trim(), headBefore)
+    }
+  }
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -5144,6 +5687,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   rekey: scenarioSecretRekey,
   plugmgr: scenarioPluginManaged,
   sessync: scenarioSessionSync,
+  wtmerge: scenarioWorktreeMerge,
   memcond: scenarioMemCondense,
   dangclass: scenarioDanglingClassify,
   wtlock: scenarioWorktreeLock,
