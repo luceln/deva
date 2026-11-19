@@ -8,7 +8,12 @@ import { getDevaHome } from './config'
  * 密钥安全存储（主进程）。
  * 用 Electron safeStorage 加密（OS 凭据体系：Win DPAPI / macOS Keychain / Linux libsecret），
  * 密文（base64）落盘 `~/.deva-plus/secrets.json`（与非敏感 config.json 同一根目录，可被 DEVA_HOME 覆盖）。
- * 即便放在点目录，也**始终保持加密、绝不明文**——DPAPI 密文绑定 OS 用户账户、与文件路径无关。
+ * 即便放在点目录，也**始终保持加密、绝不明文**。
+ *
+ * ⚠️ 密文绑定的是**本应用**、不只是 OS 用户账户：`safeStorage` 在 Windows 上是 `v10` + AES-256-GCM，
+ * 那把 AES 密钥用 DPAPI 保护后存在 `userData/Local State` 的 `os_crypt.encrypted_key` —— **每个 app 一份**
+ * （macOS 同理，Keychain 项按应用隔离）。所以别的应用（含原版 Deva）的密文复制过来必然解不开，
+ * 跨应用导入必须先解密再重加密（见 `services/secret-rekey.ts`）。
  * **明文永不出主进程**——不提供 get 给渲染层，解密只在主进程内被 provider 调用时发生。
  * 详见 docs/architecture/security.md。
  */
@@ -214,8 +219,10 @@ export async function hasSecret(key: string): Promise<boolean> {
 /**
  * 导入专用：**原样写入一段已有密文**（base64），不加密也不解密。
  *
- * 为什么要这个入口：从原版 Deva 导入密钥时手里只有密文（DPAPI 密文绑账户不绑路径，同机同账户直接可用），拿不到也
- * 不该拿到明文。而直接往 secrets.json 写文件是错的——`store` 是进程内缓存，`ensureLoaded` 只在首次载入，
+ * 为什么要这个入口：某些调用方手里只有密文、拿不到也不该拿到明文（例如备份迁移里搬同一应用自己的库）。
+ * 注意**不能拿它做跨应用导入**：`safeStorage` 的密钥按应用隔离，别的应用的密文在这里解不开
+ * （见文件头）。跨应用必须走 `services/secret-rekey.ts` 的「解密 → 重加密」。
+ * 而直接往 secrets.json 写文件是错的——`store` 是进程内缓存，`ensureLoaded` 只在首次载入，
  * 绕开它写盘会让本进程继续用旧内存态，导入的密钥「导了但用不上」，要重启才生效。
  *
  * 加密不可用时拒绝（与 setSecret 同口径：绝不静默存明文）；已有同 key 不覆盖（调用方先 hasSecret 判断）。
