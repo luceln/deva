@@ -219,8 +219,21 @@ export function ChatFirstShell(): React.JSX.Element {
   const { activeProject } = useWorkspace()
   const primaryBranch = usePrimaryBranch(activeProject?.path ?? null)  // 打开设置时落在哪一页（资料卡的「能力」直达设置 › 扩展，可直接进某项详情）。
   const [settingsInit, setSettingsInit] = useState<SettingsInit>({})
+  /**
+   * 每次 `openSettings` 递增，作 `Settings` 的 key。
+   *
+   * 为什么不能只拿 `section` 当 key：`Settings` 里 `section` 是 `useState(initial?.section)`，初值只在
+   * 挂载时读一次。用户点「去设置 › 模型」跳到模型页后 `settingsInit.section` 就是 `'models'`；若他再点
+   * 导航切回「导入」，`Settings` 内部 section 变成 import 而 settingsInit 没变，这时再按「去设置 › 模型重填」
+   * 算出的 section 仍是 `'models'`——key 不变、面板不重挂，按钮又没反应。
+   * 递增的 nonce 让「要求跳页」这件事本身成为变化，彻底绕开这个死角。
+   *
+   * ⚠️ 重挂会连带卸载 `ImportPane`，所以导入报告必须先提到模块级（见 redesign/importSession.ts）。
+   */
+  const [settingsNonce, setSettingsNonce] = useState(0)
   const openSettings = (init: SettingsInit = {}): void => {
     setSettingsInit(init)
+    setSettingsNonce((n) => n + 1)
     setSettingsOpen(true)
   }
   // 输入框里的模型失效对话框需要「去填密钥」直达设置 › 模型：登记一个打开入口（见 modelSettingsBus），
@@ -782,7 +795,14 @@ export function ChatFirstShell(): React.JSX.Element {
       </div>
 
       {editor && <PersonaEditor initial={editor} onClose={() => setEditor(null)} />}
-      {settingsOpen && <Settings initial={settingsInit} onClose={() => setSettingsOpen(false)} />}
+      {/* key 用 settingsNonce：让「要求跳页」本身成为变化，见 openSettings 上方那段注释。 */}
+      {settingsOpen && (
+        <Settings
+          key={settingsNonce}
+          initial={settingsInit}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
       {/* 新建会话对话框（§7.7）：选主目录 / 新工作区。主目录取当前打开的项目。 */}
       {newSessionOpen && (
         <NewSessionDialog

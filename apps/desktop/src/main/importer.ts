@@ -254,7 +254,13 @@ export async function runImport(
     // ⑦ 会话（必须早于 ⑧）
     onProgress?.({ step: 'sessions', done: 0, total: 0 })
     const sessions = importSessions(src)
-    report.sessions = { copied: sessions.copied, skipped: sessions.skipped, failed: sessions.failed }
+    report.sessions = {
+      copied: sessions.copied,
+      skipped: sessions.skipped,
+      // 已有、且源是目标内容的超集 → 覆盖。与 copied 分开报，用户才分得清「本来就有」和「这次换成了新的」。
+      updated: sessions.updated,
+      failed: sessions.failed
+    }
 
     // ⑧ 附件（media 量大，逐个报进度；IPC 侧有节流，见 importer-ipc）
     onProgress?.({ step: 'assoc', done: 0, total: 0 })

@@ -17,6 +17,9 @@
  *  - `ignored`：**不适用**于目标的项。典型例子是原版 secrets.json 里的 `remote:…:appSecret`——本方案刻意不导
  *    remote 段，搬过去也没有对应配置可用，是无主密文。它既不是导入成功，也不是「因为已存在而跳过」，
  *    算进 skipped 会在首轮导入就冒出「跳过 1」，同样是无意义的噪声。
+ *  - `pluginManaged`：**归外部插件管**的项。典型例子是 magpie 插件往 config.json 里塞的那个 provider——
+ *    它的 id 与密钥都由插件自己维护，用户既看不到也不需要填。与 `ignored` 分开是因为两者的用户动作不同：
+ *    `ignored` 是「搬了也用不上，你不用管」，`pluginManaged` 是「它归插件管，要改请去插件里改」。
  *  - `failed`：真失败（复制出错 / 磁盘满 / 无权限）。与 skipped 严格区分——把失败说成「跳过」会让界面
  *    显示「导入完成」而用户永远不知道有东西没进来。调用方负责汇总进 ImportReport.failures。
  */
@@ -25,6 +28,22 @@ export interface StepStat {
   skipped: string[]
   builtin?: string[]
   ignored?: string[]
+  /**
+   * 由外部插件托管的项（见 `main/services/plugin-managed.ts`）。
+   *
+   * **不能塞进 `unrecoverable`**：那一栏的界面语义是「去设置 › 模型把它重填一遍」，而这些服务商在设置页里
+   * 没有可编辑的密钥输入（它们的 key 由插件生成），用户照做会扑空。判定归主进程——插件允许改名，
+   * 前端硬编码 `id === 'magpie'` 在插件改名后静默失效。
+   */
+  pluginManaged?: string[]
+  /**
+   * 「已存在、但源更新了」而被覆盖的项（目前只有 sessions 步骤会填）。
+   *
+   * 与 `copied` 分开：`copied` 是「本来没有」，这是「本来有、这次换成了源的新版本」。
+   * 用户要能分清两者——否则「新增 9 跳过 28」里那 28 个，有一部分其实是有更新的内容没同步，
+   * 显示成「跳过」等于告诉他「那些不用管」，而实际上一整段对话的增量就这么无声地漏了。
+   */
+  updated?: string[]
   failed?: Failure[]
 }
 
@@ -77,6 +96,14 @@ export interface SecretsStat {
    * 能解密的情况会**就地重加密**后计入 `copied`，不会出现在这里。
    */
   unrecoverable: string[]
+  /**
+   * 由外部插件托管的密钥（见 `StepStat.pluginManaged`）。
+   *
+   * 与 `unrecoverable` 分开的理由就是用户动作不同：`unrecoverable` 要用户去「设置 › 模型」重填，
+   * 而这一栏的 key 归插件所有（插件自己生成、自己写回），设置页里没有输入框可填。
+   * 混进 `unrecoverable` 会让界面给出一条走不通的指引。
+   */
+  pluginManaged: string[]
   /**
    * 重加密成功、**覆盖**了目标里同名的坏密文（跨应用导入留下的解不开的残留）的 key。
    *
