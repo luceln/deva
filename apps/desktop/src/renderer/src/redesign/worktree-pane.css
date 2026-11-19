@@ -222,3 +222,245 @@
     animation: none;
   }
 }
+
+/* ─────────────────────── 合并面板（spec §4.5~§4.9.4 / T2.2，见 redesign/MergePanel.tsx） ─────────────────────── */
+
+.cf-wt-merge {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-elev);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cf-wt-merge__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cf-wt-merge__head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* 来源 → 目标：让用户一眼看清往哪合 */
+.cf-wt-merge__route {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-subtle);
+  font-family: var(--font-mono, monospace);
+}
+
+/* ── 目标选择器 ── */
+.cf-wt-merge__pick {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cf-wt-merge__pick p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.cf-wt-merge__pickrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cf-wt-merge__select {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+/* ── 四个圆点（按数组顺序，不过滤） ── */
+.cf-wt-merge__checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cf-wt-merge__check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.cf-wt-merge__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--fg-subtle);
+}
+/* ok=绿 / warn=黄 / bad=红 / skipped=灰：warn 与 bad 必须一眼能分，C1 永远是 warn */
+.cf-wt-merge__dot.is-ok {
+  background: var(--success, #3fb950);
+}
+.cf-wt-merge__dot.is-warn {
+  background: var(--warning, #d29922);
+}
+.cf-wt-merge__dot.is-bad {
+  background: var(--danger, #f85149);
+}
+.cf-wt-merge__dot.is-skipped {
+  background: var(--border-strong, var(--fg-subtle));
+  opacity: 0.6;
+}
+.cf-wt-merge__checklabel {
+  font-size: 12px;
+  color: var(--fg);
+}
+.cf-wt-merge__checktext {
+  font-size: 12px;
+  color: var(--fg-muted);
+  line-height: 1.5;
+}
+/* C5 的覆盖清单：用户点「先存起来再合并」前必须看到是哪几个文件 */
+.cf-wt-merge__paths {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--fg-subtle);
+}
+
+/* ── 成功面板 ── */
+.cf-wt-merge__ok {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.cf-wt-merge__okhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--success, #3fb950);
+}
+.cf-wt-merge__sha {
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--fg-muted);
+}
+.cf-wt-merge__behind {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+/* ── 冲突 / 失败 ── */
+.cf-wt-merge__fail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+.cf-wt-merge__failhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--danger, #f85149);
+}
+/*
+ * git 原文：等宽 + 可横向滚动，**不换行截断**——用户要的就是
+ * `CONFLICT (content): Merge conflict in src/xxx.ts` 这一行的原样。
+ */
+.cf-wt-merge__pre {
+  margin: 0;
+  max-width: 100%;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: var(--font-mono, monospace);
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── C5 二选一 ── */
+.cf-wt-merge__overlap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--warning, #d29922);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.cf-wt-merge__overlap p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.cf-wt-merge__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ── 失败出口：四个平权，全 --sm，都不做 primary ── */
+.cf-wt-merge__exits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.cf-wt-merge__cmds {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cf-wt-merge__cmdrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cf-wt-merge__cmdrow code {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  color: var(--fg-muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.cf-wt-merge__note {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.cf-wt-merge__note.is-warn {
+  color: var(--warning, #d29922);
+}
+
+.cf-wt-merge__foot {
+  display: flex;
+  gap: 8px;
+}

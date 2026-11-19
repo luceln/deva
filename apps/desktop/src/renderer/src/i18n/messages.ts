@@ -1743,7 +1743,57 @@ const zhCN: MessageTree = {
           sourceBranchChanged: '还不能合并：工作区已不在它原来的分支上。',
           installing: '还不能合并：依赖还在安装，装完再合并。'
         },
-        resolve: '处理冲突'
+        resolve: '处理冲突',
+        close: '收起',
+        noTarget: '未指定目标',
+        // ── 四个圆点的固定标题：按 id 取，不按 status —— 通过与否标题都一样，用户才能横向对比 ──
+        check: {
+          C1: '工作区的未提交改动',
+          C2: '工作区还在自己的分支上',
+          C4: '目标分支仍在原处',
+          C5: '改动与本次合并无交集'
+        },
+        // ── reason 的说明句。检查阶段主进程只给结构化事实、message 是空串，文案全在这里拼 ──
+        reason: {
+          dirty: '该工作区有 {n} 个未提交改动，它们不会被合并（merge 只合并已提交的内容）。',
+          branchChanged: '该工作区已不在分支 {branch} 上（现在是 {actual}）。',
+          busy: '目标目录还有未收尾的 git 操作（{op}），请先完成或中止。',
+          sourceMissing: '工作区目录已不存在，这一项无法检查。',
+          notCheckedOut: '分支 {branch} 当前没有被任何工作区检出，无法合并。请先在一个目录里检出它。',
+          overlap: '有 {n} 个文件在目标目录有未提交改动，合并会覆盖它们。',
+          unknown: '这一项没法判断（{path} 读不出来）。'
+        },
+        targetNotSet: '还没有合并目标。选一个本地分支作为目标。',
+        pickTarget: '选择目标分支',
+        useTarget: '设为目标并合并',
+        upToDate: '目标分支已包含该工作区的全部提交，无需合并。',
+        success: '已合并到 {target}',
+        successSha: '合并提交 {sha}',
+        showOutput: '显示 git 的输出',
+        hideOutput: '收起 git 的输出',
+        behind: '合并成功；期间该工作区又有 {n} 个新提交尚未合并，可再次合并。',
+        again: '再次合并',
+        conflict: '合并有冲突，需要你处理',
+        failed: '合并失败',
+        overlapTitle: '以下 {n} 个文件在目标目录有未提交改动，合并会覆盖它们：',
+        stashThenMerge: '先存起来再合并',
+        iWillHandle: '我去终端自己处理',
+        iWillHandleHint: '在目标目录里先 git status 看一眼，自己提交或 stash 之后再回来合并。',
+        cancel: '取消',
+        abortFailed: '中止合并失败',
+        aborted: '已中止合并，冲突已清除',
+        copyAbort: '复制中止命令',
+        copied: '已复制到剪贴板',
+        copyFailed: '复制失败，请手动选中命令复制',
+        retry: '再试一次',
+        stashUnstaged: '改动已回来，其中 {n} 个文件从「已暂存」变回了「未暂存」，需要的话重新 git add。',
+        stashPopConflict: '改动回来了但有冲突，stash 条目也还留着（可再次 git stash pop）。',
+        // 四个失败出口的文案。cf.wt 下没有同名键（那层是 git 面板的），这里自带一份，
+        // 免得将来 git 面板改文案时把这个面板的话一起改掉。
+        abortMerge: '中止合并',
+        openTerminal: '在终端打开目标目录',
+        copyCommand: '复制 git 命令',
+        reveal: '在文件管理器打开'
       },
       reveal: '在文件管理器打开'
     },
@@ -3556,7 +3606,53 @@ const en: MessageTree = {
           sourceBranchChanged: 'Cannot merge yet: this worktree is no longer on its original branch.',
           installing: 'Cannot merge yet: dependencies are still installing.'
         },
-        resolve: 'Resolve conflicts'
+        resolve: 'Resolve conflicts',
+        close: 'Collapse',
+        noTarget: 'no target',
+        check: {
+          C1: 'Uncommitted changes in this worktree',
+          C2: 'This worktree is still on its own branch',
+          C4: 'The target branch is still where it was',
+          C5: 'Your changes do not overlap this merge'
+        },
+        reason: {
+          dirty: 'This worktree has {n} uncommitted changes. They will not be merged (merge only takes committed work).',
+          branchChanged: 'This worktree is no longer on {branch} (now {actual}).',
+          busy: 'The target folder still has an unfinished git operation ({op}). Finish or abort it first.',
+          sourceMissing: 'The worktree folder no longer exists, so this check cannot run.',
+          notCheckedOut: 'Branch {branch} is not checked out in any folder, so it cannot be merged into. Check it out somewhere first.',
+          overlap: '{n} files have uncommitted changes in the target folder; merging would overwrite them.',
+          unknown: 'This check cannot be decided ({path} is unreadable).'
+        },
+        targetNotSet: 'No merge target yet. Pick a local branch as the target.',
+        pickTarget: 'Pick a target branch',
+        useTarget: 'Set as target and merge',
+        upToDate: 'The target branch already contains every commit from this worktree; nothing to merge.',
+        success: 'Merged into {target}',
+        successSha: 'Merge commit {sha}',
+        showOutput: 'Show git output',
+        hideOutput: 'Hide git output',
+        behind: 'Merged; this worktree has since gained {n} new commits that are not merged yet — you can merge again.',
+        again: 'Merge again',
+        conflict: 'The merge has conflicts you need to resolve',
+        failed: 'Merge failed',
+        overlapTitle: 'These {n} files have uncommitted changes in the target folder; merging would overwrite them:',
+        stashThenMerge: 'Stash them, then merge',
+        iWillHandle: 'I will handle it in a terminal',
+        iWillHandleHint: 'In the target folder run git status first, then commit or stash on your own and merge again.',
+        cancel: 'Cancel',
+        abortFailed: 'Could not abort the merge',
+        aborted: 'Merge aborted, conflicts cleared',
+        copyAbort: 'Copy abort command',
+        copied: 'Copied to clipboard',
+        copyFailed: 'Copy failed — select the command and copy it manually',
+        retry: 'Try again',
+        stashUnstaged: 'Your changes are back, but {n} files went from staged to unstaged; run git add again if you need them staged.',
+        stashPopConflict: 'Your changes are back but have conflicts, and the stash entry is kept (you can git stash pop again).',
+        abortMerge: 'Abort merge',
+        openTerminal: 'Open target folder in a terminal',
+        copyCommand: 'Copy git command',
+        reveal: 'Show in file manager'
       },
       reveal: 'Show in file manager'
     },

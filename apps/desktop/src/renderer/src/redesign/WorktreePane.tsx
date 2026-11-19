@@ -14,6 +14,7 @@ import {
 import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
 import { useDialog } from '../components/DialogProvider'
+import { MergePanel } from './MergePanel'
 import { useWorktree } from '../store/worktree'
 import type {
   MergeBlocker,
@@ -209,6 +210,10 @@ function WorktreeCard({
   const { t } = useI18n()
   const toast = useToast()
   const dialog = useDialog()
+  /** 合并面板是否打开（合并是两步：先看检查结果，再决定合不合 / 怎么处理覆盖）。 */
+  const [mergeOpen, setMergeOpen] = useState(false)
+  // 合并成功后要让主进程重算 targetBranch / mergeGate：直接复用 store 的 refresh。
+  const { refresh } = useWorktree()
 
   /**
    * 删除这个工作区。
@@ -369,9 +374,9 @@ function WorktreeCard({
           这里不出现任何 `state === ...` 的推断——两处各算一遍，迟早一处说能、一处拒绝，
           用户看到的就是「按钮能点，点了报错」。
 
-          `mergeGate` 有 blocker 时禁用并说明原因；`mayMerge` 为真时按钮可用，但真正的
-          `worktree:merge` IPC 还没落地（P2），点了给诚实的未接通提示。两种状态必须区分开：
-          把「不能合并」和「还没做」混成同一种表现，用户没法判断是该改点什么还是该等版本。
+          `mayMerge` 为假时禁用并说明原因；为真时打开合并面板（真实 `worktree:merge`）。
+          按钮本身不直接合并：合并要先把四项检查的结果摆给用户看，尤其 C1（有未提交改动不会被合并）
+          和 C5（会覆盖目标目录的哪些改动）——静默执行等于把「你改了但没合过去」变成用户的困惑。
         */}
         <button
           type="button"
@@ -382,7 +387,7 @@ function WorktreeCard({
               ? t(BLOCKER_KEY[view.mergeGate.blocker])
               : t('cf.wt.merge.title').replace('{target}', view.targetBranch ?? '')
           }
-          onClick={() => onNotWired('merge')}
+          onClick={() => setMergeOpen(true)}
         >
           {t('cf.wt.merge.merge')}
         </button>
@@ -423,6 +428,21 @@ function WorktreeCard({
         </button>
         {pending && <span className="cf-wt__pending">{t('cf.wt.notWired')}</span>}
       </footer>
+
+      {/*
+        合并面板（spec §4.5~§4.9.4 / T2.2）。放在卡片内而不是全局弹层：它的所有操作都以这张卡片
+        的工作区为主语（往哪个目标合、targetPath 是哪个），脱离卡片容易让用户对「在合哪个」失焦。
+        `onMerged` 交给上层重拉列表——合并后 targetBranch / mergeGate 都可能变，让主进程重算。
+      */}
+      {mergeOpen && (
+        <MergePanel
+          view={view}
+          onClose={() => setMergeOpen(false)}
+          onMerged={() => {
+            void refresh()
+          }}
+        />
+      )}
     </article>
   )
 }
