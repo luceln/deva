@@ -1,7 +1,8 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { getConfig, getDevaHome, setConfig } from './services/config'
-import { importEncryptedSecret } from './services/secrets'
+import { readSecret, setSecret } from './services/secrets'
+import { decryptAsLegacy } from './services/secret-rekey'
 import { isPresetProviderId } from '../shared/preset-providers'
 import type { SecretsStat, StepStat } from '../shared/import-protocol'
 
@@ -205,7 +206,22 @@ export function mergeProviders(srcHome: string, opts?: { excludeIds?: string[] }
 /**
  * 密钥补缺：只补目标没有的 key，且**只搬目标里确实有对应配置的**。
  *
- * 同机同账户，DPAPI 密文原样搬运即可解密（见 secrets.ts 开头的说明）——密文绑定的是 OS 用户账户，与文件路径无关。
+ * ## ⚠️ 跨应用**不能**原样复制密文（这里以前写错了）
+ *
+ * 以前这句写的是「同机同账户，DPAPI 密文原样搬运即可解密，密文绑定 OS 用户账户、与文件路径无关」。
+ * 那只对**直接调 DPAPI** 成立。本项目 `secrets.ts` 用的是 `safeStorage.encryptString`，Windows 上产出的是
+ * **`v10` 前缀 + AES-256-GCM** 密文，而那个 AES 密钥本身是用 DPAPI 保护后存在**该应用自己的**
+ * `userData/Local State` 的 `os_crypt.encrypted_key` 里。
+ *
+ * 原版 Deva 与 DevaPlus 是两个 app（`name` 不同 → userData 不同 → AES 密钥不同），所以**原样复制过来的
+ * 密文必然解不开**，落地表现是 `keyunreadable`（「密钥读不出来」）而不是「没配过」。实测：
+ * `Roaming/Deva` 与 `Roaming/DevaPlus` 的 `os_crypt.encrypted_key` 逐字节不同；用 DevaPlus 身份
+ * `safeStorage.decryptString` 解原版密文抛 `Error while decrypting the ciphertext`。macOS 的 Keychain
+ * 项同理按应用隔离。
+ *
+ * 正确做法见 `secret-rekey.ts`：在**原版应用的上下文**里解密拿到明文，再用**本应用**的 `safeStorage`
+ * 重新加密。做不到时（原版没装 / 版本不兼容 / 解密失败）降级为**明确告知用户去重填**——
+ * 绝不明说成功却写进一堆解不开的密文。
  *
  * ⚠️ **不能全量搬**：原版 secrets.json 里除了 provider 的 apiKey，还有 `remote:<botId>:appSecret` / `remote:…:botToken`
  * 和 `mcp:<id>:<field>`。`remote` 段仍不导（两个应用争同一个机器人会互相抢会话，见文件头），它的密文搬过去
@@ -239,7 +255,6 @@ export async function copySecrets(srcHome: string): Promise<SecretsStat> {
     ignored: [],
     noEncryption: [],
     invalid: [],
-    // 本提交只加字段形状；真正往这两个栏里写是下一个提交（跨应用重加密）
     unrecoverable: [],
     rekeyed: []
   }
@@ -286,6 +301,14 @@ export async function copySecrets(srcHome: string): Promise<SecretsStat> {
    *    「MCP 密钥判断不了，因为目标 mcp.json 读不出来」。
    */
   const mcpRead = targetMcpIds()
+  /*
+   * ────────── 第一阶段：挑出该搬的 key，收集 (key, 密文) ──────────
+   *
+   * 不在这里直接写盘的原因：这些密文是**原版应用加密的**，本应用解不开（见文件头那段）。
+   * 要先批量交给 `decryptAsLegacy`（它起一个 helper 进程，在原版 userData 上下文里解密），
+   * 一次解密一批——每条起一个进程会慢到用户以为卡死，而且没意义。
+   */
+  const toImport: Array<{ key: string; cipherText: string }> = []
   for (const [key, value] of Object.entries(src)) {
     /*
      * 源值先过一遍「这是不是一个能用的密文」，**不能 `continue` 就算**。
@@ -326,36 +349,80 @@ export async function copySecrets(srcHome: string): Promise<SecretsStat> {
       stat.ignored.push(key)
       continue
     }
+    // 归属判定通过：进入待导入清单，第二阶段统一处理
+    toImport.push({ key, cipherText: value })
+  }
+
+  if (!toImport.length) return stat
+
+  /*
+   * ────────── 第二阶段：在原版上下文解密 → 用本应用重新加密 → 写盘 ──────────
+   *
+   * 这一步是本次修复的核心。导入的不是密文，而是**重加密后的新密文**。
+   *
+   * 解密失败时（原版没装 / 版本不兼容 / 本机无加密存储 / 某条密文本身坏了）：
+   *  - 整批失败 → 全部进 `unrecoverable`，报告里明确告诉用户去「设置 › 模型」重填；
+   *  - 单条失败（`plaintexts[i] === null`）→ 只把那条进 `unrecoverable`，其余照常导入。
+   * 绝不把解不开的密文写进目标——那正是这次要修的 bug（界面上是「缺少密钥」，用户无从判断）。
+   */
+  const dec = await decryptAsLegacy(toImport.map((x) => x.cipherText))
+  if (!dec.ok) {
+    console.warn('[import] 无法在原版上下文解密密钥，降级为「明确告知用户重填」：', dec.code)
     /*
-     * 四种结果**分开记**，不能压平成「跳过」：
-     *  - `exists`        → skipped：目标已有同名密钥，保留本地那份，这是正常的「不用导」；
-     *  - `invalid`       → invalid：源里那条本身是空的/坏的，属于源数据问题；
-     *  - `no-encryption` → noEncryption：**这台机器没有可用加密**（Linux 无 libsecret / 换了 OS 账户）。
-     *    这是「密钥不用重输」唯一会无声失效的通道——界面必须能把它单独提示出来（「这台机器无法保存密钥，
-     *    请手动重填」），混进「跳过 5」用户永远不知道；
-     *  - `write-failed`  → failed：内存里有、盘上没有，重启后密钥就没了，是真失败。
-     *  - `store-unreadable` → failed：目标密钥库文件本身坏了，写进去会覆盖整份库，所以拒绝。
-     *    这条**绝不能落进下面的 `skipped`**：那等于告诉用户「这些密钥本来就不用导」，
-     *    而真实原因是目标库坏了要修——两者的处置完全不同。
+     * 只进 `unrecoverable`，**不进 `failed`**。
+     *
+     * 进了 `failed` 会让 `report.ok = false`，界面就会说「导入失败」——可实际上别的都导进来了，
+     * 用户要做的是「去设置里重填这 N 条密钥」，这是一条提示而不是一次失败。
+     * `unrecoverable` 本来就是为了与失败分开才单列的（见 SecretsStat 的注释）。
      */
-    const r = await importEncryptedSecret(key, value)
-    if (r.ok) stat.copied.push(key)
-    else if (r.code === 'write-failed') {
-      // reason 用 secrets 专属码：用户看到「配置写盘失败」会去查 config.json，而失败的是 secrets.json
-      stat.failed = [...(stat.failed ?? []), { step: 'secrets', id: key, reason: 'secrets-write-failed' }]
-    } else if (r.code === 'store-unreadable') {
-      stat.failed = [...(stat.failed ?? []), { step: 'secrets', id: key, reason: 'secrets-store-unreadable' }]
-    } else if (r.code === 'no-encryption') {
+    for (const { key } of toImport) stat.unrecoverable.push(key)
+    return stat
+  }
+
+  for (let i = 0; i < toImport.length; i++) {
+    const { key, cipherText } = toImport[i]
+    const plain = dec.plaintexts[i]
+    if (plain === null || plain === undefined) {
+      // 单条解开不了（源里那条本身就坏了，或不属于原版密钥）——同上，只进 unrecoverable
+      stat.unrecoverable.push(key)
+      continue
+    }
+    /*
+     * 目标已有同名密钥时的处置（**这是已导入过的坏密文的修复路径**）：
+     *
+     * - 目标那条**能解**（用户在 DevaPlus 里自己配的、或上次已经重加密过的）→ `skipped` 保留本地，
+     *   覆盖等于悄悄改掉一条能用的密钥；
+     * - 目标那条**解不开**（跨应用导入留下的残留）→ **覆盖**，并计入 `rekeyed`。
+     *
+     * 为什么必须覆盖：用户手里唯一的修好手段就是「重新导入一次」。若不覆盖，导入器跳过它、
+     * 界面又一直说「密钥读不出来」，他永远修不好（只能手动删掉那条再导，而界面没给删的入口）。
+     * 判据用 `readSecret` 的真实三态，不靠猜。
+     */
+    const existing = await readSecret(key)
+    const existedBroken = existing.kind === 'unreadable'
+    if (existing.kind === 'ok') {
+      stat.skipped.push(key)
+      continue
+    }
+    const r = await setSecret(key, plain)
+    // 明文用完即弃：不落盘、不进日志（本函数里任何一行都不打印 plain）
+    toImport[i] = { key, cipherText: '' }
+    if (r.ok) {
+      stat.copied.push(key)
+      if (existedBroken) stat.rekeyed.push(key)
+    } else if (!r.available) {
       stat.noEncryption.push(key)
-      /*
-       * 同时记一条失败。单独成栏是给界面**说清原因**用的，但整轮 ok 不能因此为真：
-       * 「密钥不用重输」是导入的核心承诺之一，一个都没存进去却报「导入完成」，用户不会去重填密钥，
-       * 直到下次发消息才发现「服务商连不上」。这与「失败被伪装成跳过」是同一个病，只是这次伪装成成功。
-       * reason 用独立码（不是 config-write-failed）：这不是写盘失败，是这台机器根本没有存储能力。
-       */
-      stat.failed = [...(stat.failed ?? []), { step: 'secrets', id: key, reason: 'no-encryption' }]
-    } else if (r.code === 'invalid') stat.invalid.push(key)
-    else stat.skipped.push(key)
+      stat.failed = [
+        ...(stat.failed ?? []),
+        { step: 'secrets', id: key, reason: 'no-encryption' }
+      ]
+    } else {
+      stat.failed = [
+        ...(stat.failed ?? []),
+        { step: 'secrets', id: key, reason: 'secrets-write-failed' }
+      ]
+    }
+    void cipherText
   }
   return stat
 }

@@ -6,6 +6,13 @@ directories:
   buildResources: build
   output: dist
 
+# 跨应用密钥重加密的 helper（见 main/services/secret-rekey.ts）。
+# 必须放 resources/ 下而不是打进 asar：asar 里的文件不能作为 Electron 的 app 入口被执行
+# （helper 是「用 Electron 二进制跑一个脚本」，路径必须真实存在于磁盘上）。
+extraResources:
+  - from: resources/secret-rekey-helper.cjs
+    to: secret-rekey-helper.cjs
+
 files:
   - out/**
   - package.json
