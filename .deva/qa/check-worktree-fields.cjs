@@ -99,7 +99,8 @@ if (pane !== null && msg !== null) {
      * 会报「没找到 title」——而 title 其实好好地在。改为从 `title={` 起按花括号配平取到闭合处。
      */
     const titleStart = seg.indexOf('title={')
-    const titleExpr = titleStart === -1 ? null : sliceBraced(seg, titleStart + 'title='.length)    if (titleExpr === null) bad('G2 合并按钮的 title 取 blocker 文案', '没找到 title')
+    const titleExpr = titleStart === -1 ? null : sliceBraced(seg, titleStart + 'title='.length)
+    if (titleExpr === null) bad('G2 合并按钮的 title 取 blocker 文案', '没找到 title')
     else if (/mergeGate\s*\.\s*blocker/.test(titleExpr) && /BLOCKER_KEY\[/.test(titleExpr)) {
       ok('G2 合并按钮的 title 取 blocker 文案', 'mergeGate.blocker → BLOCKER_KEY[...]')
     } else bad('G2 合并按钮的 title 取 blocker 文案', `实际是 ${titleExpr.slice(0, 120)}`)

@@ -3927,6 +3927,61 @@ async function scenarioWorktree(): Promise<void> {
   }
 
   /*
+   * ══ A34：重建 worktree ══
+   *
+   * 核心不是「能重建」，而是**不得「提示成功但目录不存在」**。所以每条成功路径都要回读
+   * `existsSync` + `git worktree list` + `rev-parse HEAD` 三项，只看 `ok:true` 等于没验。
+   */
+  const RB = await import('../../apps/desktop/src/main/services/worktree/rebuild')
+
+  const rbPath = path.join(DST, 'wts', 'a34')
+  const rbCreate = await CR.createWorktree({
+    repoRoot: repo,
+    branch: 'wt/a34',
+    path: rbPath,
+    skipDeps: true
+  })
+  if (!rbCreate.ok) {
+    fail('A34：前置创建不该失败', JSON.stringify(rbCreate))
+  } else {
+    // ── 正路：目录被外部删掉 → 重建 → 目录真的回来了 ──
+    fs.rmSync(rbPath, { recursive: true, force: true })
+    check('A34：前置——目录已被删掉', !fs.existsSync(rbPath), '')
+
+    const rb = await RB.rebuildWorktree({ path: rbPath })
+    eq('A34：重建返回 ok', rb.ok, true)
+    eq('A34：重建后 verified 为真（回读核对通过）', rb.verified, true)
+    // 三项回读，缺一不可 —— 这是 A34 的判据本身
+    check('A34：重建后目录真的存在', fs.existsSync(rbPath), `不存在：${rbPath}`)
+    check(
+      'A34：重建后 git 登记里有这条',
+      (await L.listWorktrees()).items.some((i) => path.resolve(i.path) === path.resolve(rbPath)),
+      (await L.listWorktrees()).items.map((i) => i.path).join(' | ')
+    )
+    eq('A34：重建后 HEAD 在该分支上', gitOut(rbPath, 'rev-parse', '--abbrev-ref', 'HEAD'), 'wt/a34')
+
+    // ── 目录还在时拒绝：不「先删再建」悄悄丢改动 ──
+    const rbAgain = await RB.rebuildWorktree({ path: rbPath })
+    eq('A34：目录还在时拒绝重建', rbAgain.ok, false)
+    eq('A34：拒绝原因是 dir-exists', rbAgain.reason, 'dir-exists')
+    check('A34：拒绝后目录原样还在', fs.existsSync(rbPath), '')
+
+    // ── 分支被删时拒绝：不凭空造一个同名分支 ──
+    fs.rmSync(rbPath, { recursive: true, force: true })
+    gitOut(repo, 'worktree', 'prune')
+    gitOut(repo, 'branch', '-D', 'wt/a34')
+    const rbNoBr = await RB.rebuildWorktree({ path: rbPath })
+    eq('A34：分支没了时拒绝重建', rbNoBr.ok, false)
+    eq('A34：拒绝原因是 branch-missing', rbNoBr.reason, 'branch-missing')
+    check('A34：拒绝后不会留下半截目录', !fs.existsSync(rbPath), '')
+
+    // ── 没有记录时拒绝，且不碰任何东西 ──
+    const rbGhost = await RB.rebuildWorktree({ path: path.join(DST, 'wts', 'never-existed') })
+    eq('A34：无记录时拒绝', rbGhost.ok, false)
+    eq('A34：无记录时原因 not-found', rbGhost.reason, 'not-found')
+  }
+
+  /*
    * ══ P2 合并的契约断言（A37 / A42 / A94 / A97）══
    *
    * 完整的合并场景在 `scenarioWorktreeMerge`（`wtmerge`）里，这里只钉住四条与**接口形状**有关的

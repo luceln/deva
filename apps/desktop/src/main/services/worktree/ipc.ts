@@ -4,6 +4,7 @@ import { listWorktrees } from './list'
 import { retryInstall } from './deps'
 import { briefForFocusRoot } from './brief'
 import { removeWorktree } from './remove'
+import { rebuildWorktree } from './rebuild'
 import { mergeWorktree, setMergeTarget } from './merge'
 import { onWorktreeChanged, onWorktreeProgress, onWorktreeSize } from '../chat-bus'
 import type {
@@ -71,6 +72,12 @@ export function registerWorktreeIpc(getWin: () => BrowserWindow | null): void {
   ipcMain.handle('worktree:set-target', (_e, req: WorktreeSetTargetReq) =>
     setMergeTarget(req.path, req.targetBranch)
   )
+  /*
+   * 重建（spec T3.3 / A34）：目录被外部删掉后，从原分支重新检出到原路径。
+   * 返回前会**回读**目录 / HEAD / 登记三项，任一不过就是 `ok:false`——
+   * 「提示成功但目录不存在」正是 A34 要抓的那类静默失效。
+   */
+  ipcMain.handle('worktree:rebuild', (_e, req: WorktreeRemoveReq) => rebuildWorktree(req))
 
   /*
    * 把总线上的两条 worktree 事件转给渲染层。

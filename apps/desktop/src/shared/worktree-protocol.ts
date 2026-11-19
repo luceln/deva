@@ -280,6 +280,29 @@ export interface WorktreeRemoveResult {
   warnings: string[]
 }
 
+/**
+ * 重建一个「目录已经不在了」的 worktree（spec T3.3 / A34）。
+ *
+ * 只重建目录，**不动分支**：分支里已提交的内容本来就在，重建只是把工作目录检出回来。
+ * 目录还在时拒绝（要重置请先删除），分支已被删时拒绝（不替用户凭空造一个同名分支）。
+ */
+export interface WorktreeRebuildResult {
+  ok: boolean
+  reason?: 'not-found' | 'dir-exists' | 'branch-missing' | 'installing' | 'add-failed' | 'verify-failed'
+  message?: string
+  path?: string
+  branch?: string
+  /**
+   * 重建后**回读**核对的结果：目录在、HEAD 在该分支、git 登记里有这条。
+   *
+   * A34 的判据就是这一项：`git worktree add` 退出码 0 不代表目录现在能用，
+   * 所以 `ok:true` 必须伴随 `verified:true`。界面不该自己判断「建成了没」。
+   */
+  verified?: boolean
+  /** 没能做到的部分，界面必须展示。 */
+  warnings: string[]
+}
+
 /* ─────────────────────────── 合并（spec §4 / §7.2） ─────────────────────────── */
 
 /** 四项检查的 id。顺序固定为 `C1, C2, C4, C5`（与界面四个圆点一一对应）。 */

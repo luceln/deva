@@ -55,6 +55,7 @@ import type {
   WorktreeMergeReq,
   WorktreeRemoveReq,
   WorktreeRemoveResult,
+  WorktreeRebuildResult,
   WorktreeSetTargetReq,
   WorktreeSetTargetResult,
   WorktreeSizeUpdate,
@@ -1087,6 +1088,9 @@ const api = {
      */
     remove: (req: WorktreeRemoveReq): Promise<WorktreeRemoveResult> =>
       ipcRenderer.invoke('worktree:remove', req),
+    /** 重建：目录被外部删掉后从原分支重新检出。成功与否由主进程回读核对，界面不自行判断。 */
+    rebuild: (req: WorktreeRemoveReq): Promise<WorktreeRebuildResult> =>
+      ipcRenderer.invoke('worktree:rebuild', req),
     /**
      * 合并（spec §4）。检查阶段**重新跑一遍**，不复用 `mergeDryRun` 的结论——
      * 两次之间用户可能清了改动、agent 也可能又提交了，复用旧结论等于跳过检查。
