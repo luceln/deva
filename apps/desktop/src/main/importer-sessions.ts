@@ -170,16 +170,37 @@ export function importSessions(
  * 读失败单独返回 `read-failed` 而不是塞进某个「不覆盖」的结论：读不出来**不说明源更新**，
  * 也不说明目标有本地内容——只是「不知道」。当作「跳过」会让报告看起来一切正常，
  * 而这个会话实际没同步；记进失败清单，用户才知道有一条没过。
+ *
+ * 两个文件各自 try：任一读不出就返回 `read-failed`，**不把「读不出」当成「内容不同」**。
+ * 这一点很要紧：`JSON.parse` 对半截文件抛错时，若被 catch 成「内容不一样 → 不覆盖」，
+ * 用户看到的是「跳过」，而真相是「这条根本没比对过」。
  */
 function decideExistingByFile(from: string, to: string): ExistingDecision | 'read-failed' {
+  let targetRaw: string
   try {
-    return decideExisting(
-      JSON.parse(readFileSync(to, 'utf8')) as { messages?: unknown },
-      JSON.parse(readFileSync(from, 'utf8')) as { messages?: unknown }
-    )
+    targetRaw = readFileSync(to, 'utf8')
   } catch {
     return 'read-failed'
   }
+  let sourceRaw: string
+  try {
+    sourceRaw = readFileSync(from, 'utf8')
+  } catch {
+    return 'read-failed'
+  }
+  let target: { messages?: unknown }
+  let source: { messages?: unknown }
+  try {
+    target = JSON.parse(targetRaw) as { messages?: unknown }
+  } catch {
+    return 'read-failed'
+  }
+  try {
+    source = JSON.parse(sourceRaw) as { messages?: unknown }
+  } catch {
+    return 'read-failed'
+  }
+  return decideExisting(target, source)
 }
 
 /**

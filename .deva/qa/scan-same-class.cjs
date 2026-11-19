@@ -151,6 +151,14 @@ const ALLOW = [
   {
     key: 'importer-sessions.ts::statSync(join(srcDir, name))',
     why: '源 compacted 尺寸：读失败会抛到本文件 catch 记 failure（有通道，不在扫描窗口内）。删掉会判 BARE，而这里确实有通道，所以留'
+  },
+  {
+    key: "importer-sessions.ts::targetRaw = readFileSync(to, 'utf8')",
+    why: '会话增量判定的读目标：catch 里 `return \'read-failed\'`，调用方（importSessions 的 session 分支）把它转成 `stat.failed.push({reason: SOURCE_FILE_UNREADABLE})`——有失败通道，只是跨了函数边界，扫描窗口看不到。删掉这条豁免会判 BARE 并让 CI 变红，但「读不出就不覆盖」正是本场景要的方向（读失败不代表源更新），所以留'
+  },
+  {
+    key: "importer-sessions.ts::sourceRaw = readFileSync(from, 'utf8')",
+    why: '同上：会话增量判定的读源，与读目标成对。两个都必须有 try——任一读不出就只能判「不知道」，绝不能落成「内容不同 → 不覆盖」或「内容相同 → 跳过」'
   }
 ]
 
