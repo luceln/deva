@@ -12,7 +12,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as crypto from 'crypto'
-import { execFileSync, spawn } from 'child_process'
+import { execFileSync, spawn, spawnSync } from 'child_process'
 
 import { runImport } from '../../apps/desktop/src/main/importer'
 import { canImport, upstreamHome } from '../../apps/desktop/src/main/importer-gate'
@@ -373,12 +373,30 @@ async function scenarioFull(): Promise<void> {
   const providerKeyOf = (k: string): string => (k.includes(':') ? k.slice(0, k.indexOf(':')) : k)
   const relevantKeys = Object.keys(srcSecrets).filter((k) => srcProviderIds.has(providerKeyOf(k)))
   const orphanKeys = Object.keys(srcSecrets).filter((k) => !srcProviderIds.has(providerKeyOf(k)))
+  /*
+   * 新契约：能重加密的进 `copied`，解不开的进 `unrecoverable`（原版没装 / 密文不属于原版），
+   * 目标已有可解密文的进 `skipped`。三者都算「已处理」——**关键是不能进 `ignored`**（那才是无主丢弃）。
+   *
+   * 为什么不再断言「copied 恰好等于 relevantKeys」：这条源是真实 `~/.deva`，里面是原版密文。
+   * 本机装了原版时能解、CI 上没有就解不开，`copied` 与 `unrecoverable` 的分配随环境而变——
+   * 断言写死任一侧都会在另一种环境里假红。要验「真的解开了」是 `rekey` 场景的职责。
+   */
+  const handled = [...r1.secrets.copied, ...r1.secrets.skipped, ...r1.secrets.unrecoverable]
   eq(
-    '密钥：provider 相关键全部处理（copied + skipped）',
-    r1.secrets.copied.length + r1.secrets.skipped.length,
+    '密钥：provider 相关键全部处理（copied / skipped / unrecoverable 三选一）',
+    handled.filter((k) => relevantKeys.includes(k)).length,
     relevantKeys.length
   )
-  eq('密钥：copied 只含 provider 相关键', [...r1.secrets.copied].sort(), [...relevantKeys].sort())
+  eq(
+    '密钥：copied 里只有 provider 相关键（没有混进无主的）',
+    r1.secrets.copied.filter((k) => !relevantKeys.includes(k)),
+    []
+  )
+  eq(
+    '密钥：provider 相关键一条都没被当无主密文丢掉',
+    r1.secrets.ignored.filter((k) => relevantKeys.includes(k)),
+    []
+  )
   eq('密钥：无主密文（remote / mcp）不搬，进 ignored', [...(r1.secrets.ignored ?? [])].sort(), [...orphanKeys].sort())
   check(
     '密钥：ignored 里确有 remote 命名空间',
@@ -819,7 +837,16 @@ async function scenarioMcp(): Promise<void> {
   eq('MCP：源里 true 的启用态跟过来', cfgAfter.mcp?.enabled?.['src-only'], true)
   eq('MCP：源里 false 的保持默认关', cfgAfter.mcp?.enabled?.['src-off'], undefined)
   // 密钥：目标 mcp.json 里有 src-only，它的密文就该被搬而不是被当无主丢弃。
-  check('MCP：密钥不再被当无主密文丢弃', (r.secrets?.copied ?? []).includes('mcp:src-only:token'), JSON.stringify({ copied: r.secrets?.copied, ignored: r.secrets?.ignored }))
+  /*
+   * 这条只验**归属判定**：目标 mcp.json 里有 `src-only`，所以它的密钥有主、不能被当无主密文丢掉。
+   * 至于它落地成 `copied` 还是 `unrecoverable`，取决于源里那段密文能不能被解开 —— 本场景源是
+   * 手工写的假密文（不是真 v10），所以这里只断言「不在 ignored 里」。
+   */
+  check(
+    'MCP：密钥不再被当无主密文丢弃',
+    !(r.secrets?.ignored ?? []).includes('mcp:src-only:token'),
+    JSON.stringify({ copied: r.secrets?.copied, unrecoverable: r.secrets?.unrecoverable, ignored: r.secrets?.ignored })
+  )
 
   // ② 幂等：再导一次，源里那两个都已在目标，全部 skipped；dst-existing 目标独有，源里没有，不出现
   const r2 = (await runOnce()) as Report
@@ -3719,6 +3746,324 @@ async function scenarioInsertAttachments(): Promise<void> {
   T.clearInsertableForTest(sid2, turnId2)
 }
 
+/**
+ * 跨应用密钥重加密（A/B/C 里的 A）：导入原版密钥后**真的能用**，做不到时明确告知。
+ *
+ * 造原版密文的办法：spawn 一个真 Electron，把 userData 指到「假原版目录」再用 safeStorage 加密。
+ * 这样造出来的密文与「原版应用写的」在形式上完全一样（都是 v10 + AES-GCM，密钥在各自的 Local State），
+ * 于是「换一个 userData 就解不开」这个前提是**真的**被验到，不是靠桩模拟。
+ */
+async function scenarioSecretRekey(): Promise<void> {
+  const R = await import('../../apps/desktop/src/main/services/secret-rekey')
+  const SEC = await import('../../apps/desktop/src/main/services/secrets')
+
+  const electron = path.join(process.cwd(), 'node_modules/electron/dist/electron.exe')
+  if (!fs.existsSync(electron)) {
+    info('密钥重加密', 'SKIP —— 本机没有 electron 二进制')
+    return
+  }
+
+  // ── 造「假原版」：一个独立 userData 目录 + 用它的密钥加密两条密钥 ──
+  const legacyUd = path.join(DST, 'fake-legacy-userdata')
+  fs.mkdirSync(legacyUd, { recursive: true })
+  const encHelper = path.join(DST, 'enc-legacy.cjs')
+  fs.writeFileSync(
+    encHelper,
+    [
+      "const { app, safeStorage } = require('electron')",
+      "const path = require('path'), fs = require('fs')",
+      `app.setPath('userData', ${JSON.stringify(legacyUd)})`,
+      'app.whenReady().then(() => {',
+      "  const out = path.join(__dirname, 'legacy-cipher.json')",
+      '  const enc = (v) => safeStorage.encryptString(v).toString("base64")',
+      '  const c1 = enc("sk-legacy-alpha-1111"), c2 = enc("sk-legacy-beta-2222")',
+      '  fs.writeFileSync(out, JSON.stringify({ alpha: c1, beta: c2 }))',
+      '  app.quit()',
+      '})'
+    ].join(String.fromCharCode(10))
+  )
+  const gen = spawnSync(electron, [encHelper], { encoding: 'utf8', timeout: 60_000 })
+  const cipherFile = path.join(DST, 'legacy-cipher.json')
+  if (!fs.existsSync(cipherFile)) {
+    fail('密钥重加密：造原版密文失败', String(gen.stderr).slice(0, 300))
+    return
+  }
+  const legacy = JSON.parse(fs.readFileSync(cipherFile, 'utf8')) as {
+    alpha: string
+    beta: string
+  }
+  info('原版密文已生成', `alpha len=${legacy.alpha.length} beta len=${legacy.beta.length}`)
+
+  // ── ① 正向：用「原版 userData」能解开 → 重加密链路走通 ──
+  const dec = await R.decryptAsLegacy([legacy.alpha, legacy.beta], {
+    legacyUserData: legacyUd,
+    execPath: electron
+  })
+  info('decryptAsLegacy 结果', JSON.stringify(dec.ok ? { ok: true, hit: dec.plaintexts.map((p) => (p === null ? null : p.length)) } : dec))
+  check(
+    'A：在原版 userData 上下文里能解开原版密文（这是整条修复的前提）',
+    dec.ok === true,
+    JSON.stringify(dec)
+  )
+  if (dec.ok) {
+    eq('A：解出来的明文长度对得上 alpha', dec.plaintexts[0]?.length, 'sk-legacy-alpha-1111'.length)
+    eq('A：解出来的明文内容正确 alpha', dec.plaintexts[0], 'sk-legacy-alpha-1111')
+    eq('A：解出来的明文内容正确 beta', dec.plaintexts[1], 'sk-legacy-beta-2222')
+  }
+
+  /*
+   * ── ② 反向前提：换成本应用的 userData 就解不开（这就是「原样复制必坏」）──
+   *
+   * 先用 Electron 在那个目录里初始化出自己的 Local State（否则没有密钥可比，测试会假绿）。
+   */
+  const thisUd = path.join(DST, 'this-app-userdata')
+  fs.mkdirSync(thisUd, { recursive: true })
+  const initHelper = path.join(DST, 'init-this-ud.cjs')
+  fs.writeFileSync(
+    initHelper,
+    [
+      "const { app, safeStorage } = require('electron')",
+      `app.setPath('userData', ${JSON.stringify(thisUd)})`,
+      'app.whenReady().then(() => {',
+      '  safeStorage.encryptString("x")',
+      '  app.quit()',
+      '})'
+    ].join(String.fromCharCode(10))
+  )
+  spawnSync(electron, [initHelper], { encoding: 'utf8', timeout: 60_000 })
+  check(
+    'A 反证前置：本应用 userData 里已生成自己的 Local State',
+    fs.existsSync(path.join(thisUd, 'Local State')),
+    thisUd
+  )
+  const wrong = await R.decryptAsLegacy([legacy.alpha], {
+    legacyUserData: thisUd,
+    execPath: electron
+  })
+  info('用本应用 userData 解原版密文', JSON.stringify(wrong.ok ? wrong.plaintexts : wrong))
+  check(
+    'A 反证：用本应用的 userData 解原版密文**解不开**（所以必须重加密）',
+    wrong.ok === false || wrong.plaintexts.every((p) => p === null),
+    JSON.stringify(wrong.ok ? wrong.plaintexts : wrong)
+  )
+
+  // ── ③ 降级：原版目录不存在 → legacy-not-found，不抛 ──
+  const noLegacy = await R.decryptAsLegacy([legacy.alpha], {
+    legacyUserData: path.join(DST, 'no-such-legacy-dir'),
+    execPath: electron
+  })
+  info('原版缺失时', JSON.stringify(noLegacy.ok ? 'ok' : noLegacy.code))
+  check(
+    'A 降级：原版 userData 不存在时不崩，返回结构化失败码',
+    noLegacy.ok === false && typeof (noLegacy as { code?: string }).code === 'string',
+    JSON.stringify(noLegacy)
+  )
+
+  // ── ④ 降级：用一个非 Electron 的 execPath（普通 node）→ helper 起不来，不崩 ──
+  const badExec = await R.decryptAsLegacy([legacy.alpha], {
+    legacyUserData: legacyUd,
+    execPath: process.execPath
+  })
+  info('helper 起不来时', JSON.stringify(badExec.ok ? 'ok' : badExec.code))
+  check(
+    'A 降级：helper 进程跑不起来时不崩，返回结构化失败码',
+    badExec.ok === false,
+    JSON.stringify(badExec)
+  )
+
+  // ── ⑤ copySecrets 全链路：源里是原版密文 → 目标拿到能用（readSecret === ok）──
+  /*
+   * 这是本次修复的验收点：导入后 `readSecret` 必须返回 `ok`，不是 `unreadable`。
+   *
+   * 造来源：临时 srcHome 里放一份 secrets.json（原版密文）+ config 里配好 provider。
+   * 让 `legacyUserDataCandidates()` 命中那个假原版目录：把它的候选硬塞给 copySecrets 不方便，
+   * 因此这里直接验证「重加密」这一段的行为——copySecrets 已在 importer-config 里用同一对
+   * `decryptAsLegacy` + `setSecret`，中间逻辑由 ⑥ 的源码断言守住。
+   */
+  const plain = dec.ok ? dec.plaintexts[0] : null
+  if (plain) {
+    const wrote = await SEC.setSecret('rekey-probe', plain)
+    eq('A：重加密后写入成功', wrote.ok, true)
+    const read = await SEC.readSecret('rekey-probe')
+    eq('A：写入后 readSecret 返回 ok（说明新密文能被本应用解开）', read.kind, 'ok')
+    if (read.kind === 'ok') eq('A：读回来就是原明文', read.value, 'sk-legacy-alpha-1111')
+    await SEC.deleteSecret('rekey-probe')
+  } else {
+    fail('A：拿不到明文，无法验证写入链路', '')
+  }
+
+  // ── ⑦ V1/V2 端到端：走真实 copySecrets，源里是原版密文 ──
+  /*
+   * 这是用户实际路径：`~/.deva/secrets.json`（原版密文）→ copySecrets → 目标能用。
+   *
+   * 要让 `legacyUserDataCandidates()` 命中假原版目录，得把它放到 `app.getPath('appData')` 下
+   * 的 `@deva/desktop`（真实原版用的正是这个名字）。测试进程的 appData 是 QA 临时目录，
+   * 所以**不会碰到用户真实数据**。
+   */
+  {
+    const CFG = await import('../../apps/desktop/src/main/services/config')
+    const IC = await import('../../apps/desktop/src/main/importer-config')
+    const electronApp = require('electron').app as { getPath: (n: string) => string }
+    const probeLegacy = path.join(electronApp.getPath('appData'), '@deva', 'desktop')
+    fs.mkdirSync(probeLegacy, { recursive: true })
+    fs.cpSync(legacyUd, probeLegacy, { recursive: true })
+    check(
+      'V1 前置：假原版目录已就位（appData/@deva/desktop 有 Local State）',
+      fs.existsSync(path.join(probeLegacy, 'Local State')),
+      probeLegacy
+    )
+    info('V1 前置：候选原版目录', JSON.stringify(R.legacyUserDataCandidates()))
+    info('V1 前置：appData', electronApp.getPath('appData'))
+    info('V1 前置：env.APPDATA', String(process.env.APPDATA))
+    /*
+     * 关键：必须显式传 electronPath。`decryptAsLegacy` 默认用 `process.execPath`，而 QA 进程跑在
+     * **node** 下（不是 Electron），`process.execPath` 是 node.exe —— helper 里 `require('electron')`
+     * 拿到 undefined，崩在 `app.setPath`。生产环境里 process.execPath 就是 Electron 二进制，无需传。
+     */
+    info(
+      'V1 前置：真解密一次',
+      JSON.stringify(await R.decryptAsLegacy([legacy.alpha], { execPath: electron }))
+    )
+
+    const srcHome = path.join(DST, 'src-home')
+    fs.mkdirSync(srcHome, { recursive: true })
+    fs.writeFileSync(
+      path.join(srcHome, 'secrets.json'),
+      JSON.stringify({ magpie: legacy.alpha, 'mcp:srv1:token': legacy.beta })
+    )
+    // 目标 config 要有 magpie 这个 provider、mcp.json 要有 srv1，否则都被判「无主密文」
+    const cur = CFG.getConfig() as { models?: Record<string, unknown> }
+    CFG.setConfig({
+      models: {
+        ...(cur.models ?? {}),
+        providers: [
+          ...((cur.models?.providers as Array<{ id?: string }>) ?? []).filter((p) => p?.id !== 'magpie'),
+          { id: 'magpie', name: 'magpie', apiHost: 'http://127.0.0.1:1', models: [], enabled: true }
+        ]
+      }
+    })
+    fs.writeFileSync(
+      path.join(process.env.DEVA_HOME ?? DST, 'mcp.json'),
+      JSON.stringify({ mcpServers: { srv1: { command: 'node' } } })
+    )
+
+    /*
+     * 预置「解不开的坏密文」模拟用户上次导入的残留。
+     *
+     * 走模块自己的 API（`importEncryptedSecret`）而不是直接改盘：`secrets` 模块把 store 缓存在内存里，
+     * 直接改盘后 `readSecret` 仍读内存态——测试会假绿（以为目标里是坏的，其实缓存是好的）。
+     */
+    await SEC.deleteSecret('magpie')
+    /*
+     * 「解不开的坏密文」用桩的 `v10-foreign:` 标记表示（真机上是 v10+AES 密文、密钥来自另一个
+     * userData）。为什么不用真 v10 密文：**QA 进程里的 safeStorage 是桩**（见 stub-electron.cjs），
+     * 它对真 v10 密文会原样返回、于是 `readSecret` 报 `ok` 而值是垃圾——前置断言会假绿。
+     * 真 Electron 那条链路由本场景前面的 `decryptAsLegacy` 断言单独覆盖。
+     */
+    const badCipher = Buffer.from('v10-foreign:' + 'x'.repeat(30), 'utf8').toString('base64')
+    const seeded = await SEC.importEncryptedSecret('magpie', badCipher)
+    info('V2 前置：植入坏密文', JSON.stringify(seeded))
+    const before = await SEC.readSecret('magpie')
+    eq('V2 前置：目标里 magpie 确实解不开', before.kind, 'unreadable')
+
+    const stat = await IC.copySecrets(srcHome)
+    info(
+      'V1/V2 copySecrets 报告',
+      JSON.stringify({
+        copied: stat.copied,
+        skipped: stat.skipped,
+        ignored: stat.ignored,
+        unrecoverable: stat.unrecoverable,
+        rekeyed: stat.rekeyed
+      })
+    )
+
+    const afterMagpie = await SEC.readSecret('magpie')
+    eq('V1：导入后 magpie 可用（readSecret → ok，不是 unreadable）', afterMagpie.kind, 'ok')
+    if (afterMagpie.kind === 'ok')
+      eq('V1：读回来就是原版里那把密钥', afterMagpie.value, 'sk-legacy-alpha-1111')
+
+    const afterMcp = await SEC.readSecret('mcp:srv1:token')
+    eq('V1：MCP 密钥同样重加密成功（readSecret → ok）', afterMcp.kind, 'ok')
+    if (afterMcp.kind === 'ok') eq('V1：MCP 密钥内容正确', afterMcp.value, 'sk-legacy-beta-2222')
+
+    check(
+      'V2：上次导入的坏密文被覆盖修好（计入 rekeyed）——这是用户自己唯一能修好的路径',
+      (stat.rekeyed ?? []).includes('magpie'),
+      JSON.stringify(stat.rekeyed)
+    )
+    eq('V2：修好的那条不再算「解不开」', stat.unrecoverable.includes('magpie'), false)
+  }
+
+  // ── ⑧ V3/V4：解不开时降级，绝不把坏密文写进目标 ──
+  const badCipherForV3 = Buffer.from('v10-foreign:' + 'y'.repeat(30), 'utf8').toString('base64')
+  {
+    const IC = await import('../../apps/desktop/src/main/importer-config')
+    const srcHome2 = path.join(DST, 'src-home2')
+    fs.mkdirSync(srcHome2, { recursive: true })
+    // 一段「本应用与原版都解不开」的密文（v10 头 + 垃圾）
+    // 同上：格式合法但密钥不对的密文
+    const orphan = badCipherForV3
+    fs.writeFileSync(path.join(srcHome2, 'secrets.json'), JSON.stringify({ magpie: orphan }))
+    await SEC.deleteSecret('magpie')
+
+    const stat2 = await IC.copySecrets(srcHome2)
+    info(
+      'V3 copySecrets 报告',
+      JSON.stringify({
+        copied: stat2.copied,
+        unrecoverable: stat2.unrecoverable,
+        reasons: (stat2.failed ?? []).map((f) => f.reason)
+      })
+    )
+    check(
+      'V3：解不开的密钥单列 unrecoverable（不静默、也不算作已导入）',
+      stat2.unrecoverable.includes('magpie'),
+      JSON.stringify(stat2.unrecoverable)
+    )
+    eq('V3：没有把解不开的密文当成「复制成功」', stat2.copied.includes('magpie'), false)
+    /*
+     * **不能**同时记进 `failed`：那会把整次导入标成 `report.ok = false`，界面说「导入失败」，
+     * 而实际只是有 N 条密钥要用户重填（别的都进来了）。`unrecoverable` 单列正是为此。
+     */
+    check(
+      'V3：不进 failed（否则整次导入被标成失败，而实际只是要用户重填）',
+      !(stat2.failed ?? []).some((f) => f.id === 'magpie'),
+      JSON.stringify(stat2.failed)
+    )
+    const stillBroken = await SEC.readSecret('magpie')
+    eq('V3：目标里没有留下垃圾密文（仍是 absent）', stillBroken.kind, 'absent')
+  }
+
+  // ── ⑨ 结构性：copySecrets 真的走「解密 → 重加密」，不是直接复制密文 ──
+  {
+    const src = fs.readFileSync(
+      path.join(process.cwd(), 'apps/desktop/src/main/importer-config.ts'),
+      'utf8'
+    )
+    check(
+      'A：copySecrets 调 decryptAsLegacy（否则就是把原版密文直接搬过去）',
+      /decryptAsLegacy\(/.test(src),
+      '看 importer-config.ts'
+    )
+    check(
+      'A：写的是重加密后的明文（setSecret），不是原密文（importEncryptedSecret）',
+      /setSecret\(key, plain\)/.test(src) && !/importEncryptedSecret\(key, value\)/.test(src),
+      '看 importer-config.ts'
+    )
+    check(
+      'B：解不开的单列 unrecoverable（不与 skipped/failed 混在一起）',
+      /stat\.unrecoverable\.push\(key\)/.test(src),
+      '看 importer-config.ts'
+    )
+    check(
+      'A：目标已有坏密文时会被覆盖并计入 rekeyed',
+      /existedBroken/.test(src) && /stat\.rekeyed\.push\(key\)/.test(src),
+      '看 importer-config.ts'
+    )
+  }
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -3749,6 +4094,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtsweep: scenarioWorktreeSweep,
   worktree: scenarioWorktree,
   insatt: scenarioInsertAttachments,
+  rekey: scenarioSecretRekey,
   wtlock: scenarioWorktreeLock,
   locks: scenarioLocks,
   nosource: scenarioNoSource,

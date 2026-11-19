@@ -16,11 +16,13 @@ const DIST = path.join(QA, 'dist')
 const STUB = path.join(QA, 'stub-electron.cjs')
 const REAL_HOME = path.join(os.homedir(), '.deva')
 const TMP_ROOT = path.join(os.tmpdir(), 'deva-qa')
+/** 仓库里的 Electron 二进制：密钥重加密的 helper 必须以它为可执行文件（见 secret-rekey.ts）。 */
+const ELECTRON_BIN = path.join(REPO, 'node_modules', 'electron', 'dist', 'electron.exe')
 
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
 /**
  * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
@@ -94,7 +96,21 @@ function runOne(name) {
       DEVA_HOME: dst,
       QA_REAL: REAL_HOME,
       QA_SEEDED: SEEDED ? '1' : '0',
-      QA_SCRATCH: scratch
+      QA_SCRATCH: scratch,
+      /*
+       * rekey 场景要起一个**真的 Electron**子进程去解原版密文（`safeStorage` 在 QA 里是桩，
+       * 造不出真 v10 密文）。但 QA 进程自己跑在 node 下，`process.execPath` 是 node.exe，
+       * 所以显式把仓库里的 Electron 二进制传下去。
+       */
+      /*
+       * 密钥导入要起**真的 Electron** 子进程去解原版密文（`safeStorage` 在 QA 里是桩，造不出真 v10
+       * 密文；而跨应用重加密这条链路本来就依赖真 Electron）。所有场景都传：`full` 拿真实 ~/.deva
+       * 当源时，里面正是原版密文，传了才是真机路径的验证；没传则一律落 unrecoverable。
+       *
+       * 只在二进制存在时传：CI / 未装 electron 依赖时退化成「起不来 → 降级」，断言会如实反映，
+       * 而不是让 spawn 抛一个和产品逻辑无关的 ENOENT。
+       */
+      ...(fs.existsSync(ELECTRON_BIN) ? { DEVA_ELECTRON_BIN: ELECTRON_BIN } : {})
     }
     const label = SEEDED && name === 'full' ? 'full(seeded)' : name
     const child = spawn(process.execPath, [path.join(DIST, 'test.cjs'), spec.scenario], {

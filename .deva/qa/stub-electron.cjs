@@ -66,7 +66,16 @@ const safeStorage = {
     if (process.env.TEST_DECRYPT_FAILS === '1') {
       throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString.')
     }
-    return b.toString('utf8').replace(/^enc:/, '')
+    const raw = b.toString('utf8')
+    /*
+     * 桩的「跨应用密文」标记：真机上是 v10+AES 密文（本应用解不开），桩里造不出真 DPAPI，
+     * 就用这个前缀表示「格式合法但密钥不对」。用于验证「导入时重加密」与「坏残留被覆盖修好」
+     * —— 真 Electron 那条链路由 QA 的 rekey 场景用真二进制单独验证。
+     */
+    if (raw.startsWith('v10-foreign:')) {
+      throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString.')
+    }
+    return raw.replace(/^enc:/, '')
   }
 }
 
