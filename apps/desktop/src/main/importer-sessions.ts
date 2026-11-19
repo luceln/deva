@@ -2,14 +2,27 @@ import { copyFileSync, mkdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { backupBroken, inspectTarget } from './importer-target'
-import { readSourceDir, SOURCE_DIR_UNREADABLE, writeFailureReason } from './importer-source-dir'
+import { decideExisting, type ExistingDecision } from './importer-session-merge'
+import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, writeFailureReason } from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
 /**
  * 导入第 ⑥ 步：会话（`data/chats/`）。
  *
- * 按 `safeId(id)` 判目标是否已有同名文件，有就跳过。**不用 mtime 判增量**：mtime 会带来「原版删了哪些要不要跟着删」
- * 的传播问题，而本需求是一次性导入——按 id 判存在即天然幂等，原版之后删不删都与这里无关。
+ * ## 这是一次「可重复同步」，不是一次性拷贝
+ *
+ * 目标已有同名会话时**不再一律跳过**：用户第一次导入之后继续在原版聊的内容，必须能再同步过来
+ * （否则「跳过 28」里那些会话永远停在第一次导入时的样子）。判定见 `importer-session-merge.ts`：
+ *
+ *  - 目标不存在 → 复制，进 `copied`；
+ *  - 源是目标内容的**严格超集**（目标的每条消息都能在源开头按序找到，且源更长）→ 覆盖，进 `updated`；
+ *  - 其余（内容相同 / 本地聊过 / 两边分叉）→ 保留目标那份，进 `skipped`。
+ *
+ * **判据不看时间**（mtime 会被 `utimesSync` 改写；`updatedAt` 两边都会更新，分叉时拿它必丢一边），
+ * 而是看「目标的内容是不是源的前缀」——只有那样覆盖才不丢任何东西。详见那个文件的文件头。
+ *
+ * ⚠️ **只增不减**：源里没有、目标里有的会话**绝不删除**。原版删了不传播——用户在本应用里留下的
+ * 东西不因为他清理了原版就消失。
  *
  * ⚠️ **成对搬**：主对话的 `members[].sessionId` 与成员会话的 `parentId` 是双向引用。只搬一边，成员卡片点开空白。
  * 所以扫描时把「parentId 非空」的成员会话与其父一起纳入本批；反过来父文件里的 members 也已随父文件整体复制过去。
@@ -40,10 +53,13 @@ function safeId(id: string): string {
 }
 
 /** 把原版会话搬进 DevaPlus，返回复制的会话 id、拆分文件与失败清单。 */
-export function importSessions(srcHome: string): StepStat & { compacted: string[]; failed: Failure[] } {
-  const stat: StepStat & { compacted: string[]; failed: Failure[] } = {
+export function importSessions(
+  srcHome: string
+): StepStat & { updated: string[]; compacted: string[]; failed: Failure[] } {
+  const stat: StepStat & { updated: string[]; compacted: string[]; failed: Failure[] } = {
     copied: [],
     skipped: [],
+    updated: [],
     failed: [],
     compacted: []
   }
@@ -94,8 +110,26 @@ export function importSessions(srcHome: string): StepStat & { compacted: string[
        */
       const state = targetState(to)
       if (state === 'session') {
-        // 目标已是一份有效会话：跳过（幂等），但仍要检查 compacted（首次导入可能复制中断过）
-        stat.skipped.push(id)
+        /*
+         * 目标已是一份有效会话。**不再无条件跳过**：原版那次导入之后继续聊的内容，就再也不会过来了
+         * （用户看到的「跳过 28」里，有一部分正是这种）。
+         *
+         * 但也不能「源比目标新就覆盖」——那会在用户于本应用里聊过之后，把他这边的对话删掉。
+         * 判据见 importer-session-merge.ts：只有「目标的每条消息都能在源开头按序找到、且源更长」时
+         * 才覆盖，此时目标里的内容一条都不会丢。其余一律保留本应用这份。
+         */
+        const decision = decideExistingByFile(from, to)
+        if (decision === 'source-newer') {
+          copyFileSync(from, to)
+          stat.updated.push(id)
+        } else if (decision === 'read-failed') {
+          // 源或目标此刻读不出来：不知道内容关系，**绝不覆盖**（读失败不代表源更新）
+          stat.failed.push({ step: 'sessions', id, reason: SOURCE_FILE_UNREADABLE })
+          continue
+        } else {
+          // same / target-diverged / both-diverged：都保留目标那份
+          stat.skipped.push(id)
+        }
       } else if (state === 'blocked') {
         stat.failed.push({ step: 'sessions', id, reason: 'target-blocked' })
         continue
@@ -128,6 +162,24 @@ export function importSessions(srcHome: string): StepStat & { compacted: string[
     copyCompacted(srcDir, dstDir, safe, stat, names)
   }
   return stat
+}
+
+/**
+ * 读两个会话文件，判目标那份要不要被源覆盖。
+ *
+ * 读失败单独返回 `read-failed` 而不是塞进某个「不覆盖」的结论：读不出来**不说明源更新**，
+ * 也不说明目标有本地内容——只是「不知道」。当作「跳过」会让报告看起来一切正常，
+ * 而这个会话实际没同步；记进失败清单，用户才知道有一条没过。
+ */
+function decideExistingByFile(from: string, to: string): ExistingDecision | 'read-failed' {
+  try {
+    return decideExisting(
+      JSON.parse(readFileSync(to, 'utf8')) as { messages?: unknown },
+      JSON.parse(readFileSync(from, 'utf8')) as { messages?: unknown }
+    )
+  } catch {
+    return 'read-failed'
+  }
 }
 
 /**
