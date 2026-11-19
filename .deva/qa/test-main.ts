@@ -4477,6 +4477,481 @@ async function scenarioPluginManaged(): Promise<void> {
   }
 }
 
+/**
+ * 会话增量同步：已有的会话什么时候该被源覆盖。
+ *
+ * 分两层：
+ *  ① `decideExisting` 的四结论单测（纯函数，不碰盘）——把「判据」本身钉住；
+ *  ② 真实 `importSessions` 的三种落盘结果（源是超集 / 本地聊过 / 分叉）——把「判据怎么用」钉住。
+ *
+ * 场景的重点是**不能丢用户在本应用里聊的内容**，所以每条「不覆盖」的断言都同时查目标文件**字节未变**。
+ */
+async function scenarioSessionSync(): Promise<void> {
+  const { decideExisting } = await import('../../apps/desktop/src/main/importer-session-merge')
+  const srcHome = path.join(DST, 'ssync-src')
+  const srcChats = path.join(srcHome, 'data', 'chats')
+  fs.mkdirSync(srcChats, { recursive: true })
+  const dstChats = path.join(getDevaHome(), 'data', 'chats')
+  fs.mkdirSync(dstChats, { recursive: true })
+
+  const msg = (role: string, content: unknown): { role: string; content: unknown } => ({ role, content })
+
+  // ── ① decideExisting 四种结论 ──
+  {
+    const a = msg('user', '你好')
+    const b = msg('assistant', '在的')
+    const c = msg('user', '第三句')
+
+    eq('单测：内容相同 → same', decideExisting({ messages: [a, b] }, { messages: [a, b] }), 'same')
+    eq(
+      '单测：源多一条且目标是其前缀 → source-newer',
+      decideExisting({ messages: [a, b] }, { messages: [a, b, c] }),
+      'source-newer'
+    )
+    eq(
+      '单测：目标多一条（本地聊过）→ target-diverged',
+      decideExisting({ messages: [a, b, c] }, { messages: [a, b] }),
+      'target-diverged'
+    )
+    eq(
+      '单测：开头就不同 → both-diverged',
+      decideExisting({ messages: [msg('user', 'X')] }, { messages: [msg('user', 'Y')] }),
+      'both-diverged'
+    )
+    /*
+     * 中途分叉：前两条一样、第 3 条不同，且两边后面还有内容。
+     * 这是「不能靠长度判」的关键样例——长度可能恰好相同，但内容已经分叉。
+     */
+    eq(
+      '单测：第 3 条不同（两边都有后续）→ both-diverged',
+      decideExisting(
+        { messages: [a, b, msg('user', '本应用的第3条'), msg('user', '第4条')] },
+        { messages: [a, b, msg('user', '原版的第3条'), msg('user', '第4条')] }
+      ),
+      'both-diverged'
+    )
+    eq('单测：两边都空 → same', decideExisting({ messages: [] }, { messages: [] }), 'same')
+    eq('单测：源的 messages 不是数组时按空', decideExisting({ messages: [] }, {}), 'same')
+    eq(
+      '单测：目标空、源有内容 → source-newer（首次导入后原版继续聊）',
+      decideExisting({ messages: [] }, { messages: [a] }),
+      'source-newer'
+    )
+
+    // 多模态 content 是数组：必须按结构比，不能被 JSON.stringify 的顺序差异搞错
+    const multi1 = msg('user', [{ type: 'text', text: '看图' }, { type: 'image', path: 'a.png' }])
+    const multi2 = msg('user', [{ type: 'text', text: '看图' }, { type: 'image', path: 'a.png' }])
+    eq(
+      '单测：多模态数组内容相同 → same',
+      decideExisting({ messages: [multi1] }, { messages: [multi2] }),
+      'same'
+    )
+    eq(
+      '单测：多模态数组只差一张图 → both-diverged',
+      decideExisting(
+        { messages: [multi1] },
+        { messages: [msg('user', [{ type: 'text', text: '看图' }, { type: 'image', path: 'b.png' }])] }
+      ),
+      'both-diverged'
+    )
+    // role 不同、content 相同也算不同条
+    eq(
+      '单测：role 不同视作不同消息',
+      decideExisting({ messages: [msg('user', 'x')] }, { messages: [msg('assistant', 'x')] }),
+      'both-diverged'
+    )
+  }
+
+  // ── ② 真实落盘：源是超集 → updated，且目标内容变成源那份 ──
+  const S = (id: string, messages: unknown[]): string =>
+    JSON.stringify({ id, title: id, createdAt: 1, updatedAt: 1, messages })
+  const cases: Array<{ id: string; dst: unknown[]; src: unknown[]; want: 'updated' | 'skipped'; why: string }> = [
+    {
+      id: 'sess_superset',
+      dst: [msg('user', '第一句'), msg('assistant', '回应一')],
+      src: [msg('user', '第一句'), msg('assistant', '回应一'), msg('user', '原版后加的'), msg('assistant', '回应二')],
+      want: 'updated',
+      why: '源是本应用内容的超集'
+    },
+    {
+      id: 'sess_local',
+      dst: [msg('user', '第一句'), msg('assistant', '本应用后加的')],
+      src: [msg('user', '第一句')],
+      want: 'skipped',
+      why: '本地聊过（目标更长）'
+    },
+    {
+      id: 'sess_forked',
+      dst: [msg('user', '共同的第一句'), msg('assistant', '本应用的分支')],
+      src: [msg('user', '共同的第一句'), msg('assistant', '原版的分支')],
+      want: 'skipped',
+      why: '两边从第 2 条起分叉'
+    }
+  ]
+  const before = new Map<string, string>()
+  for (const c of cases) {
+    fs.writeFileSync(path.join(srcChats, `${c.id}.json`), S(c.id, c.src))
+    const dstFile = path.join(dstChats, `${c.id}.json`)
+    fs.writeFileSync(dstFile, S(c.id, c.dst))
+    before.set(c.id, fs.readFileSync(dstFile, 'utf8'))
+  }
+
+  const stat = importSessions(srcHome)
+  info('会话增量结果', JSON.stringify({ updated: stat.updated, skipped: stat.skipped, copied: stat.copied, failed: stat.failed }))
+
+  for (const c of cases) {
+    const dstFile = path.join(dstChats, `${c.id}.json`)
+    const now = fs.readFileSync(dstFile, 'utf8')
+    if (c.want === 'updated') {
+      check(`落盘：${c.why} → 进 updated`, stat.updated.includes(c.id), JSON.stringify(stat.updated))
+      eq(
+        `落盘：${c.id} 的目标内容确实换成了源那份`,
+        (JSON.parse(now) as { messages: unknown[] }).messages.length,
+        c.src.length
+      )
+      check(`落盘：${c.id} 不在 skipped 里`, !stat.skipped.includes(c.id), JSON.stringify(stat.skipped))
+    } else {
+      check(`落盘：${c.why} → 进 skipped`, stat.skipped.includes(c.id), JSON.stringify(stat.skipped))
+      /*
+       * 这条是「不丢用户数据」的核心断言：**字节级**确认目标文件没被碰过。
+       * 只比 messages 长度不够——覆盖后再写回去长度也可能一样，字节比才能证明真的没写。
+       */
+      eq(`落盘：${c.id} 的目标文件字节未变（用户内容没被覆盖）`, now === before.get(c.id), true)
+      check(`落盘：${c.id} 不在 updated 里`, !stat.updated.includes(c.id), JSON.stringify(stat.updated))
+    }
+  }
+
+  // ── ③ 只增不减：源里删掉的会话，目标那份必须留着 ──
+  {
+    const orphan = path.join(dstChats, 'sess_only_local.json')
+    fs.writeFileSync(orphan, S('sess_only_local', [msg('user', '只在本应用有')]))
+    const st = importSessions(srcHome)
+    info('只增不减', JSON.stringify({ updated: st.updated, skipped: st.skipped }))
+    check('只增不减：源里没有、目标里有的会话**不被删除**', fs.existsSync(orphan), orphan)
+    eq(
+      '只增不减：也没被算进任何桶（它不是这次导入的对象）',
+      st.copied.includes('sess_only_local') ||
+        st.skipped.includes('sess_only_local') ||
+        st.updated.includes('sess_only_local'),
+      false
+    )
+  }
+
+  // ── ④ 幂等：同一份源连着导入两次，第二次不该再 updated ──
+  {
+    const st2 = importSessions(srcHome)
+    info('第二次导入', JSON.stringify({ updated: st2.updated, skipped: st2.skipped }))
+    check(
+      '幂等：超集那条第一次已覆盖，第二次不再进 updated',
+      !st2.updated.includes('sess_superset'),
+      JSON.stringify(st2.updated)
+    )
+    check(
+      '幂等：三条都已存在，全部进 skipped',
+      ['sess_superset', 'sess_local', 'sess_forked'].every((id) => st2.skipped.includes(id)),
+      JSON.stringify(st2.skipped)
+    )
+  }
+}
+
+/**
+ * 「一键整理记忆」（`memory:condense`）：纯压缩，不新增内容。
+ *
+ * 用**真实 HTTP 服务**当模型，而不是 mock：`ask` 走的是 `streamChat` → adapter → fetch 这条整链路，
+ * mock 掉 `streamChat` 就只能验「我们怎么处理返回」，验不到「密钥怎么被用、请求发去哪」。
+ * 服务只需按 OpenAI 的 SSE 形状回一段 JSON。
+ *
+ * 覆盖面：
+ *  - 成功压缩：字数变少、`changed` 数得对、`freedSpace` 为真、备份文件落了
+ *  - 模型原样返回（没压下去）：`freedSpace === false` —— 界面必须据此不说话「已腾出空间」
+ *  - 模型不可用：provider/model 不存在、被停用、**密钥解不开**（后者最容易被漏，因为它不在配置里）
+ *  - 空作用域：连模型都不该挑
+ *  - 失败**不修改**记忆：所有 `ok:false` 都要确认条目原样
+ */
+async function scenarioMemCondense(): Promise<void> {
+  const http = await import('http')
+  const { registerMemoryCondenseIpc } = await import(
+    '../../apps/desktop/src/main/services/memory-condense-ipc'
+  )
+  const { writeMemory, listMemories, GLOBAL_SCOPE, deleteMemory } = await import(
+    '../../apps/desktop/src/main/services/memory'
+  )
+  const SEC = await import('../../apps/desktop/src/main/services/secrets')
+  const T = require('./stub-electron.cjs')
+  registerMemoryCondenseIpc()
+  /*
+   * 让 `httpFetch` 走 Node 的 fetch：它默认用 Electron `session.fromPartition` 的请求池
+   * （Chromium 网络栈），QA 进程里没有那个运行时。产品代码本来就有这个开关（见 http.ts），
+   * 这里只是把它打开——不是为测试加分叉。
+   */
+  process.env.DEVA_HTTP = 'node'
+  info('DEVA_HTTP（运行时改已晚，只为记录）', String(process.env.DEVA_HTTP))
+
+  /*
+   * 调 IPC 处理器：`registerMemoryCondenseIpc()` 把它注册进 stub 的 map 里。
+   * 断言打到处理器本身（而不是直接调 condenseMemories），这样「IPC 有没有真注册、
+   * 参数怎么解」也在覆盖范围内——只测模块函数会漏掉接线错误。
+   */
+  const invokeCondense = async (root?: string): Promise<Record<string, unknown>> => {
+    const h = T.__test.ipcHandlers.get('memory:condense') as
+      | ((e: unknown, root?: string) => Promise<Record<string, unknown>>)
+      | undefined
+    if (!h) throw new Error('memory:condense 没有注册')
+    return h({}, root)
+  }
+
+  /** 记下每次请求的 URL，用来确认真的打到了我们期望的端点。 */
+  const seen: Array<{ url: string; head: string }> = []
+
+  /** 模型下一轮该回什么（每个用例改它）。 */
+  let replyJson = '{"entries":[]}'
+  const server = http.createServer((req, res) => {
+    // 吃掉请求体，否则 socket 不释放
+    req.on('data', () => {})
+    req.on('end', () => {
+      seen.push({ url: String(req.url), head: String(replyJson).slice(0, 60) })
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      /*
+       * OpenAI 的流式形状：每行 `data: {chunk}`，最后 `data: [DONE]`。
+       * 正文按 delta 分几块发，顺带验证拼接逻辑。
+       */
+      /*
+       * 整段一次发完，而不是切成多个 delta。
+       *
+       * `payload.slice` 可能把字符劈开（尤其 JSON 里的转义序列），造成内容乱码。
+       * 先确认链路本身通，再考虑要不要模拟分块。
+       */
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: replyJson } }] })}\n\n`)
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
+      res.write('data: [DONE]\n\n')
+      res.end()
+    })
+  })
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()))
+  const port = (server.address() as { port: number }).port
+  const baseURL = `http://127.0.0.1:${port}/v1`
+
+  /** 配一个 OpenAI adapter 的 provider + model，并把 activeModelId 指过去。 */
+  const useModel = (opts: { enabled?: boolean; modelEnabled?: boolean } = {}): void => {
+    setConfig({
+      models: {
+        activeModelId: 'qa-cond:qa-model',
+        providers: [
+          {
+            id: 'qa-cond',
+            name: 'QA 压缩专用',
+            kind: 'custom',
+            accent: '#888',
+            adapter: 'openai',
+            apiHost: baseURL,
+            enabled: opts.enabled !== false,
+            models: [{ id: 'qa-model', name: 'qa-model', enabled: opts.modelEnabled !== false }]
+          }
+        ]
+      }
+    })
+  }
+
+  try {
+    // ── ① 空作用域：连模型都不用挑 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      useModel()
+      const r = (await invokeCondense()) as { ok: boolean; code?: string }
+      eq('空作用域：返回 empty', r.code, 'empty')
+      eq('空作用域：不是 ok', r.ok, false)
+    }
+
+    // ── ② 模型不可用（三种原因各一条），且记忆一动不动 ──
+    {
+      for (let i = 0; i < 6; i++) writeMemory(`第${i}条-`.padEnd(120, 'x'), undefined, GLOBAL_SCOPE)
+      const n0 = listMemories(GLOBAL_SCOPE).length
+      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+
+      // (a) 没有默认模型
+      setConfig({ models: { activeModelId: '', providers: [] } })
+      let r = (await invokeCondense()) as { ok: boolean; code?: string; reason?: string }
+      eq('不可用(a)：没有默认模型 → model-unavailable', r.code, 'model-unavailable')
+      info('不可用(a) 文案', String(r.reason))
+
+      // (b) provider 被停用
+      useModel({ enabled: false })
+      r = (await invokeCondense()) as { ok: boolean; code?: string; reason?: string }
+      eq('不可用(b)：服务商停用 → model-unavailable', r.code, 'model-unavailable')
+      info('不可用(b) 文案', String(r.reason))
+
+      // (c) model 被停用（与 (b) 处置不同：一个去启用服务商、一个去启用模型）
+      useModel({ modelEnabled: false })
+      r = (await invokeCondense()) as { ok: boolean; code?: string; reason?: string }
+      eq('不可用(c)：模型停用 → model-unavailable', r.code, 'model-unavailable')
+      info('不可用(c) 文案', String(r.reason))
+
+      /*
+       * (d) 密钥解不开。这条最容易被漏——provider / model 都在、都启用，`resolveAvailability`
+       * 一路绿，只有 `readSecret` 才看得出问题。以前不判就会真的发请求、拿一个 401 回来，
+       * 用户看到的是「模型报错」而不是「你的密钥坏了」。
+       */
+      useModel()
+      process.env.TEST_DECRYPT_FAILS = '1'
+      await SEC.setSecret('qa-cond', 'sk-whatever')
+      r = (await invokeCondense()) as { ok: boolean; code?: string; reason?: string }
+      delete process.env.TEST_DECRYPT_FAILS
+      eq('不可用(d)：密钥解不开 → model-unavailable', r.code, 'model-unavailable')
+      info('不可用(d) 文案', String(r.reason))
+      check(
+        '不可用(d)：文案指向「重填密钥」而不是「换模型」',
+        /密钥/.test(String(r.reason)) && /重填|重新填/.test(String(r.reason)),
+        String(r.reason)
+      )
+
+      /*
+       * (e) 密钥真的没配（absent）→ **必须放行**（本地 Ollama 这类无钥服务靠它工作）。
+       *
+       * 放行就意味着真的会跑一次，所以这里让模型「原样返回」——否则它会真把记忆压掉，
+       * 紧接着的「没改记忆」断言就会红（这不是产品 bug，是这条用例不该改动数据）。
+       */
+      await SEC.deleteSecret('qa-cond')
+      replyJson = JSON.stringify({
+        entries: listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, content: e.content }))
+      })
+      r = (await invokeCondense()) as { ok: boolean; code?: string; freedSpace?: boolean }
+      eq('不可用(e)：密钥 absent 不拦（本地无钥模型要走得通）', r.code === 'model-unavailable', false)
+      eq('不可用(e)：确实跑进去了（ok=true）', r.ok, true)
+      eq('不可用(e)：模型原样返回 → 没腾出空间', r.freedSpace, false)
+
+      const used1 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      eq('不可用的几种都没改记忆（条数）', listMemories(GLOBAL_SCOPE).length, n0)
+      eq('不可用的几种都没改记忆（字数）', used1, used0)
+    }
+
+    // ── ③ 成功压缩 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      // 六条同主题的长条目：合并成两条，字数明显下降
+      const ids: string[] = []
+      for (let i = 0; i < 6; i++) {
+        const r = writeMemory(`同主题的第${i}条要点-`.padEnd(150, 'a'), undefined, GLOBAL_SCOPE)
+        if (r.ok) ids.push(r.entry.id)
+      }
+      const beforeEntries = listMemories(GLOBAL_SCOPE)
+      const usedBefore = beforeEntries.reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      eq('成功：先有 6 条', beforeEntries.length, 6)
+
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      replyJson = JSON.stringify({
+        entries: [
+          { id: beforeEntries[0].id, content: '同主题要点一（已合并前三条）' },
+          { id: beforeEntries[3].id, content: '同主题要点二（已合并后三条）' }
+        ]
+      })
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        before?: { count: number; used: number }
+        after?: { count: number; used: number }
+        freed?: number
+        changed?: number
+        freedSpace?: boolean
+        model?: string
+      }
+      info('成功压缩结果', JSON.stringify(r))
+      info('请求记录', JSON.stringify(seen))
+      {
+        const C = await import('../../apps/desktop/src/main/services/config')
+        const cfg = C.getConfig() as { models?: { activeModelId?: string; providers?: Array<{ id?: string; apiHost?: string; adapter?: string }> } }
+        info('当前 config 里那条 provider', JSON.stringify(cfg.models?.providers?.find((p) => p.id === 'qa-cond')))
+        info('activeModelId', String(cfg.models?.activeModelId))
+        const MR = await import('../../apps/desktop/src/main/services/model-resolve')
+        info('resolveDefaultModel', JSON.stringify(MR.resolveDefaultModel()))
+      }
+      eq('成功：ok=true', r.ok, true)
+      eq('成功：压缩前条数', r.before?.count, 6)
+      eq('成功：压缩后条数', r.after?.count, 2)
+      eq('成功：压缩前字数与实测一致', r.before?.used, usedBefore)
+      check('成功：字数确实变少', (r.freed ?? 0) > 0, `freed=${r.freed}`)
+      eq('成功：freedSpace 为真', r.freedSpace, true)
+      eq('成功：changed = 被改动/删除的旧条目数', r.changed, 6)
+      eq('成功：回带用的是哪个模型', r.model, 'qa-cond:qa-model')
+      eq('成功：盘上真的变成 2 条', listMemories(GLOBAL_SCOPE).length, 2)
+
+      // 备份必须落了（破坏性操作的前提）
+      const bakDir = path.join(DST, 'memory-backups')
+      check(
+        '成功：归纳前备份已落盘（破坏性操作必须可回溯）',
+        fs.existsSync(bakDir) && fs.readdirSync(bakDir).length > 0,
+        fs.existsSync(bakDir) ? fs.readdirSync(bakDir).join(',') : 'no dir'
+      )
+    }
+
+    // ── ④ 模型原样返回（没压下去）→ 必须如实说「没腾出空间」 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      const ids: string[] = []
+      for (let i = 0; i < 3; i++) {
+        const r = writeMemory(`原样条目${i}-`.padEnd(100, 'b'), undefined, GLOBAL_SCOPE)
+        if (r.ok) ids.push(r.entry.id)
+      }
+      const entries = listMemories(GLOBAL_SCOPE)
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      // 原样返回（同 id 同内容）
+      replyJson = JSON.stringify({ entries: entries.map((e) => ({ id: e.id, content: e.content })) })
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        freed?: number
+        changed?: number
+        freedSpace?: boolean
+      }
+      info('没压下结果', JSON.stringify(r))
+      eq('没压下：仍算 ok（跑通了）', r.ok, true)
+      eq('没压下：freedSpace=false（界面据此不能说「已腾出空间」）', r.freedSpace, false)
+      eq('没压下：changed=0', r.changed, 0)
+      check('没压下：freed <= 0', (r.freed ?? 0) <= 0, `freed=${r.freed}`)
+    }
+
+    // ── ⑤ 模型返回不可解析 → failed，且记忆不变 ──
+    {
+      const n0 = listMemories(GLOBAL_SCOPE).length
+      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      useModel()
+      replyJson = '这不是 JSON'
+      const r = (await invokeCondense()) as { ok: boolean; code?: string; reason?: string }
+      info('不可解析结果', JSON.stringify(r))
+      eq('不可解析：ok=false', r.ok, false)
+      eq('不可解析：code=failed', r.code, 'failed')
+      eq('不可解析：记忆条数没变', listMemories(GLOBAL_SCOPE).length, n0)
+      eq(
+        '不可解析：记忆字数没变',
+        listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0),
+        used0
+      )
+    }
+  } finally {
+    /*
+     * 关服务器这件事在 Windows 上有个坑：`close()` + 立刻 `process.exit()` 会撞上
+     * libuv 的断言 `!(handle->flags & UV_HANDLE_CLOSING)`（handle 还在关闭中就被强制退出，
+     * driver 那边看到 exit=3221226505，虽然断言全 PASS）。
+     *
+     * 所以：先 `closeAllConnections()` 断掉 node fetch 复用的 keep-alive 连接，再 `close`，
+     * 并**等回调**；最后把 handle `unref()`，让它不再阻止进程正常结束。三步都做完，
+     * 退出时就没有「正在关闭的 handle」了。
+     */
+    /*
+     * 关服务器：`unref()` 必须**先**做。
+     *
+     * 只 `close()` 不等回调就接着 `process.exit()` 会撞 libuv 的
+     * `!(handle->flags & UV_HANDLE_CLOSING)` 断言（handle 正在关闭就被强退）——
+     * 单独跑看不到，全量跑必现（前面的场景占过更多 handle，清理时机不同）。
+     * unref 之后这个 handle 不再阻止事件循环，退出时就不会有「正在关闭」的竞态。
+     */
+    server.unref()
+    server.closeAllConnections?.()
+    server.close()
+    // 给 libuv 一轮机会把 close 走完，避免和紧随其后的 process.exit 抢
+    await new Promise<void>((r) => setImmediate(r))
+  }
+}
+
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
   full: scenarioFull,
   sweep: scenarioSweep,
@@ -4509,6 +4984,8 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   insatt: scenarioInsertAttachments,
   rekey: scenarioSecretRekey,
   plugmgr: scenarioPluginManaged,
+  sessync: scenarioSessionSync,
+  memcond: scenarioMemCondense,
   dangclass: scenarioDanglingClassify,
   wtlock: scenarioWorktreeLock,
   locks: scenarioLocks,

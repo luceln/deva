@@ -343,6 +343,40 @@ export type MemoryErrorCode =
   | 'readFailed'
 export type MemoryIpcResult = { ok: true; snapshot: MemorySnapshot } | { ok: false; code: MemoryErrorCode }
 
+/**
+ * 「一键整理记忆」的结果（`memory:condense`）。
+ *
+ * ⚠️ 这是**破坏性操作**：会改 / 删用户的记忆条目。所以成功分支把「动了什么」全带出来——
+ * 界面必须如实显示，尤其是 `freedSpace === false` 时**不要说**「已腾出空间」。
+ *
+ * `ok: false` 的 `code`：
+ *  - `empty`：这个作用域还没有条目，没什么可整理；
+ *  - `model-unavailable`：没有可用的默认模型（不存在 / 被停用 / 密钥读不出来）。`reason` 已是一句
+ *    可直接显示的话，`detail` 是技术定位。这类**没有修改任何记忆**；
+ *  - `failed`：模型跑失败（网络 / 超时 / 返回不可解析 / 写盘失败）。同样没有修改记忆；
+ *  - `aborted`：被中止。
+ */
+export type MemoryCondenseResult =
+  | {
+      ok: true
+      before: { count: number; used: number }
+      after: { count: number; used: number }
+      /** 腾出多少字（负数表示反而变多）。 */
+      freed: number
+      /** 被改动或删除的旧条目数。 */
+      changed: number
+      /** 是否真的腾出了空间。`false` 时界面不能说「已腾出空间」。 */
+      freedSpace: boolean
+      /** 用哪个模型做的（`providerId:modelId`）。 */
+      model: string
+    }
+  | {
+      ok: false
+      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted'
+      reason: string
+      detail?: string
+    }
+
 /** Agent 提示词新建/更新入参（有 id 覆盖，无 id 新建）。 */
 export interface PersonaUpsertInput {
   id?: string
@@ -780,7 +814,14 @@ const api = {
     write: (content: string, id?: string, root?: string): Promise<MemoryIpcResult> =>
       ipcRenderer.invoke('memory:write', content, id, root),
     remove: (id: string, root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:delete', id, root),
-    clear: (root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', root)
+    clear: (root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', root),
+    /**
+     * 用当前默认模型把已有条目精简一遍腾空间，**不新增任何内容**。
+     *
+     * 破坏性（会改 / 删条目，归纳前自动备份）。模型不可用时**不会跑一半**——点下去就返回
+     * `code: 'model-unavailable'` 并说明原因。
+     */
+    condense: (root?: string): Promise<MemoryCondenseResult> => ipcRenderer.invoke('memory:condense', root)
   },
   /** Agent 提示词（全局 ~/.deva-plus/personas）：列出 / 读取 / 新建更新 / 删除 / 启停。 */
   personas: {

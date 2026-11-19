@@ -19,6 +19,7 @@ import { registerSkillsIpc, startSkillsWatcher } from './services/skills'
 import { ensureSeededPersonas, pinAutoAvatarShapes, pruneOrphanExtRoles, registerPersonasIpc } from './services/personas'
 import { registerProfileIpc } from './services/profile'
 import { registerMemoryIpc } from './services/memory'
+import { registerMemoryCondenseIpc } from './services/memory-condense-ipc'
 import {
   autoConnectEnabledServers,
   disconnectAllServers,
@@ -417,6 +418,7 @@ if (!app.requestSingleInstanceLock()) {
   registerPersonasIpc()
   registerProfileIpc()
   registerMemoryIpc()
+  registerMemoryCondenseIpc()
 
   // MCP 服务（全局 ~/.deva-plus/mcp.json；主进程内起真实客户端，工具命名空间化后并入 Agent 工具表，默认 ask 过闸）
   registerMcpIpc(() => mainWindow)

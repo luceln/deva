@@ -22,7 +22,7 @@ const ELECTRON_BIN = path.join(REPO, 'node_modules', 'electron', 'dist', 'electr
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'sessync', 'memcond', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
 /**
  * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
@@ -105,6 +105,14 @@ function runOne(name) {
       QA_REAL: REAL_HOME,
       QA_SEEDED: SEEDED ? '1' : '0',
       QA_SCRATCH: scratch,
+      /*
+       * 记忆压缩场景要真的发 HTTP（用本地服务当模型）。`http.ts` 默认走 Electron 的请求池
+       * （`session.fromPartition`，Chromium 网络栈），QA 进程里没有那个运行时。
+       * 产品代码本来就有这个开关，这里只是打开它——不是为测试加的分叉。
+       *
+       * 必须在**起进程时**设：`USE_NODE` 是模块顶层的 const，运行时再改环境变量已经晚了。
+       */
+      ...(name === 'memcond' ? { DEVA_HTTP: 'node' } : {}),
       /*
        * rekey 场景要起一个**真的 Electron**子进程去解原版密文（`safeStorage` 在 QA 里是桩，
        * 造不出真 v10 密文）。但 QA 进程自己跑在 node 下，`process.execPath` 是 node.exe，

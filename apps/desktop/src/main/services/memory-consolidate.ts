@@ -48,8 +48,52 @@ export interface ConsolidateStats {
 
 type ConsolidateResult = ({ ok: true } & ConsolidateStats) | { ok: false; reason: string }
 
-/** 同一份记忆文件同时只归纳一次：并发撞满的写入共用这一次的结果，之后各自重写。 */
-const inflight = new Map<string, Promise<ConsolidateResult>>()
+/**
+ * 一次「纯压缩」的结果——不带任何新增内容，只把现有条目精简。
+ *
+ * 与 `ConsolidateStats` 的区别：这个模式的用户目标是「腾出空间」，所以必须明确告知
+ * **到底腾出没有**，以及**动了几条**。只说「成功」是不够的——模型完全可能原样返回、
+ * 什么都没改，用户以为压过了，下次写入照样撞上限。
+ */
+export interface CondenseStats {
+  before: { count: number; used: number }
+  after: { count: number; used: number }
+  /** 字数减少了多少（负数表示反而变多，通常说明模型没按要求压）。 */
+  freed: number
+  /**
+   * 真的被改动 / 删除的旧条目数。
+   *
+   * 用来区分「压了」和「模型原样返回」：`freed > 0` 但 `changed === 0` 说明只是文字被微调，
+   * 条数没减；`changed === 0 && freed <= 0` 就是**什么都没做**，界面应该如实说「没腾出空间」。
+   */
+  changed: number
+  /** 是否真的腾出了空间（`freed > 0`）。 */
+  freedSpace: boolean
+  backup: string
+}
+
+/** 纯压缩可能失败的原因（界面按这个分流文案）。 */
+export type CondenseFailCode =
+  /** 该作用域一条记忆都没有，没有可压的。 */
+  | 'empty'
+  /** 模型不可用：provider / model 不存在、被停用，或密钥读不出来。`detail` 说明是哪一种。 */
+  | 'model-unavailable'
+  /** 模型跑失败（网络 / 超时 / 返回不可解析 / 写盘失败）。 */
+  | 'failed'
+  /** 调用方主动中止。 */
+  | 'aborted'
+
+export type CondenseResult =
+  | ({ ok: true } & CondenseStats)
+  | { ok: false; code: CondenseFailCode; reason: string }
+
+/**
+ * 同一份记忆文件同时只跑一次整理：并发撞满的写入共用这一次的结果，之后各自重写。
+ *
+ * 值是**两种结果类型的联合**：撞上限的写入走 `ConsolidateResult`，用户主动点的纯压缩走 `CondenseResult`。
+ * 谁在等就按谁的口径去读（纯压缩那边拿到别人的结果会重新读盘自己判，见 `condense`）。
+ */
+const inflight = new Map<string, Promise<ConsolidateResult | CondenseResult>>()
 
 /**
  * 写入一条记忆；撞上限时先归纳再写（model 为空 = 不能调模型，按原样拒写）。
@@ -71,6 +115,120 @@ export async function writeMemoryWithConsolidation(
   return { result: writeMemory(content, target, scope), consolidated: c }
 }
 
+/**
+ * **纯压缩**：不新增任何内容，只把现有条目精简一遍腾出空间。
+ *
+ * 与 `writeMemoryWithConsolidation` 那条路的区别：
+ *  - 那条是「写新条目撞上限 → 顺手整理 → 再写新的」，**必须**有 incoming，prompt 里会带上
+ *    「即将写入的新记忆」，规则第 3 条是「和新记忆重复的旧条目直接删」。拿它来做纯压缩会出问题——
+ *    没有新记忆却让模型「给新记忆腾空间」，它会倾向于多删。
+ *  - 这条是用户主动点按钮（导入报告里「一键整理」）。场景是「已经超限了，先把它压下去」，
+ *    因此 prompt 只说「精简」，不提「给谁腾空间」，也不引入任何新内容。
+ *
+ * ⚠️ **破坏性**：会改 / 删用户的记忆条目。所以：
+ *  - 归纳前照旧备份到 `memory-backups/`（保留最近 5 份），
+ *  - 返回值必须说清压缩前后字数、动了几条、有没有真的腾出空间——不能只说「成功」。
+ */
+export async function condenseMemories(
+  scope: MemoryScope,
+  model: CompactModelConfig,
+  signal?: AbortSignal
+): Promise<CondenseResult> {
+  const before = listMemories(scope)
+  if (before.length === 0) return { ok: false, code: 'empty', reason: '没有可整理的条目' }
+  return condense(scope, before, model, signal)
+}
+
+/** 与 `consolidate` 同一套「同文件同时只跑一次」的保护。 */
+function condense(
+  scope: MemoryScope,
+  before: MemoryEntry[],
+  model: CompactModelConfig,
+  signal?: AbortSignal
+): Promise<CondenseResult> {
+  const key = memoryPath(scope)
+  const running = inflight.get(key)
+  /*
+   * 已有归纳在跑（可能来自一次撞上限的写入）→ 等它，然后**按它的结果重新读一遍**再判断。
+   *
+   * 不能直接把它的 `ConsolidateResult` 当成本次结果返回：那条是「为写入新内容而整理」，
+   * 口径不同（它可能已经把新条目算进 after）。这里只借它的执行，结论自己算。
+   */
+  if (running) {
+    return running.then(() => {
+      const now = listMemories(scope)
+      if (now.length === 0) return { ok: false as const, code: 'empty' as const, reason: '没有可整理的条目' }
+      return runCondense(scope, now, model, signal)
+    })
+  }
+  const p = runCondense(scope, before, model, signal).finally(() => inflight.delete(key))
+  inflight.set(key, p as unknown as Promise<ConsolidateResult>)
+  return p
+}
+
+async function runCondense(
+  scope: MemoryScope,
+  before: MemoryEntry[],
+  model: CompactModelConfig,
+  signal?: AbortSignal
+): Promise<CondenseResult> {
+  const { system, user } = buildCondensePrompt(scope, before)
+  let reason = ''
+  let code: CondenseFailCode = 'failed'
+  for (let i = 0; i < ATTEMPTS; i++) {
+    if (signal?.aborted) return { ok: false, code: 'aborted', reason: '已中止' }
+    let text: string
+    try {
+      text = await ask(model, system, user, signal)
+    } catch (e) {
+      reason = (e as Error)?.message ?? String(e)
+      continue
+    }
+    const parsed = parseEntries(text, scope, before, '')
+    if (!parsed.ok) {
+      reason = parsed.reason
+      continue
+    }
+    /*
+     * 并进「跑的过程中又被写进来的条目」，与 consolidate 同口径：
+     * 归纳期间别的写入不能被我这次 replaceMemories 抹掉。
+     */
+    const after = mergeConcurrent(before, parsed.entries, listMemories(scope))
+    const backup = backupMemories(scope, listMemories(scope))
+    if (!replaceMemories(scope, after)) {
+      reason = '整理结果写入失败（磁盘不可写或空间不足）'
+      continue
+    }
+    const usedBefore = memoryUsage(before)
+    const usedAfter = memoryUsage(after)
+    return {
+      ok: true,
+      before: { count: before.length, used: usedBefore },
+      after: { count: after.length, used: usedAfter },
+      freed: usedBefore - usedAfter,
+      changed: countChanged(before, after),
+      freedSpace: usedAfter < usedBefore,
+      backup
+    }
+  }
+  return { ok: false, code, reason: reason || '整理没有产出可用结果' }
+}
+
+/**
+ * 有多少条旧条目被改动或删除。
+ *
+ * 判据是「同 id 的内容变了，或这个 id 在结果里没了」。合并会产生新 id（模型填 null 的条目），
+ * 那种情况在 `before` 里找不到对应，按「原条目消失」计——反正对用户来说它就是被改写掉了。
+ */
+function countChanged(before: MemoryEntry[], after: MemoryEntry[]): number {
+  const now = new Map(after.map((e) => [e.id, e.content]))
+  let n = 0
+  for (const e of before) {
+    if (!now.has(e.id) || now.get(e.id) !== e.content) n++
+  }
+  return n
+}
+
 function consolidate(
   scope: MemoryScope,
   incoming: string,
@@ -80,7 +238,14 @@ function consolidate(
 ): Promise<ConsolidateResult> {
   const key = memoryPath(scope)
   const running = inflight.get(key)
-  if (running) return running
+  if (running) {
+    /*
+     * 有人在跑（可能是用户点的纯压缩）。不能直接把它的结果当我的：那是 `CondenseResult` 口径
+     * （没算即将写入的新条目）。等它跑完，按它的结果**重新读盘**再走一遍自己的整理——
+     * 这样「撞上限的写入」与「手动压缩」同时发生时，两次整理串行、互不覆盖对方的结果。
+     */
+    return running.then(() => run(scope, incoming, replacing, model, signal))
+  }
   const p = run(scope, incoming, replacing, model, signal).finally(() => inflight.delete(key))
   inflight.set(key, p)
   return p
@@ -127,6 +292,44 @@ async function run(
     }
   }
   return { ok: false, reason: reason || '归纳没有产出可用结果' }
+}
+
+/**
+ * 纯压缩的提示词。
+ *
+ * 与 `buildPrompt` 的**关键区别**：不提「即将写入的新记忆」，规则里也没有「和新记忆重复的删掉」。
+ * 拿带 incoming 的那份来做纯压缩，模型会以为要给某条新内容腾位置而多删——这正是用户点这个按钮时
+ * 最不希望发生的事（他只想在保住信息的前提下精简）。
+ *
+ * 目标档位与自动归纳一致（上限的七成）：同一个作用域、同一套上限，没有理由两套标准。
+ */
+function buildCondensePrompt(scope: MemoryScope, entries: MemoryEntry[]): { system: string; user: string } {
+  const lim = memoryLimits(scope)
+  const targetChars = Math.floor(lim.budget * TARGET_RATIO)
+  const targetCount = Math.floor(lim.maxEntries * TARGET_RATIO)
+  const system = [
+    `你负责整理用户的长期${scopeLabel(scope)}。它已经写满（条数或总字数超限），需要在不丢失有用信息的前提下精简，腾出后续写入的空间。`,
+    '',
+    '规则：',
+    `1. 同一主题的多条合并成一条。每条一句话，不超过 ${lim.maxChars} 字。`,
+    '2. 前后矛盾的以更新日期较新的为准，删掉被取代的旧条目。',
+    '3. 删除一次性的任务细节、已经结束的进行中事项和明显过时的内容。',
+    '4. 用户纠正过的做法（「做法 + 原因」）和明确表达过的偏好优先保留，其中的原因不要删。',
+    '5. **不要为了压缩而删掉仍然有用的信息**。这次没有任何新内容要写进来，你的唯一目标是让同样的信息占更少空间。',
+    '6. 只能合并、精简、删除，不得编造原文没有的信息。「昨天」「上周」这类相对时间，按该条的更新日期换成具体日期。',
+    '7. 保持原条目的语言。',
+    `8. 结果总长不超过 ${targetChars} 字、不超过 ${targetCount} 条（每条按「- [id] 内容」一行计）。`,
+    '',
+    '只输出 JSON，不要任何其他文字：',
+    '{"entries":[{"id":"原条目 id 或 null","content":"…"}]}',
+    '保留或由旧条目改写、合并而来的条目，id 填它所来自的旧条目 id（合并时填其中更新日期最早的那条）；无法对应到旧条目的填 null。'
+  ].join('\n')
+  const day = (t: number): string => (t > 0 ? new Date(t).toISOString().slice(0, 10) : '日期不详')
+  const user = [
+    `当前${scopeLabel(scope)}（${entries.length} 条，${memoryUsage(entries)} 字，上限 ${lim.budget} 字 / ${lim.maxEntries} 条）：`,
+    ...entries.map((e) => `- [${e.id}]（更新于 ${day(e.updatedAt)}）${e.content}`)
+  ].join('\n')
+  return { system, user }
 }
 
 function buildPrompt(
