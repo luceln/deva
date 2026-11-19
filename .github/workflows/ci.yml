@@ -90,3 +90,10 @@ jobs:
       # applySizeUpdate 纯函数喂一条事件，断言快照里的 sizeBytes 真的变了（不只查字符串）。
       - name: 体积增量回填
         run: node .deva/qa/check-worktree-size.cjs
+
+      # 回合进行中插话要能带附件（用户报过「想截图给你看还不行」）：渲染层一旦又拿 `streaming`
+      # 把粘 / 选 / 拖挡住，或者插话时忘了把附件交给主进程，界面看起来一切正常，只是图没了。
+      # 前半段查源码形状，后半段 esbuild 驱动真实的 mergeDraftAttachments / toSendAttachments 跑数据。
+      # 「贴进去的图真的随插话交出去、失败时真的回到输入框」要浏览器，见 .deva/qa/insert-attach/。
+      - name: 插话带附件
+        run: node .deva/qa/check-insert-attachments.cjs

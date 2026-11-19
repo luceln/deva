@@ -492,20 +492,28 @@ interface ChatContextValue {
   removeMember: (sessionId: string, memberSessionId: string) => void
   /**
    * 回合进行中向当前会话插入一条消息：当前步骤结束后交给模型，来不及就在本轮结束后作为下一条发出。
-   * 回合恰好已经结束则改走普通发送。返回是否发出（false 时原因已 toast，调用方把文字放回输入框）。
+   * 回合恰好已经结束则改走普通发送。返回是否发出（false 时原因已 toast，调用方把文字与附件放回输入框）。
+   *
+   * `attachments` 与 send 同一套（绝对路径，正文由主进程读）：用户看到问题想立刻截个图指出来，
+   * 不可能等回合结束再发。
    */
-  insert: (text: string) => Promise<boolean>
+  insert: (text: string, attachments?: SendAttachment[]) => Promise<boolean>
   /** 当前会话待送达的插入消息（输入框上方的胶囊），按插入先后。 */
   pendingInserts: string[]
   /** 当前（主）对话里还有成员在做、等主角色汇总的派发组（对话末尾的「前端、后端已完成」提示）。 */
   memberProgress: MemberProgressGroup[]
-  /** 撤回当前会话全部待送达的插入消息，返回合并后的原文（已送达或没有则为空串）。 */
-  withdrawInserts: () => Promise<string>
   /**
-   * 订阅「插入消息被退回」（回合被停止或出错时还没送达）：(sessionId, 原文)。返回取消订阅函数。
-   * 由输入框所在的外壳把原文放回对应会话的输入框。
+   * 撤回当前会话全部待送达的插入消息，返回合并后的原文与附件路径（已送达或没有则原文为空串、附件为空数组）。
+   * 附件必须一起回：用户插话发的截图不能因为点「撤回」就凭空消失。
    */
-  onInsertsReturned: (cb: (sessionId: string, text: string) => void) => () => void
+  withdrawInserts: () => Promise<{ text: string; attachments: string[] }>
+  /**
+   * 订阅「插入消息被退回」（回合被停止或出错时还没送达）：(sessionId, 原文, 附件路径)。返回取消订阅函数。
+   * 由输入框所在的外壳把原文与附件放回对应会话的输入框。
+   */
+  onInsertsReturned: (
+    cb: (sessionId: string, text: string, attachments: string[]) => void
+  ) => () => void
 }
 
 /*
@@ -565,8 +573,12 @@ const ChatStateContext = createContext<ChatState | null>(null)
 const ChatStreamContext = createContext<ChatStream | null>(null)
 
 /** 各会话「插入消息被退回」的订阅者（见 onInsertsReturned）。 */
-const insertReturnListeners = new Set<(sessionId: string, text: string) => void>()
-function onInsertsReturned(cb: (sessionId: string, text: string) => void): () => void {
+const insertReturnListeners = new Set<
+  (sessionId: string, text: string, attachments: string[]) => void
+>()
+function onInsertsReturned(
+  cb: (sessionId: string, text: string, attachments: string[]) => void
+): () => void {
   insertReturnListeners.add(cb)
   return () => {
     insertReturnListeners.delete(cb)
@@ -1583,7 +1595,7 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
         return
       }
       if (ev.type === 'inserts_returned') {
-        for (const cb of insertReturnListeners) cb(sid, ev.text)
+        for (const cb of insertReturnListeners) cb(sid, ev.text, ev.attachments ?? [])
         return
       }
 
@@ -2101,10 +2113,12 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
     }
 
     // 回合进行中插入（见 ChatContextValue.insert）。模型只在来不及送达、改作下一轮发出时用作回落，解析同 send。
-    const insert = async (text: string): Promise<boolean> => {
+    const insert = async (text: string, attachments?: SendAttachment[]): Promise<boolean> => {
       const sid = sessionIdRef.current
       const body = text.trim()
-      if (!body) return false
+      const atts = attachments ?? []
+      // 只有附件、没有正文也允许插话：用户截了图想立刻指出来，不需要再打一行字。
+      if (!body && atts.length === 0) return false
       const ov = bindingsRef.current.get(sid)
       const meta = allSessions.find((s) => s.id === sid)
       const sessionModelRef = ov && ov.model !== undefined ? ov.model : meta?.model
@@ -2123,11 +2137,13 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
             providerId: model.provider.id,
             baseURL: model.provider.apiHost,
             model: model.model.id
-          }
+          },
+          // 与 send 同一套：传绝对路径，正文由主进程读取（base64 不经渲染层）。
+          attachments: atts.length ? atts.map((a) => a.path) : undefined
         })
         if (r.ok) return true
-        // 回合恰好已经结束：照常发出，开始新的一轮。
-        if (r.reason === 'idle') return send(body)
+        // 回合恰好已经结束：照常发出，开始新的一轮。附件一起带上，否则用户贴的图会凭空消失。
+        if (r.reason === 'idle') return send(body, atts)
         if (r.reason === 'busy') toast.show({ variant: 'warning', message: t('chat.insert.busy') })
         return false
       } catch (e) {
@@ -2136,11 +2152,11 @@ export function ChatProvider({ children }: { children: ReactNode }): React.JSX.E
       }
     }
 
-    const withdrawInserts = async (): Promise<string> => {
+    const withdrawInserts = async (): Promise<{ text: string; attachments: string[] }> => {
       try {
-        return (await window.deva.chat.withdrawInserts(sessionIdRef.current)).text
+        return await window.deva.chat.withdrawInserts(sessionIdRef.current)
       } catch {
-        return ''
+        return { text: '', attachments: [] }
       }
     }
 

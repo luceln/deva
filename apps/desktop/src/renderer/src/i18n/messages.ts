@@ -1526,6 +1526,8 @@ const zhCN: MessageTree = {
       placeholder: '补充或纠正，当前步骤结束后交给 {name}…',
       pending: '待插入',
       pendingHint: '当前步骤结束后送达',
+      // 附件与正文同路：让用户看出贴的图是随这条插话带进去的，而不是留在输入框等下一轮。
+      withAttachments: '{n} 个附件也会一起带进去',
       count: '{n} 条',
       withdraw: '撤回'
     },
@@ -3324,6 +3326,7 @@ const en: MessageTree = {
       placeholder: 'Add a note or correction — {name} gets it after the current step…',
       pending: 'Queued',
       pendingHint: 'Delivered after the current step',
+      withAttachments: '{n} attachments go with it',
       count: '{n} messages',
       withdraw: 'Withdraw'
     },

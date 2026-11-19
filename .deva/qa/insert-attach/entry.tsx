@@ -1,0 +1,54 @@
+import { createRoot } from 'react-dom/client'
+import { Composer } from 'E:/deva/apps/desktop/src/renderer/src/redesign/Composer'
+import { I18nProvider } from 'E:/deva/apps/desktop/src/renderer/src/i18n/i18n'
+import { ToastProvider } from 'E:/deva/apps/desktop/src/renderer/src/components/ToastProvider'
+
+let root = null
+let host = null
+
+/** 记录 onSend / onInsert 以外、外壳传下来的回调调用（这里是 onSend，插话走 store 的 insert 桩）。 */
+window.__sendCalls = []
+
+window.__mount = (props) => {
+  // 先卸掉上一份：多次挂载会叠出多个 .cf-composer，querySelector 命中的是旧那个，
+  // 断言就会看着旧 DOM 下判断（实测踩到过）。
+  if (root) {
+    root.unmount()
+    root = null
+  }
+  if (host) {
+    host.remove()
+    host = null
+  }
+  host = document.createElement('div')
+  host.style.cssText = 'position:fixed;left:40px;right:40px;bottom:40px'
+  document.body.appendChild(host)
+  root = createRoot(host)
+  const p = {
+    sessionId: 's1',
+    // 给一个最小角色：Composer 会读 owner.model / owner.name 等处，不给就是 undefined 崩。
+    owner: { id: 'p-general', name: '通用', avatar: { style: 'face', seed: 1 }, model: undefined },
+    mentionables: [],
+    streaming: false,
+    focusRoot: null,
+    onMount: () => undefined,
+    onSend: (text, attachments) => {
+      window.__sendCalls.push({ text, attachments })
+      return Promise.resolve(true)
+    },
+    onStop: () => undefined,
+    showJump: false,
+    onJump: () => undefined,
+    onRewind: () => false,
+    prefill: null,
+    onPrefillConsumed: () => undefined,
+    ...props
+  }
+  root.render(
+    <I18nProvider>
+      <ToastProvider>
+        <Composer {...p} />
+      </ToastProvider>
+    </I18nProvider>
+  )
+}

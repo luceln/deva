@@ -128,26 +128,93 @@ function subscribeDrafts(onChange: () => void): () => void {
  * 正在显示的输入框（随会话切换更新）：插入的消息被撤回或退回时，正是这个会话就直接放回输入框，否则并进那个
  * 会话的草稿（见 restoreToComposer）。
  */
-let liveComposer: { sessionId: string; restore: (text: string) => void } | null = null
+let liveComposer: {
+  sessionId: string
+  restore: (text: string, attachments?: string[]) => void
+} | null = null
 
 /**
- * 把文字放回某会话的输入框：排在已有内容之前，中间空一行。开头的引用放回引用条；引用条里已有引用时，
+ * 把文字（与附件）放回某会话的输入框：排在已有内容之前，中间空一行。开头的引用放回引用条；引用条里已有引用时，
  * 这段引用就留在文字里（不覆盖用户新放的引用）。
+ *
+ * 附件也一并放回（`attachments` 是绝对路径）：插话带的截图不能因为「回合结束了 / 队友点了撤回」就凭空消失——
+ * 用户贴那张图花的力气不比打字少，丢了只能重新截一次。
  */
-export function restoreToComposer(sessionId: string, text: string): void {
-  if (!text.trim()) return
+export function restoreToComposer(sessionId: string, text: string, attachments?: string[]): void {
+  const atts = attachments ?? []
+  // 只有附件、没有正文也要放回（用户可能只贴了图就插话）。
+  if (!text.trim() && atts.length === 0) return
   if (liveComposer?.sessionId === sessionId) {
-    liveComposer.restore(text)
+    liveComposer.restore(text, atts)
     return
   }
   const d = composerDrafts.get(sessionId)
-  const lq = d?.quote ? null : leadingQuote(text)
+  const lq = text.trim() && !d?.quote ? leadingQuote(text) : null
   const body = lq ? lq.rest : text
   setComposerDraft(sessionId, {
     text: d?.text.trim() ? (body ? `${body}\n\n${d.text}` : d.text) : body,
-    pending: d?.pending ?? [],
+    pending: mergeDraftAttachments(d?.pending ?? [], atts),
     quote: lq?.quote ?? d?.quote
   })
+}
+
+/**
+ * 用户添加过的附件描述，按绝对路径索引。
+ *
+ * 为什么要缓存：撤回 / 回合结束退回时，主进程只能给回**路径**（`withdraw-inserts` 的返回值与
+ * `inserts_returned` 事件都是 `string[]`），而输入框的附件条需要 `kind` / `size` / `supported`。
+ * 后三者的判定规则在主进程（`services/attachments.ts`），渲染层重算一遍必然漂移——某天主进程加了
+ * 一种新格式，这里就会把用户能发的文件标成不支持。故直接记住当初 `pickAttachments` /
+ * `pasteAttachment` 给的那份描述，原样还回去。
+ *
+ * 命中率：这些路径都来自本次 renderer 会话里用户自己加的附件，而待送达的插入消息只活在内存里，
+ * 所以撤回 / 退回时一定命中。查不到时的兜底见 `pickedOfPath`。
+ */
+const pickedByPath = new Map<string, Picked>()
+
+/**
+ * 把退回的附件并进草稿已有的附件里，按路径去重。
+ *
+ * 为什么去重：同一张图可能被贴两次（第一张还在草稿里、第二张随插话退回），
+ * 重复的 chip 没法分辨，用户删一个还剩一个，只会觉得「怎么还在」。
+ */
+export function mergeDraftAttachments(cur: Picked[], paths: string[]): Picked[] {
+  if (paths.length === 0) return cur
+  const seen = new Set(cur.map((c) => c.path))
+  const add = paths.filter((p) => !seen.has(p)).map(pickedOfPath)
+  return add.length ? [...cur, ...add] : cur
+}
+
+/**
+ * 待发附件描述 → 发送用的附件（`send` / `insert` 同一套）。
+ *
+ * `kind` 里的 `unsupported` 已被 `supported` 过滤掉，故收窄时断言成 `AttachKind`；
+ * 文件夹不报 `size`（它没有意义，主进程也不会为目录算体积）。两处（普通发送、插话）共用一份，
+ * 免得将来只改了一处、另一处漏了某个字段。
+ */
+export function toSendAttachments(picked: Picked[]): SendAttachment[] {
+  return picked.map((p) => ({
+    path: p.path,
+    name: p.name,
+    kind: p.kind as AttachKind,
+    ...(p.kind === 'folder' ? {} : { size: p.size })
+  }))
+}
+
+/**
+ * 路径 → 附件描述。优先用缓存里那份**原样**描述；查不到时按扩展名做最小兜底。
+ *
+ * 兜底为什么把 `supported` 判成 true：查不到说明这份描述不在本会话缓存里（理论上不该发生）。
+ * 此时宁可先放回输入框让用户看见、由主进程在发送时做最终判定（它才是权威），
+ * 也不要在这里按扩展名悄悄判成「不支持」把图丢掉——图丢了用户只能重新截。
+ */
+export function pickedOfPath(path: string): Picked {
+  const hit = pickedByPath.get(path)
+  if (hit) return hit
+  const name = path.split(/[\\/]/).filter(Boolean).pop() ?? path
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
+  const kind: Picked['kind'] = /^(png|jpe?g|gif|webp|bmp|svg)$/.test(ext) ? 'image' : 'file'
+  return { path, name, ext, size: 0, kind, supported: true }
 }
 
 /**
@@ -165,7 +232,8 @@ function InsertCapsule({ sessionId }: { sessionId: string }): React.JSX.Element 
   const withdraw = (): void => {
     setBusy(true)
     void withdrawInserts()
-      .then((back) => restoreToComposer(sessionId, back))
+      // 附件一起放回：插话发的截图不能因为点了「撤回」就消失。
+      .then((back) => restoreToComposer(sessionId, back.text, back.attachments))
       .finally(() => setBusy(false))
   }
   return (
@@ -425,8 +493,9 @@ export const Composer = memo(function Composer({
         : `跟 ${name} 说点什么…`)
   const supported = pending.filter((p) => p.supported)
   const canSend = Boolean(input.trim()) || supported.length > 0 || Boolean(quote)
-  // 回合进行中有文字（或引用）：唯一的按键是「发送」（插入当前轮）。只插文字与引用，待发附件留在输入框里随下一条消息发出。
-  const canInsert = streaming && (Boolean(input.trim()) || Boolean(quote))
+  // 回合进行中（或流式）唯一按键是「发送」（插入当前轮）。**附件也算内容**：用户想让 AI 看一张截图，
+  // 不必先打一行字——只贴图就能插话。
+  const canInsert = streaming && (Boolean(input.trim()) || supported.length > 0 || Boolean(quote))
   /** 上一次插入的时刻：插入后输入框清空、同一位置随即变成停止键，短时间内不认停止，防双击把任务停掉。 */
   const insertedAtRef = useRef(0)
   const stopTurn = (): void => {
@@ -444,13 +513,15 @@ export const Composer = memo(function Composer({
     })()
   }
 
-  // 新增附件并入 pending：不支持 / 过大的不加入（加了也发不出去），toast 说明哪些被跳过；按路径去重。
+    // 新增附件并入 pending：不支持 / 过大的不加入（加了也发不出去），toast 说明哪些被跳过；按路径去重。
   const addPicked = (picked: Picked[]): void => {
     const bad = picked.filter((p) => !p.supported)
     if (bad.length) {
       const names = bad.map((p) => p.name).join(locale === 'en' ? ', ' : '、')
       toast.show({ variant: 'warning', message: t('cf.attachSkipped').replace('{names}', names) })
     }
+    // 记住描述：插话被撤回 / 退回时要按路径还回去（见 pickedByPath）。
+    for (const p of picked) pickedByPath.set(p.path, p)
     setPending((prev) => {
       const seen = new Set(prev.map((p) => p.path))
       const out = [...prev]
@@ -464,7 +535,7 @@ export const Composer = memo(function Composer({
   }
 
   const pickFiles = async (): Promise<void> => {
-    if (streaming) return
+    // 回合进行中也允许选文件：插话要能带截图（用户看到问题想立刻指出来，不可能等回合结束）。
     addPicked((await window.deva.fs.pickAttachments()) as Picked[])
   }
 
@@ -531,32 +602,31 @@ export const Composer = memo(function Composer({
   }
 
   // 剪贴板带纯文本时一律按文本粘贴——Word / Excel 复制内容会顺带一张渲染图，不能把它变成附件。
+  // 回合进行中也收：插话要能贴截图（这正是用户要的「截图让你看」）。
   const onPaste = (e: ClipboardEvent): boolean => {
     const files = Array.from(e.clipboardData?.files ?? [])
     if (!files.length || e.clipboardData?.getData('text/plain')) return false
     e.preventDefault()
-    if (!streaming) void ingest(files)
+    void ingest(files)
     return true
   }
 
   // 拖入文件 / 文件夹：整个窗口都可放下。Chromium 对未拦截的文件拖放默认「打开该文件」
-  // （导航离开应用），故凡带文件的 dragover / drop 都 preventDefault；回复中只拦截不附加，同粘贴。
+  // （导航离开应用），故凡带文件的 dragover / drop 都 preventDefault；回复中同样收下，供插话带附件。
   const ingestRef = useRef(ingest)
   ingestRef.current = ingest
-  const streamingRef = useRef(streaming)
-  streamingRef.current = streaming
   useEffect(() => {
     const hasFiles = (e: DragEvent): boolean => Boolean(e.dataTransfer?.types.includes('Files'))
     const onDragOver = (e: DragEvent): void => {
       if (!hasFiles(e)) return
       e.preventDefault()
-      if (e.dataTransfer) e.dataTransfer.dropEffect = streamingRef.current ? 'none' : 'copy'
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
     }
     const onDrop = (e: DragEvent): void => {
       if (!hasFiles(e)) return
       e.preventDefault()
       const files = Array.from(e.dataTransfer?.files ?? [])
-      if (files.length && !streamingRef.current) void ingestRef.current(files)
+      if (files.length) void ingestRef.current(files)
     }
     window.addEventListener('dragover', onDragOver)
     window.addEventListener('drop', onDrop)
@@ -569,20 +639,26 @@ export const Composer = memo(function Composer({
   const removePending = (path: string): void =>
     setPending((prev) => prev.filter((p) => p.path !== path))
 
-  // 插入当前轮：清空输入框交给主进程，当前步骤结束后送达；没插进去（原因已 toast）就把文字放回（引用回到引用条）。
+  // 插入当前轮：清空输入框交给主进程，当前步骤结束后送达；没插进去（原因已 toast）就把文字与附件放回。
   const insertNow = (): void => {
     const text = composer.getText()
     const q = quote
+    const atts = pending.filter((p) => p.supported)
     // /compact、/rewind 是本地指令，回合进行中用不了，也不该当成消息插进去。
-    if ((!text.trim() && !q) || (!q && /^\/(compact|rewind)$/i.test(text.trim()))) return
+    if ((!text.trim() && !q && atts.length === 0) || (!q && atts.length === 0 && /^\/(compact|rewind)$/i.test(text.trim())))
+      return
     const full = withQuote(q, text)
     const sid = sessionId
     insertedAtRef.current = Date.now()
     composer.setText('')
     composer.clearHistory()
+    setPending([])
     setQuote('')
-    void onInsert(full).then((ok) => {
-      if (!ok) restoreToComposer(sid, full)
+    void onInsert(full, toSendAttachments(atts)).then((ok) => {
+      // 没插进去：文字与附件一起放回（截图丢了用户只能重新截）。
+      // 走 restoreToComposer 一条路：它就是「放回输入框」的唯一出口，本会话在场时直接还给输入框，
+      // 不在场时并进草稿。这里不再额外 setPending，否则同一批附件会被放回两次。
+      if (!ok) restoreToComposer(sid, full, atts.map((p) => p.path))
     })
   }
 
@@ -608,12 +684,7 @@ export const Composer = memo(function Composer({
     setQuote('')
     void onSend(
       withQuote(q, text),
-      atts.map((p) => ({
-        path: p.path,
-        name: p.name,
-        kind: p.kind as AttachKind,
-        ...(p.kind === 'folder' ? {} : { size: p.size })
-      }))
+      toSendAttachments(atts)
     ).then((sent) => {
       // 未发出（未选模型 / 请求失败，原因已 toast）：把草稿放回——但别覆盖用户在此期间新敲的内容；
       // 此间已切到别的会话的，放回原会话的草稿里。
@@ -734,13 +805,20 @@ export const Composer = memo(function Composer({
   useLayoutEffect(() => {
     const entry = {
       sessionId,
-      restore: (text: string): void => {
+      restore: (text: string, attachments?: string[]): void => {
         // 开头的引用放回引用条；引用条里已有（用户新放的）就留在文字里，不覆盖。
-        const lq = quoteRef.current ? null : leadingQuote(text)
+        const lq = text.trim() && !quoteRef.current ? leadingQuote(text) : null
         if (lq) setQuote(lq.quote)
         const body = lq ? lq.rest : text
         const cur = composer.getText()
-        composer.setText(cur.trim() ? (body ? `${body}\n\n${cur}` : cur) : body, true)
+        // 只有附件没有正文时不碰文字（否则会把用户正在打的内容清成空串）。
+        if (body || cur.trim()) {
+          composer.setText(cur.trim() ? (body ? `${body}\n\n${cur}` : cur) : body, true)
+        }
+        // 附件一并还回。退回的截图不能因为「回合结束了」就消失（见 restoreToComposer）。
+        if (attachments && attachments.length) {
+          setPending((prev) => mergeDraftAttachments(prev, attachments))
+        }
       }
     }
     liveComposer = entry
@@ -855,6 +933,11 @@ export const Composer = memo(function Composer({
             }))}
             onRemove={removePending}
           />
+          {/* 回合进行中：说清这些附件会随**这条插话**带进去，而不是留在输入框等下一轮。
+              不说的话，用户看着 chip 会以为等回合结束才会发出去。 */}
+          {streaming && supported.length > 0 && (
+            <p className="cf-attach__insertnote">{t('cf.insert.withAttachments').replace('{n}', String(supported.length))}</p>
+          )}
           {/* 引用条（右键「引用」，同 TG 的回复）：在附件之后、文字之前；左竖线 + 灰字一行，悬停看全文；
               ✕ 取消引用，焦点回到输入框。 */}
           {quote && (

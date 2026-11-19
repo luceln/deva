@@ -3904,6 +3904,14 @@ button.cf-mask__pill:hover {
   gap: 8px;
   margin-bottom: 10px;
 }
+/* 回合进行中、输入框有待发附件时的一行说明：这些附件随**这条插话**带进去，不是等下一轮。
+   12px（要读的说明），灰字，不抢附件缩略图的注意力。 */
+.cf-attach__insertnote {
+  margin: -4px 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fg-muted);
+}
 /* 输入框里的引用条（右键「引用」，同 TG 的回复条），在待发附件之后、文字之前：左竖线 + 灰字一行（同消息里的引用 .cf-msg__quote），
    超出省略、悬停看全文；右侧 ✕ 取消。一次一条，发送时以 `> ` 引用拼在消息开头 */
 .cf-quotebar {
