@@ -243,6 +243,58 @@ ok('失效态点贴片 → 直接打开批量替换对话框，不弹模型面�
   eq(document.querySelector('.cf-mp__panel'), null, '失效态不该弹常规模型面板')
 })
 
+/**
+ * 弹窗里的下拉必须点得到。
+ *
+ * 回归现场：`select-menu` 的 z-index 是 71，而 `Modal` 遮罩是 `--z-overlay + 200` = 300。
+ * 两者都 portal 到 body、都是 position: fixed，于是按 z-index 直接比 —— 下拉被整个盖住，
+ * 看得见卡片却点不到选项，用户报的「下拉被弹窗遮罩遮在下面了，点不动」就是这个。
+ *
+ * 判据不用「z-index 数字比大小」（那只证明写了数字，不证明点得到），而是问浏览器：
+ * 选项中心点上的最顶层元素是不是它自己 —— `elementFromPoint` 给出的正是「点击会落给谁」。
+ */
+ok('弹窗里的下拉：能展开、选项点得到、能选中', async () => {
+  resetMeta()
+  // 上一条用例可能把对话框留在打开状态；先按「取消」关掉，否则本条的 chip 点不到。
+  document.querySelectorAll('[role="dialog"] .modal__actions .btn').forEach((b) => {
+    if (b.textContent === '取消') b.click()
+  })
+  await new Promise((r) => setTimeout(r, 60))
+
+  chip().click()
+  await waitFor(() => document.querySelector('[role="dialog"]'), '没打开替换对话框')
+
+  // 用 role="dialog" 定位，不用 `.cf-swap`：那只是 BEM 前缀，没有这个类名（组件里只有 cf-swap__xxx）。
+  const trigger = document.querySelector('[role="dialog"] .select')
+  assert(trigger, '替换对话框里没有下拉触发框')
+  trigger.click()
+  await waitFor(() => document.querySelector('.select-menu'), '下拉没展开')
+
+  const opts = [...document.querySelectorAll('.select-menu__opt')].filter(
+    (o) => !o.classList.contains('is-disabled')
+  )
+  assert(opts.length > 0, '下拉里没有可选项')
+
+  // 关键：每个可选项的几何中心，命中的最顶层元素必须是它自己（或其子节点）。
+  for (const o of opts) {
+    const r = o.getBoundingClientRect()
+    assert(r.width > 0 && r.height > 0, `选项「${o.textContent}」没有尺寸`)
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    assert(
+      hit && (o === hit || o.contains(hit)),
+      `选项「${o.textContent}」被别的元素盖住了（命中的是 ${hit ? hit.className || hit.tagName : 'null'}）`
+    )
+  }
+
+  // 点得动 + 选得中：点第一个可选项，浮层收起、触发框显示它。
+  const first = opts[0]
+  const label = first.querySelector('.select-menu__name').textContent
+  first.click()
+  await waitFor(() => !document.querySelector('.select-menu'), '选完浮层没收起')
+  const shown = document.querySelector('[role="dialog"] .select')
+  assert(shown.textContent.includes(label), `触发框没显示所选（应为「${label}」，实际「${shown.textContent}」）`)
+})
+
 /** 把当前状态固定成「失效且是本会话自己的引用」，用于点击相关用例。 */
 function resetMeta() {
   resetNormal()
