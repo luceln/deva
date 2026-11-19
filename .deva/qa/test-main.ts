@@ -355,7 +355,14 @@ async function scenarioFull(): Promise<void> {
     r1.personas.copied.every((id: string) => r1.personaEnabled.includes(id)),
     ''
   )
-  eq('技能：全部按链接重建', [...r1.skills.copied].sort(), ['restoring-course-projects', 'xfg-coding-map-skills'])
+  // 技能列表由源目录动态得出：写死会在用户新增技能时误报（dev-team-method 就是这么漏掉的）。
+  // 同时收目录与符号链接——真实技能目录是实体，用户外部引用的技能是链接，两者都算数
+  // （`isDirectory()` 对链接返回 false，只用它会把链接型技能整个漏掉）。
+  const srcSkillEntries = fs
+    .readdirSync(path.join(SRC, 'skills'), { withFileTypes: true })
+    .filter((d) => d.isDirectory() || d.isSymbolicLink())
+  const srcSkillIds = srcSkillEntries.map((d) => d.name).sort()
+  eq('技能：全部按链接重建', [...r1.skills.copied].sort(), srcSkillIds)
   const expSess = countIn(path.join(SRC, 'data', 'chats'), (n) => n.endsWith('.json') && n !== '_index.json')
   eq('会话：copied 数', r1.sessions.copied.length, expSess)
   eq('附件：media 数', r1.assoc.media, countIn(path.join(SRC, 'data', 'media')))
@@ -481,8 +488,11 @@ async function scenarioFull(): Promise<void> {
   eq('compacted 拆分文件已搬', compactedInDst, countIn(path.join(SRC, 'data', 'chats'), (n) => n.endsWith('.jsonl')))
   check('目标无 _index.json（已 invalidate 让下次重扫）', !fs.existsSync(path.join(DST, 'data', 'chats', '_index.json')))
 
-  // 技能：链接还是副本
-  for (const id of ['restoring-course-projects', 'xfg-coding-map-skills']) {
+  // 技能：链接还是副本——按源的真实类型分别断言。源里是链接的，落盘也得是链接；
+  // 源里是实体目录的（用户自己写的技能），落盘就是副本。一律要求「必须是链接」会把实体技能误判成失败。
+  for (const entry of srcSkillEntries) {
+    const id = entry.name
+    const srcIsLink = entry.isSymbolicLink()
     const p = path.join(DST, 'skills', id)
     let isLink = false
     let target = ''
@@ -492,7 +502,11 @@ async function scenarioFull(): Promise<void> {
     } catch (e) {
       /* ignore */
     }
-    check(`技能 ${id}：落盘为链接（不是副本）`, isLink, `isLink=${isLink} target=${target}`)
+    if (srcIsLink) {
+      check(`技能 ${id}：落盘为链接（不是副本）`, isLink, `isLink=${isLink} target=${target}`)
+    } else {
+      check(`技能 ${id}：实体目录落盘为副本（不是链接）`, !isLink, `isLink=${isLink}`)
+    }
     check(`技能 ${id}：链接目标可读`, fs.existsSync(p), '')
   }
 
