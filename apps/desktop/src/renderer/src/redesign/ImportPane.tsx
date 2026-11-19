@@ -1,19 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { AlertTriangle, Check, ChevronDown, Download, Loader2, RefreshCw, ShieldAlert } from 'lucide-react'
 import { useI18n } from '../i18n/i18n'
 import { useExtensions } from '../store/extensions'
 import { openModelSettings } from './modelSettingsBus'
+import { isImportAvailable, type ImportReport, type SecretsStat, type SourceSummary } from './importBridge'
 import {
-  isImportAvailable,
-  onImportProgress,
-  probeImport,
-  runImport,
-  type GateResult,
-  type ImportProgress,
-  type ImportReport,
-  type SecretsStat,
-  type SourceSummary
-} from './importBridge'
+  attachImportProgress,
+  getImportSession,
+  probeImportGate,
+  runImportSession,
+  setImportFailAll,
+  subscribeImportSession,
+  toggleImportStep
+} from './importSession'
 import type { Failure } from '../../../shared/import-protocol'
 
 /**
@@ -122,87 +121,41 @@ export function ImportPane(): React.JSX.Element {
   const { refresh: refreshExtensions } = useExtensions()
   const available = isImportAvailable()
 
-  // 闸门结果：null = 还没探测完。探测是进页的一次只读动作。
-  const [gate, setGate] = useState<GateResult | null>(null)
-  const [probing, setProbing] = useState(available)
-  const [phase, setPhase] = useState<'idle' | 'running' | 'done'>('idle')
-  const [progress, setProgress] = useState<ImportProgress | null>(null)
-  const [report, setReport] = useState<ImportReport | null>(null)
-  const [runError, setRunError] = useState('')
-  /** 展开看明细的步骤（结果里「跳过了哪些」）。 */
-  const [expanded, setExpanded] = useState<Set<RowStep>>(() => new Set())
-  /**
-   * 失败清单是否展开成「全部」。默认收起只显示 FAILURE_LIMIT 条——
-   * 媒体目录被占位时主进程会产出 397 条（396 个文件逐条 + 1 条目录），全量铺开是 397 个 li。
-   * 但失败是用户要处置的，不能只给数字不给看，所以收起态给「展开全部」入口，展开后按 step 分组。
+  /*
+   * 运行态全部从 importSession 读（模块级，跨挂载存活）。
+   *
+   * 为什么不住在这里：设置面板按 section 条件渲染，切到「模型」页时本组件被卸载、局部 state 全清空
+   * ——用户点「去设置 › 模型重填」处理完再切回来，刚才那份报告就没了，而它正是用户的下一步行动清单。
+   * 见 redesign/importSession.ts 顶部注释。
    */
-  const [failAll, setFailAll] = useState(false)
-  // 卸载后不再 setState：导入要跑几十秒，用户完全可能在途中关掉设置面板。
-  const aliveRef = useRef(true)
+  const s = useSyncExternalStore(subscribeImportSession, getImportSession, getImportSession)
+  const { gate, probing, phase, progress, report, runError, expanded, failAll } = s
+
+  // 进页探测一次（只读）。session 里已探过就不重复打 IPC——切页面回来不闪数字；用户要更新点「刷新状态」。
   useEffect(() => {
-    aliveRef.current = true
-    return () => {
-      aliveRef.current = false
-    }
+    probeImportGate()
   }, [])
 
-  const probe = useCallback((): void => {
-    if (!available) return
-    setProbing(true)
-    void probeImport().then((r) => {
-      if (!aliveRef.current) return
-      setGate(r)
-      setProbing(false)
-    })
-  }, [available])
-
-  // 进页探测一次（只读）。跑完导入再探一次，让概览反映「现在原版还有什么」。
-  useEffect(() => probe(), [probe])
-
-  // 订阅进度事件。常驻订阅（挂上很便宜）可避免「点下去」与「挂监听」之间的竞态。
+  // 进度订阅挂在模块级：跑的过程中切走页面也继续收（卸载时**不**解绑，见 importSession）。
   useEffect(() => {
-    if (!available) return
-    return onImportProgress((p) => {
-      if (aliveRef.current) setProgress(p)
-    })
-  }, [available])
+    attachImportProgress()
+  }, [])
+
+  // 导进来的角色 / 技能要让列表立刻可见，不必重启应用。只在「这一轮刚跑完」时刷一次：
+  // 每次挂载都刷会在来回切页时反复拉扩展列表。
+  useEffect(() => {
+    if (phase === 'done') refreshExtensions()
+    // refreshExtensions 引用稳定；只在 phase 变更时触发。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase])
 
   const canRun = available && gate?.ok === true && phase !== 'running'
 
-  const start = (): void => {
-    if (!canRun) return
-    setPhase('running')
-    setProgress(null)
-    setReport(null)
-    setRunError('')
-    setExpanded(new Set())
-    void runImport().then((r) => {
-      if (!aliveRef.current) return
-      setProgress(null)
-      if ('error' in r) {
-        // 整轮没跑起来（闸门在 run 开头又拦了一次 / 已有导入在进行）：回到 idle，把原因摆出来，
-        // 而不是给一份空报告让人以为「什么都没导」。
-        setPhase('idle')
-        setRunError(r.error)
-        probe()
-        return
-      }
-      setReport(r)
-      setPhase('done')
-      // 导进来的角色 / 技能要让列表立刻可见，不必重启应用。会话列表由主进程清索引后广播刷新，
-      // 渲染层不插手（见给主进程的对齐项）。
-      refreshExtensions()
-      probe()
-    })
-  }
+  const start = (): void => runImportSession()
 
-  const toggle = (step: RowStep): void =>
-    setExpanded((s) => {
-      const n = new Set(s)
-      if (n.has(step)) n.delete(step)
-      else n.add(step)
-      return n
-    })
+  const probe = (): void => probeImportGate(true)
+
+  const toggle = (step: RowStep): void => toggleImportStep(step)
 
   const rows = useMemo(() => (report ? stepRows(report, t) : []), [report, t])
   const failures = useMemo(() => (report ? allFailures(report) : []), [report])
@@ -427,7 +380,7 @@ export function ImportPane(): React.JSX.Element {
                     type="button"
                     className="cf-imp__failmore"
                     aria-expanded={failAll}
-                    onClick={() => setFailAll((v) => !v)}
+                    onClick={() => setImportFailAll(!failAll)}
                   >
                     {failAll
                       ? t('settings.import.failureCollapse')

@@ -53,6 +53,9 @@ function report(patch) {
 
 /** 挂载 + 点「开始导入」 + 等结果区出现。 */
 async function run(report) {
+  // 运行态已提到模块级（importSession），不复位会让上一条用例的报告串到这一条。
+  window.__unmountOnly()
+  window.__resetImportSession()
   window.__mountImport()
   // 闸门是进页时异步 probe 的：要等按钮真的可点，不能一挂载就点（否则 disabled 点不动）。
   const btn = await waitFor(
@@ -145,6 +148,57 @@ ok('⑧ 大量 unrecoverable（12 条）时折叠，不把面板撑爆', async (
   assert(more, '缺「还有 N 条」的展开入口')
   assert(/7/.test(more.textContent), `应剩 7 条：${more.textContent}`)
   assert(warn.textContent.includes('12 条密钥需要重新填写'), '标题仍报总数 12')
+})
+
+ok('⑨ 切走设置页再回来，报告还在（不被卸载清空）', async () => {
+  await run(
+    report({ secrets: { unrecoverable: ['magpie'] } })
+  )
+  const before = (q('.cf-imp__resulthead')?.textContent ?? '').trim()
+  assert(before, '前置：应该有结果区')
+
+  // 模拟「切到设置 › 模型」：ImportPane 被卸载，但面板没关。
+  window.__unmountOnly()
+  eq(!!q('.cf-imp__resulthead'), false, '卸载后结果区应消失（这是卸载生效的证据）')
+
+  // 切回「导入」：重新挂载，不该重跑导入，但报告要立刻在。
+  window.__mountImport()
+  const head = await waitFor(() => q('.cf-imp__resulthead'), '切回来报告丢了')
+  eq((head.textContent ?? '').trim(), before, '报告标题应与切走前一致')
+  assert(q('.cf-imp__warn'), '切回来警告面板丢了')
+  eq(qa('.cf-imp__keys code').map((c) => c.textContent).join(','), 'magpie', '重填清单丢了')
+})
+
+ok('⑩ 切回来不重跑导入（只恢复展示）', async () => {
+  const btn = qa('.cf-imp__actions button').find((b) => /导入/.test(b.textContent ?? ''))
+  assert(btn, '找不到导入按钮')
+  assert(/再次导入/.test(btn.textContent), `应显示「再次导入」而不是「开始导入」：${btn.textContent}`)
+})
+
+ok('⑪ 失败清单的展开态也跨挂载保留', async () => {
+  await run(
+    report({
+      top: {
+        failures: Array.from({ length: 12 }, (_, i) => ({
+          step: 'memories',
+          id: `p_cc7f18c${i}`,
+          reason: 'budget'
+        }))
+      }
+    })
+  )
+  const more = await waitFor(
+    () => qa('.cf-imp__failmore').find((b) => /展开看全部/.test(b.textContent ?? '')),
+    '没有展开入口'
+  )
+  more.click()
+  await sleep(80)
+  eq(qa('.cf-imp__failmore')[0]?.getAttribute('aria-expanded'), 'true', '应已展开')
+
+  window.__unmountOnly()
+  window.__mountImport()
+  const again = await waitFor(() => qa('.cf-imp__failmore')[0], '切回来失败区块丢了')
+  eq(again.getAttribute('aria-expanded'), 'true', '展开态应保留')
 })
 
 // ── 运行 ────────────────────────────────────────────────────────
