@@ -3,16 +3,24 @@ import { createWorktree, precheck } from './create'
 import { listWorktrees } from './list'
 import { retryInstall } from './deps'
 import { briefForFocusRoot } from './brief'
+import { removeWorktree } from './remove'
 import { onWorktreeChanged, onWorktreeProgress, onWorktreeSize } from '../chat-bus'
-import type { WorktreeCreateReq, WorktreePrecheckReq } from '../../../shared/worktree-protocol'
+import type {
+  WorktreeCreateReq,
+  WorktreePrecheckReq,
+  WorktreeRemoveReq
+} from '../../../shared/worktree-protocol'
 
 /**
  * worktree 的 IPC。
  *
- * 注册的通道：`precheck`（无副作用，边输边校验）、`create`、`list`、`install-deps`、`brief`，
- * 外加两条**主进程 → 渲染层**的推送：`worktree:changed`（列表该重取了）与 `worktree:progress`
- * （等锁 / 装依赖的进度）。合并 / 删除 / 重建留给后续步骤——**先不注册空壳**，免得渲染层
- * 对着不存在的实现写代码。
+ * 注册的通道：`precheck`（无副作用，边输边校验）、`create`、`list`、`install-deps`、`brief`、
+ * `remove`，外加两条**主进程 → 渲染层**的推送：`worktree:changed`（列表该重取了）与
+ * `worktree:progress`（等锁 / 装依赖的进度）。合并 / 重建仍留给后续步骤——**先不注册空壳**，
+ * 免得渲染层对着不存在的实现写代码。
+ *
+ * 为什么 `remove` 排在 merge 之前：`deps.ts` 会真装 `node_modules`（几百 MB），没有删除能力时
+ * 谁建的都删不掉，是「自动制造删不掉的大目录」。
  *
  * 判定一律在主进程（`list` 返回已算好的 `state`）：渲染层不复算，两套规则迟早漂移（A48）。
  */
@@ -21,7 +29,7 @@ export function registerWorktreeIpc(getWin: () => BrowserWindow | null): void {
   ipcMain.handle('worktree:create', (_e, req: WorktreeCreateReq) => createWorktree(req))
   /*
    * 快照：`state` / `deps` / `sessionCount` / `sizeBytes` / `lockHolder` 全在这里算好。
-   * `sizeBytes` 首次为 null（后台统计中），算完会发 `worktree:changed` 让界面重取（T1.4b）。
+   * `sizeBytes` 首次为 null（后台统计中），算完会发 `worktree:size` 让界面增量更新（T1.4b）。
    */
   ipcMain.handle('worktree:list', () => listWorktrees())
   /*
@@ -34,6 +42,11 @@ export function registerWorktreeIpc(getWin: () => BrowserWindow | null): void {
    * 判定（能不能建、state 是什么）一律在主进程做，渲染层不复算：两套规则迟早漂移。
    */
   ipcMain.handle('worktree:brief', (_e, focusRoot: string | null) => briefForFocusRoot(focusRoot))
+  /*
+   * 删除。`force` 会丢未提交改动，所以默认不带，只有用户在界面上确认过才传。
+   * 返回值里必须看 `warnings`：删一半（比如分支被别处检出而保留）时 `ok` 仍可能是 true。
+   */
+  ipcMain.handle('worktree:remove', (_e, req: WorktreeRemoveReq) => removeWorktree(req))
 
   /*
    * 把总线上的两条 worktree 事件转给渲染层。

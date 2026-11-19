@@ -94,8 +94,13 @@ export async function addWorktree(
   return { ok: r.code === 0, stderr: r.stderr.trim() }
 }
 
-/** 目录是否「看起来是本次 git 建的」（spec §3.4 第 3 步的准入判据之一）。 */
-function looksLikeOurWorktreeDir(path: string, repoRoot: string): { ok: boolean; why: string } {
+/**
+ * 目录是否「看起来是本次 git 建的」（spec §3.4 第 3 步的准入判据之一）。
+ *
+ * 导出给 `remove.ts` 用：删除一个 `active` 的 worktree 时同样要过这一关，
+ * 免得把一个来路不明的目录递归删掉（用户可能往里放了别的东西）。
+ */
+export function looksLikeOurWorktreeDir(path: string, repoRoot: string): { ok: boolean; why: string } {
   let entries: string[]
   try {
     const st = statSync(path, { throwIfNoEntry: false })

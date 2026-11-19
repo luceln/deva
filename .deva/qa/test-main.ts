@@ -2656,6 +2656,106 @@ async function scenarioWorktreeCreate(): Promise<void> {
 }
 
 /**
+ * 删除 worktree（`remove.ts`）。
+ *
+ * 这条路径的失败方式全是**静默**的：`ok:true` 但目录还在、分支还在、记录还在——
+ * 用户以为删干净了，实际几百 MB 一直占着。所以断言要逐项验「真的没了」，
+ * 不能只看 `ok`。
+ *
+ * 反向验证：把 `removeWorktree` 改回「直接返回 ok:true 什么都不做」，下面四组必须全红。
+ */
+async function scenarioWorktreeRemove(): Promise<void> {
+  const CR = await import('../../apps/desktop/src/main/services/worktree/create')
+  const RM = await import('../../apps/desktop/src/main/services/worktree/remove')
+  const S = await import('../../apps/desktop/src/main/services/worktree/store')
+  const GW = await import('../../apps/desktop/src/main/services/worktree/git-worktree')
+
+  const repo = makeRepo(path.join(DST, 'repo'), { 'a.txt': 'a\n', 'only-dev.txt': 'dev\n' })
+
+  // ══════════ 一、正常删除：目录 / 登记 / 分支 / 记录四处都要真的没了 ══════════
+  const wtA = path.join(DST, 'wts', 'a')
+  const rA = await CR.createWorktree({ repoRoot: repo, branch: 'wt/a', path: wtA, skipDeps: true })
+  if (!rA.ok) {
+    fail('remove：前置创建不该失败', JSON.stringify(rA))
+    return
+  }
+  check('remove：创建后目录存在', fs.existsSync(wtA), '')
+  check('remove：创建后有记录', S.getRecord(wtA) !== null, '')
+
+  const dA = await RM.removeWorktree({ path: wtA })
+  eq('remove：返回 ok', dA.ok, true)
+  eq('remove：无 warning（干净删除不该有话要说）', dA.warnings.length, 0)
+  // 逐项验，不只看 ok —— 只看 ok 的话「什么都没做」也会通过
+  check('remove：目录真的没了', !fs.existsSync(wtA), `still exists: ${wtA}`)
+  check('remove：记录真的没了', S.getRecord(wtA) === null, '')
+  // 用 parseWorktreeList 解析后按路径比，别拿整串输出做 includes（反斜杠/正斜杠与大小写都会误判）
+  const listAfterA = GW.parseWorktreeList(gitOut(repo, 'worktree', 'list', '--porcelain'))
+  check(
+    'remove：git 登记真的没了',
+    !listAfterA.some((e) => path.resolve(e.path) === path.resolve(wtA)),
+    JSON.stringify(listAfterA.map((e) => e.path))
+  )
+  const branchesAfterA = gitOut(repo, 'branch', '--format=%(refname:short)')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  check('remove：分支真的没了', !branchesAfterA.includes('wt/a'), JSON.stringify(branchesAfterA))
+
+  // ══════════ 二、有未提交改动：默认拒绝，且一个字节都不许动 ══════════
+  const wtB = path.join(DST, 'wts', 'b')
+  const rB = await CR.createWorktree({ repoRoot: repo, branch: 'wt/b', path: wtB, skipDeps: true })
+  if (!rB.ok) {
+    fail('remove：脏检查的前置创建不该失败', JSON.stringify(rB))
+    return
+  }
+  fs.writeFileSync(path.join(wtB, 'dirty.txt'), 'unsaved\n')
+  const dB = await RM.removeWorktree({ path: wtB })
+  eq('remove：脏时 ok=false', dB.ok, false)
+  eq('remove：脏时 reason=dirty', dB.reason, 'dirty')
+  eq('remove：脏时报出改动数', dB.dirtyCount, 1)
+  check('remove：脏时目录还在', fs.existsSync(wtB), '')
+  check('remove：脏时未提交文件还在', fs.existsSync(path.join(wtB, 'dirty.txt')), '')
+  check('remove：脏时记录还在', S.getRecord(wtB) !== null, '')
+
+  // ══════════ 三、force：明说要丢时才丢 ══════════
+  const dBF = await RM.removeWorktree({ path: wtB, force: true })
+  eq('remove：force 时 ok', dBF.ok, true)
+  check('remove：force 后目录没了', !fs.existsSync(wtB), '')
+  check(
+    'remove：force 时要提示丢了改动（不能静默）',
+    dBF.warnings.some((w) => w.includes('强制删除')),
+    JSON.stringify(dBF.warnings)
+  )
+
+  // ══════════ 四、没登记的路径：拒绝，且不碰任何东西 ══════════
+  const stranger = path.join(DST, 'wts', 'stranger')
+  fs.mkdirSync(stranger, { recursive: true })
+  fs.writeFileSync(path.join(stranger, 'user-file.txt'), 'mine\n')
+  const dS = await RM.removeWorktree({ path: stranger })
+  eq('remove：无记录时 ok=false', dS.ok, false)
+  eq('remove：无记录时 reason=not-found', dS.reason, 'not-found')
+  check('remove：无记录时不删用户目录', fs.existsSync(path.join(stranger, 'user-file.txt')), '')
+
+  // ══════════ 五、保留分支的选项 ══════════
+  const wtC = path.join(DST, 'wts', 'c')
+  const rC = await CR.createWorktree({ repoRoot: repo, branch: 'wt/c', path: wtC, skipDeps: true })
+  if (rC.ok) {
+    const dC = await RM.removeWorktree({ path: wtC, deleteBranch: false })
+    eq('remove：deleteBranch=false 时 ok', dC.ok, true)
+    eq('remove：deleteBranch=false 时 branchRemoved=false', dC.branchRemoved, false)
+    check(
+      'remove：deleteBranch=false 时分支还在',
+      gitOut(repo, 'branch', '--format=%(refname:short)')
+        .split('\n')
+        .includes('wt/c'),
+      gitOut(repo, 'branch', '--format=%(refname:short)')
+    )
+  } else {
+    fail('remove：保留分支的前置创建不该失败', JSON.stringify(rC))
+  }
+}
+
+/**
  * A36：系统提示词的【环境】段必须含 5 项内容，且负面约束必须在。
  * A13 的另一半：会话的 focusRoot 与终端 cwd 必须**两处一致**（都指向 worktree）。
  */
@@ -4978,6 +5078,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   wtstore: scenarioWorktreeStore,
   wtprecheck: scenarioWorktreePrecheck,
   wtcreate: scenarioWorktreeCreate,
+  wtremove: scenarioWorktreeRemove,
   wtbrief: scenarioWorktreeBrief,
   wtsweep: scenarioWorktreeSweep,
   worktree: scenarioWorktree,

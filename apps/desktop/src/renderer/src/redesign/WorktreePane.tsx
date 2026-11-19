@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
+import { useDialog } from '../components/DialogProvider'
 import { useWorktree } from '../store/worktree'
 import type {
   MergeBlocker,
@@ -207,6 +208,51 @@ function WorktreeCard({
 }): React.JSX.Element {
   const { t } = useI18n()
   const toast = useToast()
+  const dialog = useDialog()
+
+  /**
+   * 删除这个工作区。
+   *
+   * 两次确认，因为它的破坏性有两层：
+   *  1. 第一次问「要不要删」——不可逆；
+   *  2. 有未提交改动时，再问一次「确定连这些改动一起丢」——`remove` 不带 `force` 会拒绝，
+   *     所以第二次的答案是「带 force 重试」。
+   *
+   * 删完**必须展示 warnings**：`ok:true` 不代表全删干净（分支可能还被别处检出而保留），
+   * 只报「已删除」会让用户以为磁盘清空了。
+   */
+  const remove = async (): Promise<void> => {
+    const ok = await dialog.confirm({
+      title: t('cf.wt.remove.title'),
+      message: t('cf.wt.remove.confirm').replace('{path}', view.path),
+      confirmText: t('cf.wt.remove.title'),
+      variant: 'danger'
+    })
+    if (!ok) return
+
+    let res = await window.deva.worktree.remove({ path: view.path })
+
+    if (!res.ok && res.reason === 'dirty') {
+      const force = await dialog.confirm({
+        title: t('cf.wt.remove.dirtyTitle'),
+        message: t('cf.wt.remove.dirtyConfirm').replace('{n}', String(res.dirtyCount ?? 0)),
+        confirmText: t('cf.wt.remove.force'),
+        variant: 'danger'
+      })
+      if (!force) return
+      res = await window.deva.worktree.remove({ path: view.path, force: true })
+    }
+
+    if (!res.ok) {
+      toast.show({ variant: 'error', message: res.message ?? t('cf.wt.remove.failed') })
+      return
+    }
+
+    // 删了一半的那些（分支保留 / 目录没删）逐条说清，不要吞进「已删除」里。
+    // 用 warning 而不是 success：这些是没做到的部分。
+    for (const w of res.warnings) toast.show({ variant: 'warning', message: w })
+    toast.show({ variant: 'success', message: t('cf.wt.remove.done') })
+  }
 
   const stateKey = STATE_KEY[view.state]
   // branch-mismatch 的文案要带「实际检出的是哪个分支」：只说「不匹配」用户不知道该切回哪。
@@ -370,7 +416,7 @@ function WorktreeCard({
           className="btn btn--ghost btn--danger"
           disabled={installing}
           title={installing ? t('cf.wt.remove.installing') : t('cf.wt.remove.branchKept').replace('{branch}', view.branch)}
-          onClick={() => onNotWired('remove')}
+          onClick={() => void remove()}
         >
           <Trash2 size={13} />
           {t('cf.wt.remove.title')}

@@ -232,3 +232,37 @@ export type WorktreeProgress =
       step: string
       elapsedMs: number
     }
+
+/**
+ * 删除一个 worktree（`worktree:remove`）。
+ *
+ * 与创建不同，这是**破坏性操作**，所以两件事必须显式：
+ *  - `force`：有未提交改动时也删（会丢改动），默认 false
+ *  - `deleteBranch`：连分支一起删，默认 true（留着会让同名分支建不出来）
+ */
+export interface WorktreeRemoveReq {
+  /** worktree 的绝对路径（`WorktreeSnapshot.items[].path`）。 */
+  path: string
+  force?: boolean
+  deleteBranch?: boolean
+}
+
+/**
+ * 删除的结果。
+ *
+ * ⚠️ `ok: true` **不等于「什么都没留」**：分支可能因为还被别处检出而保留、目录可能因为
+ * 「不像我们的 worktree 目录」而没删。这些都在 `warnings` 里，界面**必须展示**，
+ * 否则用户以为删干净了，实际还占着几百 MB。
+ */
+export interface WorktreeRemoveResult {
+  ok: boolean
+  /** 没删成的原因（`ok:false` 时有值）。`dirty` 时 `dirtyCount` 一并给出。 */
+  reason?: 'not-found' | 'dirty' | 'unreadable' | 'remove-failed'
+  message?: string
+  dirtyCount?: number
+  worktreeRemoved: boolean
+  dirRemoved: boolean
+  recordRemoved: boolean
+  branchRemoved: boolean
+  warnings: string[]
+}

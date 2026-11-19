@@ -1724,7 +1724,13 @@ const zhCN: MessageTree = {
         installing: '正在安装依赖，等它结束或失败后再删。',
         prune: '移除登记',
         pruneHint: '不删除任何文件（目录本来就不存在），只清理 git 登记。',
-        branchKept: '分支 {branch} 会保留。'
+        branchKept: '分支 {branch} 会保留。',
+        confirm: '要删除这个工作区吗？目录和它里面的文件会一并删除，无法撤销。\n{path}',
+        dirtyTitle: '有未提交的改动',
+        dirtyConfirm: '这个工作区里还有 {n} 处未提交的改动，删除会把它们一起丢掉，无法找回。确定继续吗？',
+        force: '仍然删除',
+        failed: '删除失败',
+        done: '工作区已删除'
       },
       merge: {
         merge: '合并',
@@ -3533,7 +3539,13 @@ const en: MessageTree = {
         installing: 'Dependencies are installing; wait for it to finish or fail.',
         prune: 'Remove git entry',
         pruneHint: 'Deletes no files (the folder is already gone); only cleans the git entry.',
-        branchKept: 'Branch {branch} is kept.'
+        branchKept: 'Branch {branch} is kept.',
+        confirm: 'Remove this worktree? Its folder and everything inside will be deleted. This cannot be undone.\n{path}',
+        dirtyTitle: 'Uncommitted changes',
+        dirtyConfirm: 'This worktree has {n} uncommitted changes. Removing it will discard them for good. Continue?',
+        force: 'Remove anyway',
+        failed: 'Could not remove the worktree',
+        done: 'Worktree removed'
       },
       merge: {
         merge: 'Merge',

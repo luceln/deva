@@ -52,6 +52,8 @@ import type {
   WorktreePrecheckOk,
   WorktreePrecheckReq,
   WorktreeProgress,
+  WorktreeRemoveReq,
+  WorktreeRemoveResult,
   WorktreeSizeUpdate,
   WorktreeSnapshot
 } from '../shared/worktree-protocol'
@@ -1073,6 +1075,14 @@ const api = {
      * 别在渲染层自己写「降级探测」——那只是 `onChanged` 没接上时的权宜，会让体积永远停在「统计中…」。
      */
     list: (): Promise<WorktreeSnapshot> => ipcRenderer.invoke('worktree:list'),
+    /**
+     * 删除一个工作区：解登记 → 删目录 → 删记录 → 删分支。
+     *
+     * 破坏性操作：`force` 会丢未提交改动，只有用户确认后才传。
+     * 返回值里 `ok:true` 不代表全删干净（分支可能被别处检出而保留），**必须看 `warnings`**。
+     */
+    remove: (req: WorktreeRemoveReq): Promise<WorktreeRemoveResult> =>
+      ipcRenderer.invoke('worktree:remove', req),
     /**
      * 安装依赖（「重试安装」/「重新安装」/「安装依赖」三个入口共用）。
      *
