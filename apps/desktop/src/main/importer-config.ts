@@ -233,7 +233,16 @@ export function mergeProviders(srcHome: string, opts?: { excludeIds?: string[] }
  * 两者都要先写完。导入顺序里 mcp 步骤排在 copySecrets 之前，正是为此（见 importer.ts 的步骤注释）。
  */
 export async function copySecrets(srcHome: string): Promise<SecretsStat> {
-  const stat: SecretsStat = { copied: [], skipped: [], ignored: [], noEncryption: [], invalid: [] }
+  const stat: SecretsStat = {
+    copied: [],
+    skipped: [],
+    ignored: [],
+    noEncryption: [],
+    invalid: [],
+    // 本提交只加字段形状；真正往这两个栏里写是下一个提交（跨应用重加密）
+    unrecoverable: [],
+    rekeyed: []
+  }
   const file = join(srcHome, 'secrets.json')
   /**
    * 源 secrets.json 的三态，与 `readMemories` 同理：「读不出来」不等于「没有密钥」。

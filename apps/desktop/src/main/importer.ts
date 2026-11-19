@@ -46,7 +46,16 @@ function emptyReport(): ImportReport {
     ok: true,
     providers: { copied: [], skipped: [], failed: [] },
     mcp: { copied: [], skipped: [], failed: [] },
-    secrets: { copied: [], skipped: [], ignored: [], noEncryption: [], invalid: [], failed: [] },
+    secrets: {
+      copied: [],
+      skipped: [],
+      ignored: [],
+      noEncryption: [],
+      invalid: [],
+      failed: [],
+      unrecoverable: [],
+      rekeyed: []
+    },
     personas: { copied: [], skipped: [], failed: [] },
     personaEnabled: [],
     memories: { added: [], skipped: [], failed: [] },
@@ -191,7 +200,9 @@ export async function runImport(
       ignored: secrets.ignored,
       noEncryption: secrets.noEncryption,
       invalid: secrets.invalid,
-      failed: secrets.failed
+      failed: secrets.failed,
+      unrecoverable: secrets.unrecoverable,
+      rekeyed: secrets.rekeyed
     }
 
     // ③ 角色（md + 头像）
