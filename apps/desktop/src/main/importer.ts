@@ -44,7 +44,7 @@ type ProgressFn = (p: ImportProgress) => void
 function emptyReport(): ImportReport {
   return {
     ok: true,
-    providers: { copied: [], skipped: [], failed: [] },
+    providers: { copied: [], skipped: [], failed: [], pluginManaged: [] },
     mcp: { copied: [], skipped: [], failed: [] },
     secrets: {
       copied: [],
@@ -54,7 +54,8 @@ function emptyReport(): ImportReport {
       invalid: [],
       failed: [],
       unrecoverable: [],
-      rekeyed: []
+      rekeyed: [],
+      pluginManaged: []
     },
     personas: { copied: [], skipped: [], failed: [] },
     personaEnabled: [],
@@ -177,7 +178,12 @@ export async function runImport(
       copied: providers.copied,
       skipped: [...providers.skipped, ...providers.kept],
       builtin: providers.builtin,
-      failed: providers.failed
+      failed: providers.failed,
+      // 别名 steps 也带了这个字段（`import-protocol.ts` 说得明白：providers 是会有它的两步之一）。
+      // 漏拷的后果不是「少显示一行」——`StepStat.pluginManaged` 是协议里声明的字段，谁按协议渲染
+      // 「N 个服务商归插件管」都会拿到 undefined，而报告本身仍显示 ok。secrets 那一步没漏，所以只有
+      // 服务商这一行会空。
+      pluginManaged: providers.pluginManaged
     }
 
     /*
@@ -202,7 +208,8 @@ export async function runImport(
       invalid: secrets.invalid,
       failed: secrets.failed,
       unrecoverable: secrets.unrecoverable,
-      rekeyed: secrets.rekeyed
+      rekeyed: secrets.rekeyed,
+      pluginManaged: secrets.pluginManaged
     }
 
     // ③ 角色（md + 头像）
