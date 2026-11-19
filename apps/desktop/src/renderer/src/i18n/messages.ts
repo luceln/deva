@@ -925,7 +925,8 @@ const zhCN: MessageTree = {
         invalid: '{n} 个密钥在源里是空值或坏值',
         skipped: '{n} 个已存在，保留本地',
         ignored: '{n} 个不适用，已忽略',
-        failed: '{n} 个没能写入'
+        failed: '{n} 个没能写入',
+        rekeyed: '其中 {n} 条之前用不了，这次修好了'
       },
       // 密钥明细里按分类列 id 时的分组标题
       secretGroup: {
@@ -933,7 +934,15 @@ const zhCN: MessageTree = {
         invalid: '源里是空值',
         skipped: '已存在，保留本地',
         ignored: '不适用',
-        failed: '写入失败'
+        failed: '写入失败',
+        rekeyed: '已修好'
+      },
+      // 「N 条密钥需要重新填写」：面板级警告，不是失败。{n} 是条数。
+      unrecoverable: {
+        title: '{n} 条密钥需要重新填写',
+        hint: '这几条是原版加密的，本应用读不出来。去「设置 › 模型」把对应的密钥重新填一遍就能用；别的都已导入，不用重来。',
+        more: '还有 {n} 条',
+        goSettings: '去设置 › 模型重填'
       },
       steps: {
         gate: '检查原版状态',
@@ -2743,14 +2752,22 @@ const en: MessageTree = {
         invalid: '{n} keys were empty or corrupt in the source',
         skipped: '{n} already present, kept yours',
         ignored: '{n} not applicable, ignored',
-        failed: '{n} couldn’t be written'
+        failed: '{n} couldn’t be written',
+        rekeyed: '{n} of them were unusable before and are fixed now'
       },
       secretGroup: {
         noEncryption: 'Add by hand',
         invalid: 'Empty in source',
         skipped: 'Already present',
         ignored: 'Not applicable',
-        failed: 'Write failed'
+        failed: 'Write failed',
+        rekeyed: 'Fixed now'
+      },
+      unrecoverable: {
+        title: '{n} keys need to be entered again',
+        hint: 'These were encrypted by the original app and can’t be read here. Add the matching keys again under Settings › Models and they will work — everything else was imported, no need to start over.',
+        more: '{n} more',
+        goSettings: 'Go to Settings › Models'
       },
       steps: {
         gate: 'Checking the original app',

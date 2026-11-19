@@ -3773,6 +3773,12 @@ button.cf-mask__pill:hover {
 .cf-imp__note-tag.is-plain {
   color: var(--fg-subtle);
 }
+/* 修好的坏密文：成功色。让「重新导一次」有可见结果，不与任何失败色混用。 */
+.cf-imp__note-tag.is-good {
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, transparent);
+  color: var(--success);
+}
 .cf-imp__row .cf-imp__link {
   margin-left: auto;
 }
@@ -3886,6 +3892,53 @@ button.cf-mask__pill:hover {
   color: var(--fg-subtle);
   font-size: 12px;
   line-height: 1.5;
+}
+/* 「N 条密钥需要重新填写」：面板级**警告**，不是失败。
+   刻意不用红（--danger）：report.ok 是 true、别的都导进来了，标红会让用户以为整轮白干。
+   用警示色 + 实心左缘，与失败清单（红边、红底）在视觉上明确区分开。 */
+.cf-imp__warn {
+  margin-top: var(--space-3);
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, var(--border));
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warning) 6%, transparent);
+}
+.cf-imp__warnhead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warning);
+  font-size: 13px;
+  font-weight: 600;
+}
+.cf-imp__warndesc {
+  margin: 4px 0 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+/* 逐条列出 key 名：用户要知道是哪几条，否则打开设置面对一堆服务商无从下手。 */
+.cf-imp__keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.cf-imp__keys code {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.cf-imp__warnact {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: 8px;
 }
 .cf-imp__actions {
   display: flex;

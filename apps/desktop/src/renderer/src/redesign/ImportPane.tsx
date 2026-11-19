@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Check, ChevronDown, Download, Loader2, RefreshCw, ShieldAlert } from 'lucide-react'
 import { useI18n } from '../i18n/i18n'
 import { useExtensions } from '../store/extensions'
+import { openModelSettings } from './modelSettingsBus'
 import {
   isImportAvailable,
   onImportProgress,
@@ -403,6 +404,10 @@ export function ImportPane(): React.JSX.Element {
             ))}
           </ul>
 
+          {/* 需要重填的密钥：面板级警告，**不是失败**（report.ok 由主进程保证，unrecoverable 不进 failed）。
+              放在失败清单之前——它是用户眼下唯一要动手的事。 */}
+          <UnrecoverableNotice keys={report.secrets.unrecoverable} />
+
           {/* 失败常驻：步骤 + 对象 + 原因都写出来，用户才知道该去清哪几条记忆。
               但条数可能几百条（媒体目录被占位时 396 个文件逐条失败），默认只显示 FAILURE_LIMIT 条，
               剩下用「还有 N 条」+ 展开入口带过；展开后按 step 分组，避免一长串要滚着找哪一步出问题。 */}
@@ -522,11 +527,11 @@ interface StepRow {
   noteIds?: Array<{ kind: string; ids: string[] }>
 }
 
-/** 密钥行的一条附加说明。tone 决定颜色：bad = 用户必须动手，warn = 需要注意，plain = 正常情况。 */
+/** 密钥行的一条附加说明。tone 决定颜色：bad = 用户必须动手，warn = 需要注意，plain = 正常情况，good = 修好了。 */
 interface SecretNote {
-  kind: 'noEncryption' | 'invalid' | 'skipped' | 'ignored' | 'failed'
+  kind: 'noEncryption' | 'invalid' | 'skipped' | 'ignored' | 'failed' | 'rekeyed'
   count: number
-  tone: 'bad' | 'warn' | 'plain'
+  tone: 'bad' | 'warn' | 'plain' | 'good'
 }
 
 /** 明细最多列这么多条（跳过几十个会话时不必把列表摊满整屏），余下的用一句「还有 N 个」带过。 */
@@ -543,6 +548,12 @@ const DETAIL_LIMIT = 12
 const FAILURE_LIMIT = 8
 
 /**
+ * 「需要重填的密钥」默认显示几条。选 5 的理由：这类清单正常就 1~3 条（用户手里实测是 2 条），
+ * 5 行足够全放下、也不占地方；真到十几条时折叠成「还有 N 条」，点开再看全。
+ */
+const UNRECOVERABLE_LIMIT = 5
+
+/**
  * 密钥行。`report.secrets` 是 `SecretsStat`（不再是 `StepStat` 兼容形状），必须专门摊：
  *
  * | 分桶 | 含义 | 界面 |
@@ -553,12 +564,16 @@ const FAILURE_LIMIT = 8
  * | `invalid` | 源里那条本身是空值/坏值 | 警示色：用户该知道有东西没导进来 |
  * | `ignored` | 不适用（`remote:` / `mcp:` 无主密文） | 最次要位置，正常情况 |
  * | `failed` | 真失败（写盘失败等） | 危险色，进失败清单 |
+ * | `rekeyed` | 覆盖修好了目标里原有的坏密文 | 成功色：让「重新导一次」有可见结果 |
+ *
+ * **`unrecoverable` 不在本行显示**：它是「用户的动作」（去设置重填），不是「这一步的结果」，
+ * 单列成面板级警告见 {@link UnrecoverableNotice}——混进这一行的标签里，用户会以为导入失败了。
  *
  * **`no-encryption` 会同时出现在 `noEncryption` 和 `failed` 里**（主进程有意为之：既单列、也压 ok=false，
  * 因为「密钥全没存进去却报导入完成」用户不会去重填）。所以 failed 的计数与明细都要**排除**这批，
  * 否则同一个 id 会在界面上报两遍。
  */
-function secretsRow(stat: SecretsStat): StepRow {
+export function secretsRow(stat: SecretsStat): StepRow {
   // 主进程对 no-encryption 的条目既塞进 noEncryption 也塞进 failed（reason 为 'no-encryption'）。
   // 这里把它们从 failed 里摘出来，只由 noEncryption 那一条说明来代表，避免重复报。
   const noEncKeys = new Set(stat.noEncryption)
@@ -568,11 +583,14 @@ function secretsRow(stat: SecretsStat): StepRow {
   const notes: SecretNote[] = []
   if (stat.noEncryption.length > 0) notes.push({ kind: 'noEncryption', count: stat.noEncryption.length, tone: 'bad' })
   if (realFailed.length > 0) notes.push({ kind: 'failed', count: realFailed.length, tone: 'bad' })
+  // 修好的坏密文：成功色。它是 copied 的子集，故只在这里多说一句「其中 N 条是修好的」，不改 copied 的计数。
+  if (stat.rekeyed.length > 0) notes.push({ kind: 'rekeyed', count: stat.rekeyed.length, tone: 'good' })
   if (stat.invalid.length > 0) notes.push({ kind: 'invalid', count: stat.invalid.length, tone: 'warn' })
   if (stat.skipped.length > 0) notes.push({ kind: 'skipped', count: stat.skipped.length, tone: 'plain' })
   if (stat.ignored.length > 0) notes.push({ kind: 'ignored', count: stat.ignored.length, tone: 'plain' })
   return {
     step: 'secrets',
+    // 「导入了几条密钥」的唯一口径就是 copied：`rekeyed` 是它的子集，加进去会重复计数。
     copied: stat.copied.length,
     // 保留真实数字：`noopRun`（第二次跑「跳过 N 个，无新增」）与 skippedTotal 都按这个累加，
     // 置 0 会让只跳过了密钥的那一轮误报成「导入完成」。展示处对带 notes 的行不显示这一列——
@@ -586,6 +604,7 @@ function secretsRow(stat: SecretsStat): StepRow {
     noteIds: [
       { kind: 'noEncryption', ids: stat.noEncryption },
       { kind: 'failed', ids: realFailed.map((f) => f.id) },
+      { kind: 'rekeyed', ids: stat.rekeyed },
       { kind: 'invalid', ids: stat.invalid },
       { kind: 'skipped', ids: stat.skipped },
       { kind: 'ignored', ids: stat.ignored }
@@ -596,6 +615,54 @@ function secretsRow(stat: SecretsStat): StepRow {
 /** 密钥行一条说明的文案。 */
 function secretNoteText(n: SecretNote, t: (k: string) => string): string {
   return t(`settings.import.secretNote.${n.kind}`).replace('{n}', String(n.count))
+}
+
+/**
+ * 「N 条密钥需要重新填写」——面板级警告，**不是失败**。
+ *
+ * 为什么单独一块、而不是密钥行里的一个标签：
+ *  - 这一栏讲的是**用户要做什么**（去设置重填），不是「这一步导了什么」；
+ *  - `report.ok` 已由主进程保证为 true（`unrecoverable` 刻意不进 `failed`，见 importer-config.ts 的注释），
+ *    所以绝不能跟着失败清单一起用危险色/「导入失败」的措辞——那会让用户以为整轮白干了；
+ *  - 用户必须知道**是哪几条**：只报数字，他打开设置面对一堆服务商无从下手。
+ *
+ * 逐条列 key 名，超过 UNRECOVERABLE_LIMIT 条折叠（与失败清单同一套「先看几条、再展开」的做法，
+ * 但这里是按钮切换而非条件渲染：重填清单通常就几条，折叠只为不让 10+ 条的极端情况把面板撑爆）。
+ */
+function UnrecoverableNotice({ keys }: { keys: string[] }): React.JSX.Element {
+  const { t } = useI18n()
+  const [open, setOpen] = useState(false)
+  if (keys.length === 0) return <></>
+  const shown = open ? keys : keys.slice(0, UNRECOVERABLE_LIMIT)
+  const hidden = keys.length - shown.length
+  return (
+    <div className="cf-imp__warn">
+      <div className="cf-imp__warnhead">
+        <AlertTriangle size={14} />
+        <span>{t('settings.import.unrecoverable.title').replace('{n}', String(keys.length))}</span>
+      </div>
+      <p className="cf-imp__warndesc">{t('settings.import.unrecoverable.hint')}</p>
+      <ul className="cf-imp__keys">
+        {shown.map((k) => (
+          <li key={k}>
+            <code>{k}</code>
+          </li>
+        ))}
+        {hidden > 0 && (
+          <li>
+            <button type="button" className="cf-imp__link" onClick={() => setOpen(true)}>
+              {t('settings.import.unrecoverable.more').replace('{n}', String(hidden))}
+            </button>
+          </li>
+        )}
+      </ul>
+      <div className="cf-imp__warnact">
+        <button type="button" className="btn btn--ghost" onClick={openModelSettings}>
+          {t('settings.import.unrecoverable.goSettings')}
+        </button>
+      </div>
+    </div>
+  )
 }
 
 /**
