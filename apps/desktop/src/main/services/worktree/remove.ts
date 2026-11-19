@@ -36,7 +36,7 @@ import { invalidateSize } from './list'
 export interface RemoveResult {
   ok: boolean
   /** 为什么没删（仅在 `ok:false` 时有值）。 */
-  reason?: 'not-found' | 'dirty' | 'unreadable' | 'remove-failed'
+  reason?: 'not-found' | 'dirty' | 'installing' | 'unreadable' | 'remove-failed'
   message?: string
   /** 未提交改动数（`dirty` 时给用户看，决定要不要强制删）。 */
   dirtyCount?: number
@@ -126,7 +126,24 @@ export async function removeWorktree(req: RemoveRequest): Promise<RemoveResult> 
     const warnings: string[] = []
     const res: RemoveResult = { ...empty, warnings }
 
-    // ── 0. 脏检查：未提交改动默认拒绝 ──
+    /*
+     * ── 0. 依赖正在装：**无条件拒绝**，且不给「强制」选项（A53 / R8）──
+     *
+     * 这一条必须在脏检查**之前**：安装过程本身就会往 node_modules 里写，
+     * 所以「有未提交改动」在安装期间几乎恒成立，用户看到的会是 dirty 提示并勾选强制删除——
+     * 而真正该拦的是「安装进程正在写这个目录」，强制删会把安装进程写进一个已删除的路径。
+     *
+     * 拒绝时不返回 `dirtyCount`：这里没有「确认后就能删」的选项，给了反而诱导用户去找勾选。
+     */
+    if (rec.deps === 'installing') {
+      return {
+        ...res,
+        reason: 'installing',
+        message: '依赖正在安装，等它结束或失败后再删。'
+      }
+    }
+
+    // ── 1. 脏检查：未提交改动默认拒绝 ──
     const dirty = await dirtyCountOf(path)
     if (dirty === null) {
       // 目录不在 / 读不出来：没有东西会丢，继续往下走（解登记 + 删记录仍然有意义）

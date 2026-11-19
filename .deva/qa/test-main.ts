@@ -3867,6 +3867,64 @@ async function scenarioWorktree(): Promise<void> {
       'lockHolder' in finalItem,
     JSON.stringify(finalItem)
   )
+
+  /*
+   * ══ A53：删除 worktree 的三条出口 ══
+   *
+   * 三条都要验，因为它们的**用户动作不同**：
+   *  - dirty → 报出改动数，用户勾「我知道会丢」后能删
+   *  - installing → 无条件拒绝，**不给勾选项**（安装进程正在写这个目录）
+   *  - 干净 → 直接删
+   * 只验「能删」会漏掉前两条，而它们才是防数据丢失的那部分。
+   */
+  const RMW = await import('../../apps/desktop/src/main/services/worktree/remove')
+
+  const rmPath = path.join(DST, 'wts', 'a53')
+  const rmCreate = await CR.createWorktree({
+    repoRoot: repo,
+    branch: 'wt/a53',
+    path: rmPath,
+    skipDeps: true
+  })
+  if (!rmCreate.ok) {
+    fail('A53：前置创建不该失败', JSON.stringify(rmCreate))
+  } else {
+    // ── 出口一：3 个未提交改动 → 拒绝并回 dirtyCount:3 ──
+    for (const n of ['d1.txt', 'd2.txt', 'd3.txt']) fs.writeFileSync(path.join(rmPath, n), 'x\n')
+    const dirtyRes = await RMW.removeWorktree({ path: rmPath })
+    eq('A53：3 个未提交改动时拒绝删除', dirtyRes.ok, false)
+    eq('A53：拒绝原因是 dirty', dirtyRes.reason, 'dirty')
+    eq('A53：回传 dirtyCount=3', dirtyRes.dirtyCount, 3)
+    check('A53：拒绝后目录还在', fs.existsSync(rmPath), '')
+    check('A53：拒绝后三个改动文件都还在', ['d1.txt', 'd2.txt', 'd3.txt'].every((n) => fs.existsSync(path.join(rmPath, n))), '')
+
+    // ── 出口二：deps 正在装 → 无条件拒绝，且**不给 dirtyCount**（没有「确认后可删」这条路）──
+    const recA53 = S.getRecord(rmPath)
+    if (recA53) {
+      S.upsertRecord({ ...recA53, deps: 'installing' })
+      const installingRes = await RMW.removeWorktree({ path: rmPath, force: true })
+      eq('A53：installing 时即使 force 也拒绝', installingRes.ok, false)
+      eq('A53：拒绝原因是 installing', installingRes.reason, 'installing')
+      eq(
+        'A53：installing 时不回 dirtyCount（不给勾选诱导）',
+        installingRes.dirtyCount,
+        undefined
+      )
+      // 还原 deps 状态，否则后面的清理走不下去
+      const recBack = S.getRecord(rmPath)
+      if (recBack) S.upsertRecord({ ...recBack, deps: 'skipped' })
+    }
+
+    // ── 出口三：勾了「我知道会丢」→ 能删，且要在 warnings 里说明丢了几处 ──
+    const forceRes = await RMW.removeWorktree({ path: rmPath, force: true })
+    eq('A53：force 后删除成功', forceRes.ok, true)
+    check('A53：force 后目录真的没了', !fs.existsSync(rmPath), '')
+    check(
+      'A53：force 时说明丢了 3 处改动（不能静默丢数据）',
+      forceRes.warnings.some((w) => w.includes('3 处')),
+      JSON.stringify(forceRes.warnings)
+    )
+  }
 }
 
 /**

@@ -257,7 +257,7 @@ export interface WorktreeRemoveReq {
 export interface WorktreeRemoveResult {
   ok: boolean
   /** 没删成的原因（`ok:false` 时有值）。`dirty` 时 `dirtyCount` 一并给出。 */
-  reason?: 'not-found' | 'dirty' | 'unreadable' | 'remove-failed'
+  reason?: 'not-found' | 'dirty' | 'installing' | 'unreadable' | 'remove-failed'
   message?: string
   dirtyCount?: number
   worktreeRemoved: boolean
