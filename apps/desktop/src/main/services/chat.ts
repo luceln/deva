@@ -486,11 +486,13 @@ export function registerChatIpc(getWin: () => BrowserWindow | null): void {
 
   ipcMain.handle('chat:send', (_e, payload: ChatSendRequest) => sendMessage(payload))
 
-  // 回合进行中插入消息（见 insertMessage）；撤回全部待送达的，返回合并后的原文供放回输入框。
+  // 回合进行中插入消息（见 insertMessage）；撤回全部待送达的，返回合并后的原文 + 附件供放回输入框。
   ipcMain.handle('chat:insert', (_e, payload: ChatInsertRequest): ChatInsertResult => insertMessage(payload))
-  ipcMain.handle('chat:withdraw-inserts', (_e, sessionId: string): { text: string } => ({
-    text: takeInserts(sessionId) ?? ''
-  }))
+  ipcMain.handle('chat:withdraw-inserts', (_e, sessionId: string): { text: string; attachments: string[] } => {
+    const taken = takeInserts(sessionId)
+    // 附件一起退：用户插话发的截图不能因为点「撤回」就没了
+    return { text: taken?.text ?? '', attachments: taken?.attachments ?? [] }
+  })
 
   /* 说明：persona 绑定与聚焦工作区都已由 ensureSession 落在 session 上，runTurn 内直接读取 —— 见其实现。 */
 

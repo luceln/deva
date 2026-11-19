@@ -133,6 +133,14 @@ export interface ChatInsertRequest {
   sessionId: string
   text: string
   model: ChatModelConfig
+  /**
+   * 用户经原生选择框挑选的附件绝对路径（与 `ChatSendRequest.attachments` 同义：
+   * 正文由主进程读取，base64 不经渲染层）。
+   *
+   * 回合进行中插话也要能带截图——用户看到问题想立刻指出，不可能等回合结束。
+   * 附件与正文同路：送达时一起进模型输入，撤回时一起放回输入框。
+   */
+  attachments?: string[]
 }
 
 /**
@@ -612,8 +620,9 @@ export type ChatStreamEvent =
   | { type: 'inserts'; pending: string[] }
   /**
    * 回合被停止或出错，待送达的插入消息不再发出（会话级，空 turnId）：渲染层把 text 放回该对话的输入框。
+   * `attachments` 一并放回——插话带的截图不能因为回合被停就丢了。
    */
-  | { type: 'inserts_returned'; text: string }
+  | { type: 'inserts_returned'; text: string; attachments?: string[] }
   /** durationMs：本轮耗时（扣除等用户处置的时间），渲染层据此给工作过程折叠条显示「已处理 X」。 */
   | { type: 'done'; stopReason: StopReason; durationMs?: number }
   /**

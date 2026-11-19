@@ -147,9 +147,29 @@ interface PendingInsert {
   fromRemote: boolean
   /** 主智能体派给成员、插进它当前工作的任务：member_send 的调用 id（取走时据此记为已送达，见 markDispatchesDelivered）。 */
   dispatchId?: string
+  /** 附件绝对路径：送达时与正文一起进模型输入；退回输入框时一起放回（否则用户的截图就丢了）。 */
+  attachments?: string[]
 }
 
 const pendingInserts = new Map<string, PendingInsert[]>()
+
+/**
+ * 测试专用：把某个会话标成「有一轮在接受插入」，用完调 `clearInsertableForTest` 复位。
+ *
+ * 存在的理由：`insertableTurns` 只有 `runTurn` 内部会 add，而跑一个真实回合要拉起 provider 流
+ * （联网 + 不可控时延）。要独立验证「插话的附件怎么入队 / 怎么取走 / 怎么退回」，
+ * 需要能直接把这条状态摆出来。生产代码不调用（`grep -rn markInsertableForTest src/main` 只应命中本处）。
+ */
+export function markInsertableForTest(sessionId: string, turnId: string): void {
+  busySessions.set(sessionId, turnId)
+  insertableTurns.add(turnId)
+}
+
+/** 测试专用：清掉 `markInsertableForTest` 摆出的状态。 */
+export function clearInsertableForTest(sessionId: string, turnId: string): void {
+  if (busySessions.get(sessionId) === turnId) busySessions.delete(sessionId)
+  insertableTurns.delete(turnId)
+}
 
 /** 回合由谁发起：桌面输入框 / 手机端 / 调度器（定时任务）。只有调度器发起的是无人值守（见 runTurn）。 */
 /**
@@ -212,11 +232,22 @@ function emitInserts(sessionId: string): void {
  */
 export function insertMessage(req: ChatInsertRequest, fromRemote = false, dispatchId?: string): ChatInsertResult {
   const text = req.text.trim()
-  if (!text) return { ok: false, reason: 'empty' }
+  /*
+   * 只有附件、没有正文也算有效插入（与普通发送一致：`attachments.length` 时正文可以是空串）。
+   * 以前这里 `if (!text) return empty` 会把「截图 + 一句话都没打」的插话直接拒掉。
+   */
+  const attachments = req.attachments?.filter((p) => typeof p === 'string' && p.trim() !== '')
+  if (!text && !attachments?.length) return { ok: false, reason: 'empty' }
   const turnId = busySessions.get(req.sessionId)
   if (!turnId) return { ok: false, reason: 'idle' }
   if (!insertableTurns.has(turnId)) return { ok: false, reason: 'busy' }
-  const entry: PendingInsert = { text, model: req.model, fromRemote, ...(dispatchId ? { dispatchId } : {}) }
+  const entry: PendingInsert = {
+    text,
+    model: req.model,
+    fromRemote,
+    ...(dispatchId ? { dispatchId } : {}),
+    ...(attachments?.length ? { attachments } : {})
+  }
   const queue = pendingInserts.get(req.sessionId)
   if (queue) queue.push(entry)
   else pendingInserts.set(req.sessionId, [entry])
@@ -224,15 +255,35 @@ export function insertMessage(req: ChatInsertRequest, fromRemote = false, dispat
   return { ok: true }
 }
 
-/** 取走某会话全部待送达的插入消息，合并成一段原文（没有则 null）。 */
-export function takeInserts(sessionId: string): string | null {
+/** 一次插入送达的完整内容：合并后的正文 + 全部附件路径（去重、保持顺序）。 */
+export interface TakenInserts {
+  text: string
+  attachments: string[]
+}
+
+/**
+ * 取走某会话全部待送达的插入消息，合并成一段原文 + 附件列表（没有则 null）。
+ *
+ * 返回结构化而不是纯 string：附件必须真的进这一轮的模型输入，不能只显示一个 chip。
+ * 与正文合并语义一致——多条插话的附件按插入顺序并在一起，同一个文件只留一份
+ * （用户可能对同一条截图点两次「插入」，重复喂给模型只是多花钱）。
+ */
+export function takeInserts(sessionId: string): TakenInserts | null {
   const queue = pendingInserts.get(sessionId)
   if (!queue?.length) return null
   pendingInserts.delete(sessionId)
   emitInserts(sessionId)
   const dispatched = queue.flatMap((e) => (e.dispatchId ? [e.dispatchId] : []))
   if (dispatched.length) markDispatchesDelivered(sessionId, dispatched)
-  return queue.map((e) => e.text).join('\n\n')
+  const seen = new Set<string>()
+  const attachments: string[] = []
+  for (const e of queue)
+    for (const p of e.attachments ?? [])
+      if (!seen.has(p)) {
+        seen.add(p)
+        attachments.push(p)
+      }
+  return { text: queue.map((e) => e.text).join('\n\n'), attachments }
 }
 
 /**
@@ -242,15 +293,30 @@ export function takeInserts(sessionId: string): string | null {
 function flushInserts(sessionId: string, endReason: StopReason): boolean {
   const queue = pendingInserts.get(sessionId)
   if (!queue?.length) return false
-  const text = takeInserts(sessionId) as string
-  const giveBack = (): void => emit('', sessionId, { type: 'inserts_returned', text })
+  const taken = takeInserts(sessionId) as TakenInserts
+  /*
+   * 退回输入框时**附件要跟着一起退**：用户插话带了一张截图，回合被停止后只把正文放回去、
+   * 附件没了，那张图就凭空消失了（他得重新截一次）。
+   */
+  const giveBack = (): void =>
+    emit('', sessionId, {
+      type: 'inserts_returned',
+      text: taken.text,
+      ...(taken.attachments.length ? { attachments: taken.attachments } : {})
+    })
   if (endReason === 'aborted' || endReason === 'error' || shuttingDown) {
     giveBack()
     return false
   }
   // 没有附件时 sendMessage 在起轮之前不会让出执行权：返回时下一轮已经开始，会话又是忙的。
   sendMessage(
-    { sessionId, text, model: queue[queue.length - 1].model, workspaceRoot: null },
+    {
+      sessionId,
+      text: taken.text,
+      model: queue[queue.length - 1].model,
+      workspaceRoot: null,
+      ...(taken.attachments.length ? { attachments: taken.attachments } : {})
+    },
     queue.every((e) => e.fromRemote)
   ).catch(giveBack)
   return true

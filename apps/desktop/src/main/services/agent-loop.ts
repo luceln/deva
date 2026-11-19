@@ -46,6 +46,7 @@ import {
   SUBAGENT_EXCLUDED
 } from './tool-catalog'
 import { loadProjectDoc } from './project-doc'
+import { ATTACHMENTS_ONLY_QUESTION, buildAttachmentPart } from './attachments'
 import { getSubagentMeta } from './subagent-store'
 import { runSubagentCall, runsInBackground } from './subagent-run'
 import {
@@ -172,10 +173,12 @@ interface AgentLoopArgs {
    */
   takeNotices?: () => string | null
   /**
-   * 取走本会话待送达的插入消息（见 pendingInserts），返回合并后的原文（没有则 null）：每步工具结果回灌前、
-   * 取完通知之后调用，有则附在最后，并发 insert 事件。仅主轮传入。
+   * 取走本会话待送达的插入消息（见 pendingInserts），返回合并后的正文 + 附件路径（没有则 null）：
+   * 每步工具结果回灌前、取完通知之后调用，有则附在最后，并发 insert 事件。仅主轮传入。
+   *
+   * 返回结构化而不是纯 string：插话可以带附件，附件要真的进这一轮的模型输入（见 runStepTools）。
    */
-  takeInserts?: () => string | null
+  takeInserts?: () => { text: string; attachments: string[] } | null
   /**
    * 每收到一次真实用量即回调（主轮据此持久化 lastInputTokens 作压缩触发依据）。
    * input 为**总提示 token**（含缓存命中/写入）；cacheRead/cacheWrite 仅供观测，不参与任何判定。
@@ -1068,8 +1071,27 @@ async function runStepTools(run: LoopRun, st: ModelStep): Promise<LoopResult | n
   // 由回合收尾退回输入框。
   const inserted = abortedHere ? null : (args.takeInserts?.() ?? null)
   if (inserted) {
-    resultParts.push({ type: 'text', text: insertText(inserted, isEn()) })
-    emit(turnId, sessionId, { type: 'insert', text: plainTaskText(inserted) })
+    /*
+     * 附件必须真的进模型输入，不能只显示 chip（用户插话发截图就是为了让模型**看到**那张图）。
+     * 复用普通发送那条链路（`buildAttachmentPart`），不另写一套读取/编码：
+     * 图片走 base64 的 image 块、二进制走 file 块（只给位置）、读不进的走提示。
+     *
+     * 放在正文**之前**，与普通发送一致（`chat-turns.ts` 的「附件内容块在前，提问正文在后」）。
+     */
+    const insertParts: ContentPart[] = []
+    const insertNotes: string[] = []
+    for (const p of inserted.attachments) {
+      const { part, note } = await buildAttachmentPart(p, args.model.adapter)
+      if (part) insertParts.push(part)
+      if (note) insertNotes.push(note)
+    }
+    const body =
+      inserted.text.trim() ||
+      (insertParts.length ? ATTACHMENTS_ONLY_QUESTION : '')
+    const noteSuffix = insertNotes.length ? `\n（${insertNotes.join('；')}）` : ''
+    resultParts.push(...insertParts)
+    resultParts.push({ type: 'text', text: insertText(body + noteSuffix, isEn()) })
+    emit(turnId, sessionId, { type: 'insert', text: plainTaskText(inserted.text) })
   }
   history.push({ role: 'user', content: resultParts })
   args.onStep?.()

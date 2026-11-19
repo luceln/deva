@@ -860,8 +860,12 @@ const api = {
       ipcRenderer.invoke('chat:send', req),
     /** 回合进行中插入一条消息（见 ChatInsertRequest）。 */
     insert: (req: ChatInsertRequest): Promise<ChatInsertResult> => ipcRenderer.invoke('chat:insert', req),
-    /** 撤回某对话全部待送达的插入消息，返回合并后的原文（没有则为空串）。 */
-    withdrawInserts: (sessionId: string): Promise<{ text: string }> =>
+    /**
+     * 撤回某对话全部待送达的插入消息，返回合并后的原文 + 附件（没有则为空串 / 空数组）。
+     *
+     * 附件必须一起回：用户插话发的截图不能因为点「撤回」就凭空消失。
+     */
+    withdrawInserts: (sessionId: string): Promise<{ text: string; attachments: string[] }> =>
       ipcRenderer.invoke('chat:withdraw-inserts', sessionId),
     /** 手动压缩历史（/compact）：无后续模型轮，只回发 compacted + done 事件。 */
     compact: (req: ChatCompactRequest): Promise<{ turnId: string }> =>
