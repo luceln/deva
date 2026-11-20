@@ -2,6 +2,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { setEnabled, upsertServerChecked, type McpValue } from './services/mcp-config'
+import { pluginManagedProviderIds } from './services/plugin-managed'
 import { backupBroken, inspectTarget } from './importer-target'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
@@ -113,8 +114,13 @@ function isSafeId(id: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id) && id !== '.' && id !== '..'
 }
 
-export function importMcp(srcHome: string): StepStat & { failed: Failure[] } {
-  const stat: StepStat & { failed: Failure[] } = { copied: [], skipped: [], failed: [] }
+export function importMcp(srcHome: string): StepStat & { failed: Failure[]; pluginManaged: string[] } {
+  const stat: StepStat & { failed: Failure[]; pluginManaged: string[] } = {
+    copied: [],
+    skipped: [],
+    failed: [],
+    pluginManaged: []
+  }
   const fail = (id: string, reason: string): void => {
     stat.failed.push({ step: 'mcp', id, reason })
   }
@@ -137,12 +143,34 @@ export function importMcp(srcHome: string): StepStat & { failed: Failure[] } {
   const ids = Object.keys(srcMap)
   if (!ids.length) return stat
 
+  /*
+   * 插件托管的 MCP 条目：**主动排除，不是 skipped**（与 importer-config.ts 的服务商判定同一份所有权）。
+   *
+   * magpie 插件的 `mcpServers` 条目（指向本机网关 `127.0.0.1:3425/mcp/magpie/hub`）是插件自己写进原版
+   * `mcp.json` 的。二开版没装插件时把它搬过来，就是一个连不上的死条目：用户看到「MCP 已导入 1 个」，
+   * 点开发现永远连不上，还得自己去删。
+   *
+   * 判据必须是**插件自己声明的所有权**（`pluginManagedProviderIds` 读 `.magpie-agent.state.json` 的
+   * `providerId`），不能写死 `magpie` 字面量：插件允许改名（`magpie-2`）、也可能换成别的 id，
+   * 写死会在改名时静默失效，表现正是「死条目又回来了」。
+   *
+   * ⚠️ 归 `pluginManaged` 而不是 `skipped`：`skipped` 的语义是「目标已有同名、保留本地、不用管」，
+   * 而这里是**根本没打算导**。混进 skipped 会让用户以为本地本来就有一份。
+   */
+  const pluginIds = pluginManagedProviderIds([srcHome, getDevaHome()])
+  const wanted = ids.filter((id) => {
+    if (!pluginIds.has(id)) return true
+    stat.pluginManaged.push(id)
+    return false
+  })
+  if (!wanted.length) return stat
+
   // ② 目标 mcp.json 四态：被占位 / 读不出时**一个字节都不写**
   const dst = targetState()
   if (dst === 'blocked' || dst === 'unreadable') {
     // 整份目标配置都动不了：逐条报失败，id 用服务 id 让用户知道是**哪些**没进来
     const reason = dst === 'blocked' ? 'target-blocked' : 'target-unreadable'
-    for (const id of ids) stat.failed.push({ step: 'mcp', id, reason })
+    for (const id of wanted) stat.failed.push({ step: 'mcp', id, reason })
     return stat
   }
 
@@ -162,13 +190,13 @@ export function importMcp(srcHome: string): StepStat & { failed: Failure[] } {
     existing = dst === 'absent' ? new Set() : existingIds()
   } catch {
     // 探测与读取之间被抢走：现在不知道里面有什么，绝不覆盖
-    for (const id of ids) fail(id, 'target-unreadable')
+    for (const id of wanted) fail(id, 'target-unreadable')
     return stat
   }
 
   // ③ 逐条并入：只补目标没有的 id
   const imported: string[] = []
-  for (const id of ids) {
+  for (const id of wanted) {
     if (!isSafeId(id)) {
       /*
        * 非法 id 搬不了（要当映射键与密钥前缀 `mcp:<id>:<field>`，含冒号/分隔符会撕开命名空间）。

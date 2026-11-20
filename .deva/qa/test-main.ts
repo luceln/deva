@@ -4910,6 +4910,68 @@ async function scenarioPluginManaged(): Promise<void> {
       JSON.stringify(st2.pluginManaged)
     )
   }
+
+  /*
+   * ── ⑤ MCP：插件托管的 mcpServers 条目必须主动排除（P2 magpie 死条目）──
+   *
+   * magpie 插件会往原版 `mcp.json` 写一条指向本机网关的服务（`127.0.0.1:3425/mcp/magpie/hub`）。
+   * 二开版没装插件时把它搬过来就是一条永远连不上的死条目，而报告还显示「MCP 已导入 1 个」。
+   *
+   * 判据必须与 provider 一致：读插件状态文件里的 `providerId`，不硬编码 magpie 字面量。
+   */
+  const { importMcp } = await import('../../apps/desktop/src/main/importer-mcp')
+  {
+    const mcpSrc = path.join(DST, 'plug-mcp-src')
+    fs.mkdirSync(mcpSrc, { recursive: true })
+    // 源侧声明插件托管 gw-relay-7（故意不用 'magpie' 这个字面量）
+    fs.writeFileSync(
+      path.join(mcpSrc, '.magpie-agent.state.json'),
+      JSON.stringify({ providerId: 'gw-relay-7', ownedSecret: true })
+    )
+    fs.writeFileSync(
+      path.join(mcpSrc, 'mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          'gw-relay-7': { name: 'magpie hub', transport: 'http', url: 'http://127.0.0.1:3425/mcp/magpie/hub' },
+          'my-context7': { name: 'context7', transport: 'http', url: 'https://c7.example/mcp' },
+          'my-stdio': { name: 'stdio one', transport: 'stdio', command: 'node', args: ['x.js'] }
+        }
+      })
+    )
+    // 清掉目标 mcp.json，确保这次是干净起点
+    fs.rmSync(path.join(dstHome, 'mcp.json'), { force: true })
+    const st = importMcp(mcpSrc)
+    info('MCP 插件托管', JSON.stringify({ copied: st.copied, pluginManaged: st.pluginManaged, skipped: st.skipped }))
+    eq('MCP：插件托管的条目单列进 pluginManaged', st.pluginManaged, ['gw-relay-7'])
+    eq('MCP：它不算 copied', st.copied.includes('gw-relay-7'), false)
+    eq('MCP：它也不进 skipped（那会被误读成「目标已有」）', st.skipped.includes('gw-relay-7'), false)
+    const dstMcp = JSON.parse(fs.readFileSync(path.join(dstHome, 'mcp.json'), 'utf8')) as {
+      mcpServers?: Record<string, unknown>
+    }
+    eq('MCP：目标 mcp.json 里没有这条死条目', 'gw-relay-7' in (dstMcp.mcpServers ?? {}), false)
+    eq(
+      'MCP：非插件的条目照常复制',
+      Object.keys(dstMcp.mcpServers ?? {}).sort(),
+      ['my-context7', 'my-stdio']
+    )
+  }
+
+  // ⑥ 反向：抹掉插件声明 → 同一份源会被当普通条目导入（证明排除由判定驱动，不是无条件过滤）
+  {
+    const mcpSrc = path.join(DST, 'plug-mcp-src')
+    fs.rmSync(path.join(mcpSrc, '.magpie-agent.state.json'), { force: true })
+    // 目标侧也不留声明，否则并集仍会命中
+    fs.rmSync(path.join(dstHome, '.magpie-agent.state.json'), { force: true })
+    fs.rmSync(path.join(dstHome, 'mcp.json'), { force: true })
+    const st = importMcp(mcpSrc)
+    info('MCP 反向（无状态文件）', JSON.stringify({ copied: st.copied, pluginManaged: st.pluginManaged }))
+    eq('MCP 反向：没有插件声明时按普通条目导入（既有行为）', st.copied.includes('gw-relay-7'), true)
+    eq('MCP 反向：此时 pluginManaged 为空', st.pluginManaged, [])
+    const dstMcp = JSON.parse(fs.readFileSync(path.join(dstHome, 'mcp.json'), 'utf8')) as {
+      mcpServers?: Record<string, unknown>
+    }
+    eq('MCP 反向：条目确实落到了目标里', 'gw-relay-7' in (dstMcp.mcpServers ?? {}), true)
+  }
 }
 
 /**

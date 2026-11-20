@@ -196,7 +196,7 @@ export async function runImport(
      */
     onProgress?.({ step: 'mcp', done: 0, total: 0 })
     const mcp = importMcp(src)
-    report.mcp = { copied: mcp.copied, skipped: mcp.skipped, failed: mcp.failed }
+    report.mcp = { copied: mcp.copied, skipped: mcp.skipped, failed: mcp.failed, pluginManaged: mcp.pluginManaged }
 
     // 密钥补缺：与原版服务商 / MCP 服务配套的密文（没有密钥的服务等于不能用）。单独计，不混进各自步骤的数字。
     const secrets = await copySecrets(src)
