@@ -947,7 +947,7 @@ const zhCN: MessageTree = {
         ignored: '不适用',
         failed: '写入失败',
         rekeyed: '已修好',
-        pluginManaged: '归插件管，未导入'
+        pluginManaged: '由插件管理，未导入'
       },
       // 「N 条密钥需要重新填写」：面板级警告，不是失败。{n} 是条数。
       unrecoverable: {
@@ -1441,7 +1441,7 @@ const zhCN: MessageTree = {
       indexStaleHint: '模型的改动已经写进磁盘，没有丢。这一批会话的列表索引还没重建，刷新一次列表就会显示正确。',
       // 被放弃的项：既不是成功也不是失败，必须明说「这一项没改」以及它现在用的是哪个模型。
       supersededN: '{n} 个未改动（期间被改过或成员已移除）',
-      supersededKept: '未改动，现在用的是 {ref}',
+      supersededKept: '未改动，现在用的是{ref}',
       supersededHint: '点替换之后、写进去之前，这几项的状态变了（你自己换了模型，或成员被移除），所以没有覆盖。下面显示的是它们现在实际使用的模型：',
       refUnknown: '（未指定模型）',
       // 查不到名字的引用（模型已被删 / 手改进去的）：给一句人话，原始引用只进 title。
@@ -2852,7 +2852,7 @@ const en: MessageTree = {
         ignored: 'Not applicable',
         failed: 'Write failed',
         rekeyed: 'Fixed now',
-        pluginManaged: 'Owned by a plugin, not imported'
+        pluginManaged: 'Managed by a plugin, not imported'
       },
       unrecoverable: {
         title: '{n} keys need to be entered again',

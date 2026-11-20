@@ -14,7 +14,7 @@
 ```bash
 node .deva/qa/import-new-fields/build.cjs
 # 用内置浏览器打开 .deva/qa/import-new-fields/page.html（file:// 会拿缓存，改完加 ?v=时间戳）
-# 页面标题变 DONE n/18 即结束；window.__logs 里是逐条 PASS/FAIL
+# 页面标题变 DONE n/22 即结束；window.__logs 里是逐条 PASS/FAIL
 ```
 
 `build.cjs` 用 esbuild 把**真实的 `ImportPane` 与 `ModelSwapDialog`**（含 `Modal` / `Select` / i18n / CSS）
@@ -27,7 +27,7 @@ node .deva/qa/import-new-fields/build.cjs
 | `store/models` | 要断言 superseded 显示的是**模型名**（`Claude Lite`）而不是引用原文，需要固定服务商 |
 | `store/extensions` / `modelSettingsBus` | 导入成功后只调 refresh；本用例不验跳转 |
 
-## 18 条用例
+## 22 条用例
 
 **pluginManaged（A，导入报告）**
 
@@ -67,17 +67,28 @@ node .deva/qa/import-new-fields/build.cjs
 | toast 与对话框摘要**完全一致** | 失败项不在 toast 里消失 |
 | 中文侧仍是全角分隔符 | 没为英文把中文改坏 |
 
+**观感（F，同屏一致性与中文插值）**
+
+| 用例 | 证明了什么 |
+|---|---|
+| 中文 superseded 行插值前无空格（真名 / 空引用 / 未知三种） | 不再渲染成「用的是 Claude Lite」 |
+| 英文 superseded 行的空格保持 | 没有为中文把英文改坏 |
+| 中文同屏只有一套插件术语 | 标签与明细都是「由插件管理」，无双说法 |
+| 英文同屏只有一套插件术语 | 标签与明细都是 `managed by`，不残留 `Owned by` |
+
 **英文与字段名（D）**：英文环境下三项都说英文，且界面上不出现 `indexStale` / `superseded` / `pluginManaged`
 这类字段名。
 
 ## 结果
 
-- 修复后：**18/18 PASS**，`window.__errors` 为空。
+- 修复后：**22/22 PASS**，`window.__errors` 为空。
 - 反向验证 ①：把三处渲染分别短路（插件标签、indexStale 区块、superseded 区块）→ **1/11**（当时 11 条），
   失败的 10 条正好是依赖这三处展示的用例；唯一仍通过的是 C3，它本来就该通过。
 - 反向验证 ②（文案缺陷这批）：把 `refLabel` 回落改回引用原文、分隔符写死全角逗号、toast 去掉失败项、
   明细写死全角冒号顿号 → **14/18**，失败的是 E1 / E3 / E5 / E6；再把英文单复数改回 `{n} belong to a plugin`
-  → E4 失败。恢复后回到 **18/18**。
+  → E4 失败。恢复后回到 18/18。
+- 反向验证 ③（观感这批）：中文模板加回插值前的空格、术语改回「归插件管 / Owned by」→ **18/22**，
+  失败的是 F1（三种形态全红）/ F3 / F4，以及同样校验明细术语的 E5。恢复后回到 **22/22**。
 - 深色模式（`data-theme="dark"`）下看过一遍：标签颜色档位正常，无串色。
 
 ## 边界

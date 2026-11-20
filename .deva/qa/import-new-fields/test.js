@@ -190,7 +190,7 @@ ok('A4 密钥行的插件托管密钥不落进「需要重新填写」警告', a
   const row = rowOf('API 密钥')
   assert(row, '找不到密钥行')
   assert(/由插件管理，未导入/.test(row.textContent), `密钥行缺插件标签：${row.textContent}`)
-  // 它是「归插件管」，不是「去设置重填」——走错那条指引会让用户扑空
+  // 它是「由插件管理」，不是「去设置重填」——走错那条指引会让用户扑空
   eq(!!q('.cf-imp__warn'), false, '不该出现「需要重新填写」警告面板')
 })
 
@@ -377,7 +377,7 @@ ok('E5 导入明细里「分组名 + id」用英文冒号与逗号', async () =>
   const text = sub.textContent ?? ''
   assert(!text.includes('：'), `英文明细不该出现全角冒号：${text}`)
   assert(!text.includes('、'), `英文明细不该出现顿号：${text}`)
-  assert(/Owned by a plugin, not imported: magpie/.test(text), `分组名后应是英文冒号：${text}`)
+  assert(/Managed by a plugin, not imported: magpie/.test(text), `分组名后应是英文冒号：${text}`)
 })
 
 ok('E6 toast 与对话框摘要项数一致，失败项不能漏', async () => {
@@ -414,6 +414,88 @@ ok('E7 中文侧仍是全角分隔符（没为英文把中文改坏）', async (
   const summary = q('.modal__card .cf-swap__result').textContent ?? ''
   assert(/，/.test(summary), `中文摘要应用全角逗号：${summary}`)
   assert(!/, /.test(summary), `中文摘要不该用英文逗号：${summary}`)
+})
+
+// ── F. 观感：中文插值不多空格、同一屏一套术语 ──────────────────
+
+/** 中文里「用的是」后面紧跟插值：任何多出来的空格都是照搬英文模板留下的。 */
+const CJK_SPACE = /用的是\s+/
+
+ok('F1 中文 superseded 行在插值前没有多余空格（真名 / 未指定 / 另一个模型 三种）', async () => {
+  setLocale('zh-CN')
+  const cases = [
+    { ref: 'anthropic:claude-lite', label: '真实模型名' },
+    { ref: '', label: '空引用' },
+    { ref: 'openai:gpt-mystery', label: '查不到名字' }
+  ]
+  for (const c of cases) {
+    await runSwap({
+      changed: [],
+      skipped: [],
+      failed: [],
+      indexStale: [],
+      superseded: [broken('s4', '成员丙', c.ref)]
+    })
+    const kind = qa('.modal__card .cf-swap__kind').find((k) => /未改动/.test(k.textContent ?? ''))
+    assert(kind, `${c.label}：缺「未改动」那一句`)
+    const txt = kind.textContent ?? ''
+    assert(!CJK_SPACE.test(txt), `${c.label}：插值前多了空格 → ${JSON.stringify(txt)}`)
+    assert(/用的是\S/.test(txt) || /用的是$/.test(txt), `${c.label}：应为「用的是」紧接内容 → ${JSON.stringify(txt)}`)
+  }
+})
+
+ok('F2 英文 superseded 行的空格保持不变（英文需要这个空格）', async () => {
+  await runSwap(
+    {
+      changed: [],
+      skipped: [],
+      failed: [],
+      indexStale: [],
+      superseded: [broken('s4', 'Member C', 'anthropic:claude-lite')]
+    },
+    'en'
+  )
+  const kind = qa('.modal__card .cf-swap__kind').find((k) => /Not changed/.test(k.textContent ?? ''))
+  assert(kind, '缺「Not changed」那一句')
+  assert(/now using Claude Lite/.test(kind.textContent), `英文应有空格：${JSON.stringify(kind.textContent)}`)
+})
+
+ok('F3 中文同一屏只有一套插件术语（标签与明细都是「由插件管理」）', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({
+      top: { providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] } }
+    })
+  )
+  const row = rowOf('服务商')
+  assert(row, '找不到服务商行')
+  const tag = [...row.querySelectorAll('.cf-imp__note-tag')].map((x) => x.textContent ?? '')
+  await expandRow(row)
+  const sub = row.querySelector('.cf-imp__sub')
+  const subText = sub?.textContent ?? ''
+  assert(tag.some((x) => /由插件管理/.test(x)), `标签该用「由插件管理」：${JSON.stringify(tag)}`)
+  assert(/由插件管理/.test(subText), `明细也该用「由插件管理」：${subText}`)
+  // 同一屏不能两种说法
+  const screen = row.textContent ?? ''
+  assert(!/归插件管/.test(screen), `同一屏不该再出现旧说法「归插件管」：${screen}`)
+})
+
+ok('F4 英文同一屏只有一套插件术语（标签与明细都是 managed by）', async () => {
+  setLocale('en')
+  await runImport(
+    report({
+      top: { providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] } }
+    })
+  )
+  const row = rowOf('Providers')
+  assert(row, '找不到 Providers 行')
+  const tag = [...row.querySelectorAll('.cf-imp__note-tag')].map((x) => x.textContent ?? '')
+  await expandRow(row)
+  const subText = row.querySelector('.cf-imp__sub')?.textContent ?? ''
+  assert(tag.some((x) => /managed by a plugin/.test(x)), `标签该用 managed by：${JSON.stringify(tag)}`)
+  assert(/Managed by a plugin/.test(subText), `明细也该用 Managed by：${subText}`)
+  const screen = row.textContent ?? ''
+  assert(!/Owned by/.test(screen), `同一屏不该再出现旧说法 Owned by：${screen}`)
 })
 
 ok('D1 英文环境下三项都说英文，且不出现 RPC 字段名', async () => {
