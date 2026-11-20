@@ -1581,6 +1581,100 @@ async function scenarioConfigCorrupt(): Promise<void> {
 }
 
 /**
+ * P2-⑥：提交前必须复核当前状态——异步间隙里用户换了模型 / 移除了成员，就放弃这一项。
+ *
+ * 原缺陷：`applyModelSwap` 拿进入循环前拍下的 `c.ref` 判断并直接写 `session.model = to`，期间
+ * `await resolveAvailability(...)` 有真实异步窗口。用户在窗口里切了模型或移除成员，旧实现照样覆盖
+ * （成员那条之后还会被「派任务同步」改回来，用户看到的是「批量替换部分失效」）。
+ *
+ * 用 `setModelSwapCommitHookForTest` 摆出可控间隙：钩子第一次被调用时改状态，之后清空。
+ */
+async function scenarioSwapStaleCommit(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const { applyModelSwap, setModelSwapCommitHookForTest } = await import(
+    '../../apps/desktop/src/main/services/model-swap'
+  )
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        { id: 'p', name: 'P', apiHost: 'https://a.example/v1', enabled: true, models: [{ id: 'm' }] },
+        { id: 'q', name: 'Q', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'n' }] },
+        { id: 'r', name: 'R', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'z' }] }
+      ]
+    }
+  })
+
+  // ── ① 异步间隙里用户把这个会话的模型换成了 r:z ──
+  {
+    const main = cs.ensureSession('Smain', { model: 'p:gone' })
+    main.title = 'Stale'
+    eq('P2-⑥：前置——主对话落盘', cs.save('Smain'), true)
+
+    let fired = false
+    setModelSwapCommitHookForTest(async () => {
+      if (fired) return
+      fired = true
+      // 用户在主进程里亲手切了模型（等价于 chat:set-model）
+      const s = cs.getSession('Smain')!
+      s.model = 'r:z'
+      cs.save('Smain')
+      // 只制造一次间隙：后面不再干预
+      setModelSwapCommitHookForTest(null)
+    })
+    const r = await applyModelSwap({ mainId: 'Smain', fromRef: 'p:gone', toRef: 'q:n' })
+    setModelSwapCommitHookForTest(null)
+    if ('error' in r) {
+      fail('P2-⑥①：不该整批拒绝', JSON.stringify(r))
+      return
+    }
+    info('P2-⑥① 结果', JSON.stringify({ changed: r.changed.map((b) => b.sessionId), superseded: (r.superseded ?? []).map((b) => [b.sessionId, b.ref]) }))
+    eq('P2-⑥①：用户期间换过模型 → 放弃本次提交（不进 changed）', r.changed.map((b) => b.sessionId), [])
+    eq('P2-⑥①：如实报告被更新选择取代', (r.superseded ?? []).map((b) => b.sessionId), ['Smain'])
+    eq('P2-⑥①：报告里带的是当前真实引用', (r.superseded ?? [])[0]?.ref, 'r:z')
+    eq('P2-⑥①：用户的新选择没有被覆盖', cs.getSession('Smain')?.model, 'r:z')
+    const disk = JSON.parse(fs.readFileSync(path.join(DST, 'data', 'chats', 'Smain.json'), 'utf8')) as { model?: string }
+    eq('P2-⑥①：磁盘也是用户的新选择', disk.model, 'r:z')
+  }
+
+  // ── ② 异步间隙里用户把成员移除了 ──
+  {
+    const main = cs.ensureSession('Smain2', { model: 'p:gone' })
+    main.title = 'StaleMember'
+    const sub = cs.ensureSession('Ssub2', { model: 'p:gone', focusRoot: null })
+    sub.parentId = 'Smain2'
+    main.members = [{ sessionId: 'Ssub2', name: 'helper', root: null, duty: 'test', origin: 'created' } as never]
+    eq('P2-⑥：前置——主与新成员都落盘', cs.save('Smain2') && cs.save('Ssub2'), true)
+
+    let fired = false
+    setModelSwapCommitHookForTest(async () => {
+      if (fired) return
+      fired = true
+      // 用户在批量替换期间移除了这个成员（名单里打 removed 标记）
+      const m = cs.getSession('Smain2')!
+      ;(m.members![0] as { removed?: boolean }).removed = true
+      cs.save('Smain2')
+      setModelSwapCommitHookForTest(null)
+    })
+    const r = await applyModelSwap({ mainId: 'Smain2', fromRef: 'p:gone', toRef: 'q:n' })
+    setModelSwapCommitHookForTest(null)
+    if ('error' in r) {
+      fail('P2-⑥②：不该整批拒绝', JSON.stringify(r))
+      return
+    }
+    info('P2-⑥② 结果', JSON.stringify({ changed: r.changed.map((b) => b.sessionId), superseded: (r.superseded ?? []).map((b) => b.sessionId) }))
+    eq('P2-⑥②：已移除的成员不被写入（旧实现会照样改）', r.changed.map((b) => b.sessionId), ['Smain2'])
+    eq('P2-⑥②：如实报告被移除', (r.superseded ?? []).map((b) => b.sessionId), ['Ssub2'])
+    eq('P2-⑥②：已移除成员的模型保持原值', cs.getSession('Ssub2')?.model, 'p:gone')
+    const subDisk = JSON.parse(fs.readFileSync(path.join(DST, 'data', 'chats', 'Ssub2.json'), 'utf8')) as { model?: string }
+    eq('P2-⑥②：磁盘上也没被改', subDisk.model, 'p:gone')
+    // 主对话自己仍应被换成目标模型（这一项没被跳过）
+    eq('P2-⑥②：主对话正常替换', cs.getSession('Smain2')?.model, 'q:n')
+  }
+}
+
+/**
  * P2-⑦：主 JSON 已落盘、索引落盘失败时，**不得回滚内存、不得报成整体失败**。
  *
  * 原缺陷：`save()` 在索引写失败时返回 false，`applyModelSwap` 据此把会话推进 `failed` 并把内存态回滚成旧引用。
@@ -5945,6 +6039,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   cfgcorrupt: scenarioConfigCorrupt,
   swapfail: scenarioSwapWriteFail,
   swapindex: scenarioSwapIndexFail,
+  swapstale: scenarioSwapStaleCommit,
   kindcopy: scenarioKindCopy,
   swapws: scenarioSwapWhitespace,
   blockedturn: scenarioBlockedTurnNoTrace,

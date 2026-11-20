@@ -32,6 +32,8 @@ interface Candidate {
   id: string
   name: string
   ref: string
+  /** 成员会话所属的主对话 id；主对话本身为 undefined。提交前据此复核成员是否仍未移除。 */
+  memberOf?: string
 }
 
 /**
@@ -39,6 +41,15 @@ interface Candidate {
  * 让渲染层再查一遍只会多出一条两边可能不一致的取名字规则。
  * 成员会话文件已丢失（成员名单残留）的跳过：没有会话就没有可写的地方。
  */
+
+/**
+ * 测试专用：在逐条提交**之前**插一个可控的 await 间隙，用来复现「检查通过后、落盘前用户改了模型」的竞态。
+ * 生产代码不设置它（`grep -rn setModelSwapCommitHookForTest src/main` 只应命中本处与定义）。
+ */
+let commitHookForTest: (() => Promise<void>) | null = null
+export function setModelSwapCommitHookForTest(hook: (() => Promise<void>) | null): void {
+  commitHookForTest = hook
+}
 function candidatesOf(mainId: string): Candidate[] {
   // 入参来自渲染层：不是字符串就当「没有这个对话」，别让 safeId(undefined) 之类在深处抛出来。
   if (typeof mainId !== 'string' || !mainId) return []
@@ -49,7 +60,7 @@ function candidatesOf(mainId: string): Candidate[] {
   ]
   for (const m of activeMembers(main.members)) {
     const sub = getSession(m.sessionId)
-    if (sub) list.push({ id: sub.id, name: m.name, ref: sub.model ?? '' })
+    if (sub) list.push({ id: sub.id, name: m.name, ref: sub.model ?? '', memberOf: main.id })
   }
   return list
 }
@@ -137,12 +148,58 @@ export async function applyModelSwap(p: {
   const failed: BrokenRef[] = []
   // 主文件已落盘、只有索引待重建：不是失败，但要能看出来
   const indexStale: BrokenRef[] = []
+  // 逐条提交前的复核发现状态已变（用户在上一项写盘期间换了模型 / 移除了成员）：放弃这次提交，
+  // 保留用户的新选择。它不是「写盘失败」，所以单列，界面上可以按「跳过」讲，但原因不同。
+  const superseded: BrokenRef[] = []
   for (const c of cands) {
     // 空引用（含只有空白）= 尚未定格模型（跟随全局默认）：它根本没引用任何具体模型，替换它只会凭空钉死一个模型，
     // 故既不替换也不计进 skipped（那会让界面上的「跳过 M 个」混进一堆本来就没坏、也没让用户单独指定过的会话）。
     if (!normalizeRef(c.ref)) continue
+    /*
+     * ⚠️ 复核放在**每一项的 await 之后、写盘之前**（P2-⑥）。
+     *
+     * `c` 是进入循环前拍的快照。上一项里的 `await resolveAvailability(...)` / `isUsableRef` 有真实异步间隙；
+     * 用户很可能在这期间切了模型、或把某个成员移除。旧实现直接拿快照 `c.ref` 与 `from` 比、然后把 `to`
+     * 写进 `session.model`——既盖掉用户刚选的新模型，也给已移除的成员写值（之后主对话派任务又会把它改回来，
+     * 用户看到的就是「批量替换部分失效」）。
+     *
+     * 现在每次提交前重新读：会话还在吗、是不是同一份（缓存对象）、当前模型引用是否仍等于快照、成员是否仍未移除。
+     * 任一不成立就放弃**这一项**（不影响其它项），并把当前真实引用如实报出来。
+     */
+    await commitHookForTest?.()
     const session = getSession(c.id)
-    if (!session) continue
+    if (!session) {
+      // 会话文件在提交前消失：没有可写的地方，也不算「用户换了模型」
+      continue
+    }
+    const currentRef = session.model ?? ''
+    if (normalizeRef(currentRef) !== normalizeRef(c.ref)) {
+      // 用户已改过这个会话的模型：保留他的新选择，本次不再覆盖
+      superseded.push({
+        sessionId: c.id,
+        name: c.name,
+        ref: currentRef,
+        kind: fromKind ?? 'missing'
+      })
+      continue
+    }
+    if (c.memberOf) {
+      /*
+       * 成员会话：提交前必须确认它仍在主对话的成员名单里且未被移除。名单在异步间隙里可能已经变了，
+       * 拿旧快照写进去等于给「已经不存在的成员」改模型。
+       */
+      const main = getSession(c.memberOf)
+      const stillMember = !!main && activeMembers(main.members).some((m) => m.sessionId === c.id)
+      if (!stillMember) {
+        superseded.push({
+          sessionId: c.id,
+          name: c.name,
+          ref: currentRef,
+          kind: fromKind ?? 'missing'
+        })
+        continue
+      }
+    }
     // 归一后比：`" p:m "` 与 `"p:m"` 是同一个模型，必须一起换（A24）
     if (normalizeRef(c.ref) !== from) {
       /*
@@ -189,5 +246,5 @@ export async function applyModelSwap(p: {
     markMemberSetting(session, 'modelSet')
     changed.push({ sessionId: c.id, name: c.name, ref: c.ref, kind: fromKind ?? 'missing' })
   }
-  return { changed, skipped, failed, indexStale }
+  return { changed, skipped, failed, indexStale, superseded }
 }
