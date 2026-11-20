@@ -178,17 +178,22 @@ export function ModelSwapDialog({
     }
     setResult(res)
     setShowSkipped(false)
+    const stale = res.indexStale?.length ?? 0
+    const superSeded = res.superseded?.length ?? 0
     toast.show({
       variant: 'success',
       title: t('cf.modelSwap.done'),
       message: [
         t('cf.modelSwap.appliedN').replace('{n}', String(res.changed.length)),
-        res.skipped.length ? t('cf.modelSwap.skippedN').replace('{n}', String(res.skipped.length)) : ''
+        stale ? t('cf.modelSwap.indexStaleN').replace('{n}', String(stale)) : '',
+        res.skipped.length ? t('cf.modelSwap.skippedN').replace('{n}', String(res.skipped.length)) : '',
+        // 被放弃的项也要在提示里出现一次：否则只有点开对话框才看得到「这一项没换」。
+        superSeded ? t('cf.modelSwap.supersededN').replace('{n}', String(superSeded)) : ''
       ]
         .filter(Boolean)
         .join('，'),
-      // 有跳过项时留足时间点开看是哪些会话（它们是正常保留，但用户可能会疑惑为什么没全换）。
-      duration: res.skipped.length ? 8000 : undefined
+      // 有跳过/放弃/索引待重建时留足时间看是哪些会话（它们是正常保留，但用户可能会疑惑为什么没全换）。
+      duration: res.skipped.length || superSeded || stale ? 8000 : undefined
     })
   }
 
@@ -321,9 +326,23 @@ function Result({
   onToggleSkipped: () => void
 }): React.JSX.Element {
   const { t } = useI18n()
+  const { providers } = useModels()
+  /** 引用 → 模型显示名。查不到（模型已被删）时原样显示引用，不吞掉信息。 */
+  const refLabel = (ref: string): string => {
+    const idx = ref ? ref.indexOf(':') : -1
+    if (idx <= 0) return ref || t('cf.modelSwap.refUnknown')
+    const name = providers.find((p) => p.id === ref.slice(0, idx))?.models.find((m) => m.id === ref.slice(idx + 1))?.name
+    return name ?? ref
+  }
+  const indexStale = result.indexStale ?? []
+  const superseded = result.superseded ?? []
   const summary = [
     t('cf.modelSwap.appliedN').replace('{n}', String(result.changed.length)),
+    // 索引待重建的那些**不是失败**：磁盘上已经是新模型，只是列表要再读一次才准。混进失败会让用户以为没换成。
+    indexStale.length ? t('cf.modelSwap.indexStaleN').replace('{n}', String(indexStale.length)) : '',
     result.skipped.length ? t('cf.modelSwap.skippedN').replace('{n}', String(result.skipped.length)) : '',
+    // 被放弃的那些必须出声：它们既不在成功也不在失败里，不说就是「用户以为换了、其实没换」。
+    superseded.length ? t('cf.modelSwap.supersededN').replace('{n}', String(superseded.length)) : '',
     // 写盘失败必须出现在标题里，而不是只在展开列表里：用户在点「完成」前的那一眼就该看到「有几个没换成」
     result.failed.length ? t('cf.modelSwap.failedN').replace('{n}', String(result.failed.length)) : ''
   ]
@@ -332,6 +351,40 @@ function Result({
   return (
     <div className="cf-swap__section">
       <div className="cf-swap__result">{summary}</div>
+      {/* 落盘成功、只有派生索引没写成的：明确说数据没丢，只需列表刷新一次。 */}
+      {indexStale.length > 0 && (
+        <>
+          <p className="cf-swap__note">{t('cf.modelSwap.indexStaleHint')}</p>
+          <ul className="cf-swap__list">
+            {indexStale.map((b) => (
+              <li key={`stale:${b.sessionId}`} className="cf-swap__row">
+                <span className="cf-swap__name" title={b.name || b.sessionId}>
+                  {b.name || b.sessionId}
+                </span>
+                <span className="cf-swap__kind is-ok">{t('cf.modelSwap.indexStale')}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {/* 异步间隙里状态已变、这次刻意没覆盖的：报出当前真实引用，让用户知道这一项保持的是哪个模型。 */}
+      {superseded.length > 0 && (
+        <>
+          <p className="cf-swap__note">{t('cf.modelSwap.supersededHint')}</p>
+          <ul className="cf-swap__list">
+            {superseded.map((b) => (
+              <li key={`superseded:${b.sessionId}`} className="cf-swap__row is-kept">
+                <span className="cf-swap__name" title={b.name || b.sessionId}>
+                  {b.name || b.sessionId}
+                </span>
+                <span className="cf-swap__kind is-warn">
+                  {t('cf.modelSwap.supersededKept').replace('{ref}', refLabel(b.ref))}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       {/*
         写盘失败的会话单独一组、恒展开：这是「不报错但没生效」类，用户必须当场知道。
         不用 skipped 的折叠入口——那会被读成「正常保留」，而这些会话其实换不了。

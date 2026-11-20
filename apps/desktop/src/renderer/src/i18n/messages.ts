@@ -930,6 +930,10 @@ const zhCN: MessageTree = {
         failed: '{n} 个没能写入',
         rekeyed: '其中 {n} 条之前用不了，这次修好了'
       },
+      // 由外部插件托管、因此没有导入的项。{n} 是条数。与「已存在，跳过」严格分开说。
+      pluginManagedN: '{n} 个归插件管，未导入',
+      pluginManagedHint:
+        '这些由插件自己创建和维护，装上对应插件就会自动出现，不需要也不应该手动导入。要改它们请去插件里改。',
       // 密钥明细里按分类列 id 时的分组标题
       secretGroup: {
         noEncryption: '需手动重填',
@@ -937,7 +941,8 @@ const zhCN: MessageTree = {
         skipped: '已存在，保留本地',
         ignored: '不适用',
         failed: '写入失败',
-        rekeyed: '已修好'
+        rekeyed: '已修好',
+        pluginManaged: '归插件管，未导入'
       },
       // 「N 条密钥需要重新填写」：面板级警告，不是失败。{n} 是条数。
       unrecoverable: {
@@ -955,6 +960,7 @@ const zhCN: MessageTree = {
         memories: '记忆',
         skills: '技能',
         sessions: '对话记录',
+        mcp: 'MCP 服务',
         assoc: '附件',
         // 附件按类细分（主进程的 step 是 `assoc:<kind>`）：失败清单据此分组，用户一眼看出是哪一类出的错
         'assoc:media': '附件（媒体）',
@@ -1424,6 +1430,15 @@ const zhCN: MessageTree = {
       skippedN: '跳过 {n} 个',
       // 写盘失败的那些：界面必须与「已替换」分开说，否则重启后全部变回且零提示
       failedN: '{n} 个没能写入',
+      // 索引待重建：**不是失败**，数据已经落盘，只是列表要再读一次才准。
+      indexStaleN: '{n} 个已保存，索引待重建',
+      indexStale: '已保存',
+      indexStaleHint: '模型的改动已经写进磁盘，没有丢。这一批会话的列表索引还没重建，刷新一次列表就会显示正确。',
+      // 被放弃的项：既不是成功也不是失败，必须明说「这一项没改」以及它现在用的是哪个模型。
+      supersededN: '{n} 个未改动（期间被改过或成员已移除）',
+      supersededKept: '未改动，现在用的是 {ref}',
+      supersededHint: '点替换之后、写进去之前，这几项的状态变了（你自己换了模型，或成员被移除），所以没有覆盖。下面显示的是它们现在实际使用的模型：',
+      refUnknown: '（未指定模型）',
       skipped: '跳过',
       skippedHint: '以下会话用的是别的模型，未改动：',
       showSkipped: '查看跳过的会话',
@@ -2815,13 +2830,17 @@ const en: MessageTree = {
         failed: '{n} couldn’t be written',
         rekeyed: '{n} of them were unusable before and are fixed now'
       },
+      pluginManagedN: '{n} belong to a plugin, not imported',
+      pluginManagedHint:
+        'A plugin creates and maintains these itself — they appear automatically once that plugin is installed, and should not be imported by hand. To change them, edit them in the plugin.',
       secretGroup: {
         noEncryption: 'Add by hand',
         invalid: 'Empty in source',
         skipped: 'Already present',
         ignored: 'Not applicable',
         failed: 'Write failed',
-        rekeyed: 'Fixed now'
+        rekeyed: 'Fixed now',
+        pluginManaged: 'Owned by a plugin, not imported'
       },
       unrecoverable: {
         title: '{n} keys need to be entered again',
@@ -2838,6 +2857,7 @@ const en: MessageTree = {
         memories: 'Memories',
         skills: 'Skills',
         sessions: 'Conversations',
+        mcp: 'MCP servers',
         assoc: 'Attachments',
         'assoc:media': 'Attachments (media)',
         'assoc:checkpoints': 'Attachments (rollback panels)',
@@ -3296,6 +3316,15 @@ const en: MessageTree = {
       appliedN: '{n} switched',
       skippedN: '{n} skipped',
       failedN: '{n} couldn’t be saved',
+      indexStaleN: '{n} saved, list index pending',
+      indexStale: 'Saved',
+      indexStaleHint:
+        'The model changes are written to disk and nothing was lost. The conversation-list index for these was not rebuilt yet — refresh the list once and it will be correct.',
+      supersededN: '{n} not changed (edited meanwhile or member removed)',
+      supersededKept: 'Not changed — now using {ref}',
+      supersededHint:
+        'Between clicking Switch and writing, these changed (you picked another model, or the member was removed), so they were left alone. Each row shows the model it actually uses now:',
+      refUnknown: '(no model set)',
       skipped: 'Skipped',
       skippedHint: 'These use a different model and were left alone:',
       showSkipped: 'Show skipped conversations',

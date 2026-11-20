@@ -1570,6 +1570,10 @@ body.cf-resizing-y * {
 .cf-swap__kind.is-ok {
   color: var(--success);
 }
+/* 被放弃（期间被改过 / 成员已移除）：不是失败也不是成功，用警示色提醒「这一项没按你说的改」。 */
+.cf-swap__kind.is-warn {
+  color: var(--warning);
+}
 .cf-swap__keep {
   flex: none;
   color: var(--fg-subtle);
@@ -3808,6 +3812,11 @@ button.cf-mask__pill:hover {
   font-size: 11px;
   list-style: disc;
   overflow-wrap: anywhere;
+}
+/* 插件托管那一行：id 之后接一句「去插件里改」，别让这一栏看起来像漏导。 */
+.cf-imp__pluginhint {
+  display: block;
+  margin-top: 2px;
 }
 /* 失败清单：红边常驻，不给折叠——只写日志的失败等于没告诉用户。
    但一个会话目录可能几百个文件同时失败，全量铺开会把整页顶穿，故限高 + 滚动；
