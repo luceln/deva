@@ -579,6 +579,51 @@ export function getSession(id: string): StoredSession | undefined {
 }
 
 /**
+ * 外部（导入器）刚改写了磁盘上的会话文件时，把它**已载入的缓存对象**换成磁盘上的新内容。
+ *
+ * ## 为什么不能直接 copyFileSync 了事（P1-①）
+ *
+ * `save(id)` 只认 `sessionCache` 里的对象。导入期间用户点开过这个对话，缓存里就留着一份旧对象；
+ * 导入器随后直接覆盖磁盘文件，缓存仍是旧的。下一次正常保存（一轮对话的 onStep / finally）就把旧消息集
+ * 写回去——上游新同步过来的消息**静默消失**，界面还显示得正常。
+ *
+ * ## 为什么是「就地换内容」而不是清缓存 / 换对象
+ *
+ * 一轮正在跑的对话全程持有**对象引用**（`chat-turns.ts` 的 `ensureSession()` 返回值），不会重新 getSession。
+ * 清 `sessionCache` 会让那轮之后所有 `save()` 因「缓存里没有」静默 return（P0-1）；换成新对象则让那轮的引用
+ * 指向一份不再被 save 认的孤儿。所以只把**同一个对象**的字段替换成磁盘内容，引用不变、save 继续可用。
+ *
+ * 返回 false 表示没有可替换的缓存（本来就没载入，或磁盘此刻读不出来）：调用方不需要、也不能假装同步成功。
+ * 未载入时磁盘就是唯一真源，下次 `getSession` 自然读到新内容。
+ */
+export function adoptSessionFile(id: string): boolean {
+  if (!sessionCache.has(id)) return false
+  let parsed: StoredSession
+  try {
+    parsed = JSON.parse(readFileSync(fileForId(id), 'utf8')) as StoredSession
+  } catch {
+    // 读不出来就不动内存：宁可让缓存保持旧的一致快照，也不要用半份内容替换掉它
+    return false
+  }
+  if (!parsed || typeof parsed.id !== 'string') return false
+  if (Array.isArray(parsed.messages) && parsed.compacted) {
+    const older = readCompacted(parsed.compacted)
+    if (older) {
+      parsed.messages = [...older, ...parsed.messages]
+      persistedPrefix.set(parsed, older)
+    }
+  }
+  const live = sessionCache.get(id)!
+  // compacted 边界由磁盘决定；persistedPrefix 按旧对象记过前缀，必须一并丢弃，避免下次 save 误判「前缀还在」。
+  persistedPrefix.delete(live)
+  for (const key of Object.keys(live) as (keyof StoredSession)[]) {
+    if (!(key in parsed)) delete live[key]
+  }
+  Object.assign(live, parsed)
+  return true
+}
+
+/**
  * 取会话；不存在则新建（仅入内存缓存，尚未落盘，待 save）。对话无分桶概念，故无归属参数。
  * 新建的不登记进索引，save 时才登记：索引每次都整份落盘，提前登记的话，这条还没落盘的对话会随别的对话
  * 保存写进 _index.json，重启后列表多出一条点开空白的对话。

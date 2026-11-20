@@ -1,6 +1,7 @@
 import { copyFileSync, mkdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
+import { adoptSessionFile } from './services/chat-store'
 import { backupBroken, inspectTarget } from './importer-target'
 import { decideExisting, type ExistingDecision } from './importer-session-merge'
 import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, writeFailureReason } from './importer-source-dir'
@@ -120,7 +121,13 @@ export function importSessions(
          */
         const decision = decideExistingByFile(from, to)
         if (decision === 'source-newer') {
+          /*
+           * ⚠️ 覆盖磁盘**必须**同时让已载入的缓存跟上（P1-①）：否则这轮之后任何一次 save 都会把
+           * 旧消息集写回磁盘，刚同步进来的消息静默消失。adoptSessionFile 就地替换同一对象，
+           * 不清缓存（清缓存会让正在跑的回合此后所有 save 静默 return）。
+           */
           copyFileSync(from, to)
+          adoptSessionFile(safe)
           stat.updated.push(id)
         } else if (decision === 'read-failed') {
           // 源或目标此刻读不出来：不知道内容关系，**绝不覆盖**（读失败不代表源更新）
@@ -152,6 +159,7 @@ export function importSessions(
           console.warn(`[import] 会话 ${id} 的目标位置是个坏文件，已备份为 ${bak} 并重新写入`)
         }
         copyFileSync(from, to)
+        adoptSessionFile(safe)
         stat.copied.push(id)
       }
     } catch (e) {

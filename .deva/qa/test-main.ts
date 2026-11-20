@@ -24,7 +24,7 @@ import { importPersonas } from '../../apps/desktop/src/main/importer-personas'
 import { mergeProviders, copySecrets } from '../../apps/desktop/src/main/importer-config'
 import { copyAssoc } from '../../apps/desktop/src/main/importer-assoc'
 import { getDevaHome, getConfig, setConfig, registerConfigIpc } from '../../apps/desktop/src/main/services/config'
-import { invalidateIndex, listSessions } from '../../apps/desktop/src/main/services/chat-store'
+import { invalidateIndex, listSessions, ensureSession, save, getSession } from '../../apps/desktop/src/main/services/chat-store'
 import { onSessionsChanged } from '../../apps/desktop/src/main/services/chat-bus'
 import { sweepMedia } from '../../apps/desktop/src/main/services/media-store'
 import { sweepCheckpoints } from '../../apps/desktop/src/main/services/checkpoints'
@@ -4924,6 +4924,37 @@ async function scenarioSessionSync(): Promise<void> {
       ['sess_superset', 'sess_local', 'sess_forked'].every((id) => st2.skipped.includes(id)),
       JSON.stringify(st2.skipped)
     )
+  }
+
+  /*
+   * ── ⑤ P1-①：目标会话**已载入缓存**时的重复同步（旧用例的盲区）──
+   *
+   * 上面 ②～④ 都只碰磁盘、不预载缓存，于是测不出真正的数据丢失路径：用户点开过这个对话 → 缓存里有旧对象
+   * → 导入器覆盖磁盘 → 下一次正常保存把旧消息集写回，上游新同步的消息静默消失。
+   * 这条用例必须**先 ensureSession 载入缓存**，再导入，再 save，最后验磁盘内容。
+   */
+  {
+    const id = 'sess_cached_sync'
+    const srcFile = path.join(srcChats, `${id}.json`)
+    const dstFile = path.join(dstChats, `${id}.json`)
+    const first = [msg('user', '原版第一句'), msg('assistant', '原版回一')]
+    fs.writeFileSync(srcFile, S(id, first))
+    fs.writeFileSync(dstFile, S(id, first))
+    // 模拟「用户在本应用里点开过这个对话」：把它载入 sessionCache
+    const cached = ensureSession(id)
+    eq('P1-①：缓存里确实是那份旧内容', cached.messages.length, first.length)
+
+    // 用户继续在原版聊：源在共同前缀之后加了两条
+    const grown = [...first, msg('user', '原版后来加的'), msg('assistant', '原版回二')]
+    fs.writeFileSync(srcFile, S(id, grown))
+    const st3 = importSessions(srcHome)
+    eq('P1-①：缓存已载入时仍判定为超集并同步', st3.updated.includes(id), true)
+
+    // 关键一步：这时候来一次正常保存（一轮对话的 onStep / finally 就是这个动作）
+    eq('P1-①：保存可以正常进行（缓存未被清空）', save(id), true)
+    const afterSave = JSON.parse(fs.readFileSync(dstFile, 'utf8')) as { messages: unknown[] }
+    eq('P1-①：保存后磁盘仍是同步来的新条数（旧缓存不得写回）', afterSave.messages.length, grown.length)
+    eq('P1-①：缓存对象本身也已是新内容', getSession(id)!.messages.length, grown.length)
   }
 }
 
