@@ -5009,6 +5009,85 @@ async function scenarioSessionSync(): Promise<void> {
     eq('P1-③：本地拆分历史字节未变（不得被源替换）', fs.readFileSync(path.join(dstChats, localJsonl), 'utf8') === beforeJsonl, true)
     eq('P1-③：没有把源拆分文件当成成功搬过来', st4.compacted.includes(localJsonl), false)
   }
+
+  /*
+   * ── ⑦ P1-②：源是超集时**只追加消息**，本地元数据必须原样保留 ──
+   *
+   * 用户真实路径：A 导入 → 上游继续聊（源多出尾部消息）→ 用户在本应用里改过标题 / 切过模型
+   * → 再导入。旧实现整档 copyFileSync，消息到位了，标题与模型却被源那份顶掉。
+   *
+   * 这里同时覆盖「已载入缓存」（否则测不到 P1-① 的路径）与「目标已有 compacted 指针」：
+   * 指针必须仍是目标的、count 不变，只在其后追加尾消息。
+   */
+  {
+    const id = 'sess_meta_keep'
+    const srcFile = path.join(srcChats, `${id}.json`)
+    const dstFile = path.join(dstChats, `${id}.json`)
+    const jsonl = `${id}.compacted-local.jsonl`
+    /*
+     * 真实结构（model-view.ts 的 modelFirst）：拆分文件只存**摘要之前**的消息，摘要本身留在主文件
+     * messages 的第一条；count 等于摘要下标。把摘要写进 jsonl 是造错数据——那样 modelFirst 会指回
+     * 摘要的位置，保存时自然重算边界，测出来的「换文件」其实是数据不真实。
+     */
+    const early = [msg('user', '很早的一句'), msg('assistant', '很早的回')]
+    const summary = msg('user', '⟦deva:compaction⟧ 之前的对话摘要')
+    fs.writeFileSync(path.join(dstChats, jsonl), `${early.map((m) => JSON.stringify(m)).join('\n')}\n`)
+    const shared = [msg('user', '共同第一句'), msg('assistant', '共同回一')]
+    const cut = early.length
+    // 目标：本地改过标题与模型，且带着自己的压缩边界
+    const targetMain = {
+      id,
+      title: '我在二开版改过的标题',
+      createdAt: 1,
+      updatedAt: 777,
+      model: 'local-picked:model',
+      messages: [summary, ...shared],
+      compacted: { count: cut, file: jsonl }
+    }
+    fs.writeFileSync(dstFile, JSON.stringify(targetMain))
+    fs.writeFileSync(srcFile, JSON.stringify({ ...targetMain, title: id, model: 'upstream:model', updatedAt: 1 }))
+    // 载入缓存，模拟用户点开过这个对话
+    const cached = ensureSession(id)
+    eq('P1-②：缓存载入的是本地改过的元数据', cached.title, '我在二开版改过的标题')
+
+    // 上游继续聊：源在共同前缀之后多了两条
+    const grown = [summary, ...shared, msg('user', '上游新问'), msg('assistant', '上游新答')]
+    fs.writeFileSync(srcFile, JSON.stringify({ ...targetMain, title: '上游标题覆盖', model: 'upstream:model', updatedAt: 9, messages: grown }))
+
+    const st5 = importSessions(srcHome)
+    eq('P1-②：源是超集 → 进 updated', st5.updated.includes(id), true)
+    const merged = JSON.parse(fs.readFileSync(dstFile, 'utf8')) as {
+      title: string
+      model?: string
+      updatedAt: number
+      messages: unknown[]
+      compacted?: { count: number; file: string }
+    }
+    // 磁盘主文件 = 摘要 + 共同两条 + 上游新增两条
+    const mainCount = 1 + shared.length + 2
+    eq('P1-②：消息增量到位（磁盘主文件只存 compacted 之后的段）', merged.messages.length, mainCount)
+    eq('P1-②：本地标题保留（不被源覆盖）', merged.title, '我在二开版改过的标题')
+    eq('P1-②：本地模型保留（不被源覆盖）', merged.model, 'local-picked:model')
+    eq('P1-②：本地 updatedAt 保留', merged.updatedAt, 777)
+    eq('P1-②：compacted 指针仍是目标那份', merged.compacted, { count: cut, file: jsonl })
+    eq('P1-②：缓存已同步（否则下一轮 save 会写回旧消息）', getSession(id)!.messages.length, cut + mainCount)
+    eq('P1-②：缓存里的标题也还是本地值', getSession(id)!.title, '我在二开版改过的标题')
+    // 保存一次，确认不会把旧消息集写回磁盘，也不会平白换拆分文件
+    eq('P1-②：同步后保存仍成功', save(id), true)
+    const afterSave = JSON.parse(fs.readFileSync(dstFile, 'utf8')) as {
+      messages: unknown[]
+      compacted?: { count: number; file: string }
+    }
+    eq('P1-②：保存后磁盘主文件仍是合并后的尾段', afterSave.messages.length, mainCount)
+    eq('P1-②：保存没有换掉拆分文件（前缀仍被认作已落盘）', afterSave.compacted, { count: cut, file: jsonl })
+
+    // 只有元数据不同（消息一致）→ 不得报 updated，元数据也不该被改写
+    const beforeBytes = fs.readFileSync(dstFile, 'utf8')
+    fs.writeFileSync(srcFile, JSON.stringify({ ...targetMain, title: '又一个上游标题', messages: grown }))
+    const st6 = importSessions(srcHome)
+    eq('P1-②：消息没变（仅元数据不同）→ 归 skipped 不虚报 updated', st6.updated.includes(id), false)
+    eq('P1-②：没有可追加的尾部时目标文件字节未变', fs.readFileSync(dstFile, 'utf8') === beforeBytes, true)
+  }
 }
 
 /**

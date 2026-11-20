@@ -606,20 +606,29 @@ export function adoptSessionFile(id: string): boolean {
     return false
   }
   if (!parsed || typeof parsed.id !== 'string') return false
-  if (Array.isArray(parsed.messages) && parsed.compacted) {
-    const older = readCompacted(parsed.compacted)
-    if (older) {
-      parsed.messages = [...older, ...parsed.messages]
-      persistedPrefix.set(parsed, older)
-    }
-  }
   const live = sessionCache.get(id)!
-  // compacted 边界由磁盘决定；persistedPrefix 按旧对象记过前缀，必须一并丢弃，避免下次 save 误判「前缀还在」。
+  /*
+   * 磁盘上的主文件只存「压缩边界之后」的那段；缓存里必须是完整记录，否则下次 save 会把模型看不到的历史丢掉。
+   * 拆分文件读不出来时保持与 loadSessionFile 同样的降级：只用主文件那段（不臆造历史）。
+   */
+  let older: Message[] | null = null
+  if (Array.isArray(parsed.messages) && parsed.compacted) {
+    older = readCompacted(parsed.compacted)
+    if (older) parsed.messages = [...older, ...parsed.messages]
+  }
+  // old persistedPrefix 属于旧对象，先丢；下面的 assign 结束后再按新内容记一次
   persistedPrefix.delete(live)
   for (const key of Object.keys(live) as (keyof StoredSession)[]) {
     if (!(key in parsed)) delete live[key]
   }
   Object.assign(live, parsed)
+  /*
+   * ⚠️ 前缀必须记在 **live** 上，不能记在临时解析出来的 parsed 对象上（b9127cf 的漏洞）。
+   * `save()` 用 `persistedPrefix.get(s)` 取，s 是缓存里那个对象——记在 parsed 上等于没记：
+   * 下一次保存会认为「已写进拆分文件的那段不在了」，于是换新文件名整份重写，旧文件被删、
+   * 压缩边界平白漂移一次。指针 count 没变，但文件身份变了，正是 P1-② 要保住的东西。
+   */
+  if (older) persistedPrefix.set(live, older)
   return true
 }
 

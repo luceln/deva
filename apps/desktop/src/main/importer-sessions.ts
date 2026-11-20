@@ -3,7 +3,8 @@ import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { adoptSessionFile } from './services/chat-store'
 import { backupBroken, inspectTarget } from './importer-target'
-import { decideExisting, type ExistingDecision } from './importer-session-merge'
+import { decideExisting, sourceTail, type ExistingDecision } from './importer-session-merge'
+import { writeFileAtomic } from './services/atomic-write'
 import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, writeFailureReason } from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
@@ -122,11 +123,22 @@ export function importSessions(
         const decision = decideExistingByFile(from, to)
         if (decision === 'source-newer') {
           /*
-           * ⚠️ 覆盖磁盘**必须**同时让已载入的缓存跟上（P1-①）：否则这轮之后任何一次 save 都会把
-           * 旧消息集写回磁盘，刚同步进来的消息静默消失。adoptSessionFile 就地替换同一对象，
-           * 不清缓存（清缓存会让正在跑的回合此后所有 save 静默 return）。
+           * ⚠️ **只追加源里多出来的尾部消息，其余字段一律保留目标值**（P1-②）。
+           *
+           * 以前这里是整档 `copyFileSync(from, to)`：`source-newer` 只证明「目标的消息是源的前缀」，
+           * 并不证明源的 title / model / compacted 指针更该留下。于是用户在本应用里改过的标题、
+           * 切过的模型、压缩边界，全被源那份顶掉；消息虽然没丢，元数据却悄悄回退。
+           *
+           * 合并后还要 `adoptSessionFile(safe)`（P1-①）：写入是绕过 `sessionCache` 的，已载入的缓存
+           * 不同步就会在下一轮 save 时把旧消息集写回磁盘。
+           *
+           * 追加失败（源多出来的不是对象、写盘抛错）进 failed，不静默跳成 skipped。
            */
-          copyFileSync(from, to)
+          const appended = appendSourceTail(from, to)
+          if (!appended) {
+            stat.failed.push({ step: 'sessions', id, reason: SOURCE_FILE_UNREADABLE })
+            continue
+          }
           adoptSessionFile(safe)
           stat.updated.push(id)
         } else if (decision === 'read-failed') {
@@ -217,6 +229,53 @@ function decideExistingByFile(from: string, to: string): ExistingDecision | 'rea
     return 'read-failed'
   }
   return decideExisting(target, source)
+}
+
+/**
+ * 把源里多出来的尾部消息追加进目标文件，**其余字段保持目标原值**（P1-②）。
+ *
+ * 规则（顺序不能换）：
+ *  1. 读两份 JSON；任一读不出 / 解析不了 → false（调用方记失败，不静默）；
+ *  2. 用 `sourceTail` 算共前缀之后的增量（判据与 `decideExisting` 同一套，不另写比对）；
+ *     `null` = 没有可追加的尾部 → false（调用方不得报 updated）；
+ *  3. 只改目标对象自己的 `messages`（追加），title / model / compacted / updatedAt 等**一个都不动**；
+ *  4. `writeFileAtomic` 落盘（先写 `.tmp` 再 rename，崩溃不会把旧文件截成半截）。
+ *
+ * ⚠️ **不碰 compacted 指针**：目标若有压缩边界，它的 `messages` 已经是「compacted 之后的那段」，
+ * 追加新尾部正好接在那段之后，指针 count 仍然有效（压缩边界之前的消息没变）。若把源的 compacted
+ * 指针写进来，count 会指向目标那份被压缩过的历史，加载时就缺段——这正是 ac58de1 在 skipped 分支
+ * 避免的事，这里同样不能回退。
+ */
+function appendSourceTail(from: string, to: string): boolean {
+  let targetRaw: string
+  try {
+    targetRaw = readFileSync(to, 'utf8')
+  } catch {
+    return false
+  }
+  let sourceRaw: string
+  try {
+    sourceRaw = readFileSync(from, 'utf8')
+  } catch {
+    return false
+  }
+  let target: { messages?: unknown; [key: string]: unknown }
+  let source: { messages?: unknown }
+  try {
+    target = JSON.parse(targetRaw) as { messages?: unknown; [key: string]: unknown }
+  } catch {
+    return false
+  }
+  try {
+    source = JSON.parse(sourceRaw) as { messages?: unknown }
+  } catch {
+    return false
+  }
+  const tail = sourceTail(target, source)
+  if (!tail || !tail.length) return false
+  const merged = [...(Array.isArray(target.messages) ? target.messages : []), ...tail]
+  writeFileAtomic(to, JSON.stringify({ ...target, messages: merged }, null, 2))
+  return true
 }
 
 /**

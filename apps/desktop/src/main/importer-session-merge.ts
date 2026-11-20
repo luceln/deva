@@ -96,3 +96,27 @@ export function decideExisting(target: SessionShape, source: SessionShape): Exis
   if (t.length === s.length) return 'same'
   return s.length > t.length ? 'source-newer' : 'target-diverged'
 }
+
+/**
+ * `source-newer` 时，源里**多出来**的那段尾部消息（共前缀之后的部分）。
+ *
+ * ## 为什么只取尾部，不整份替换（P1-②）
+ *
+ * `source-newer` 只保证「目标的消息是源的开头」；它**没有**保证源与目标的其它字段（title / model /
+ * compacted 指针 / updatedAt）谁更该留下。整档 `copyFileSync` 会把用户在本应用里改过的标题、切过的模型、
+ * 以及压缩边界一起顶成源那份——消息一条没丢，元数据却悄悄回退了。
+ *
+ * 消息没有稳定 id（只有 role + content），唯一可靠的定位方式就是**共前缀长度**，也就是
+ * `commonPrefixLength` 已经算出来的那个值；重新写一套比对只会让两处判据慢慢分叉。
+ *
+ * 返回 `null`（而不是空数组）表示「这次没有可追加的尾部」，调用方据此**不得**报 updated：
+ *  - 目标不是源的前缀（分叉）：不能追加任何东西；
+ *  - 源不比目标长：没有增量。
+ */
+export function sourceTail(target: SessionShape, source: SessionShape): unknown[] | null {
+  const t = messagesOf(target)
+  const s = messagesOf(source)
+  const common = commonPrefixLength(t, s)
+  if (common !== t.length || s.length <= t.length) return null
+  return s.slice(common)
+}
