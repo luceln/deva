@@ -35,7 +35,10 @@ export type MemberWorktreeReason =
 export interface MemberWorktreePrecheckReq {
   sessionId: string
   expectedRevision: number
-  /** 后端从成员当前目录核实源 checkout；不信任客户端提供的 repoRoot。 */
+  /** 用户在确认框主动选择的源目录，可不同于当前 focusRoot；也允许首次未挂载成员提供。 */
+  sourceRoot: string
+  /** repoRoot 必须是 sourceRoot 所属 checkout 根；后端重新解析并核验，不信任客户端值。
+   * relativePath 始终由后端从 sourceRoot 推导，不通过提前 setFocus 改绑来传递选择。 */
   create: WorktreeCreateReq
 }
 export interface MemberWorktreeBindReq extends MemberWorktreePrecheckReq {
