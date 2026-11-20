@@ -419,36 +419,16 @@ async function scenarioFull(): Promise<void> {
     .filter((id: string) => !pluginHosted.has(id))
   eq('服务商：copied 只含用户自定义（已排除插件托管的）', [...r1.providers.copied].sort(), customProviders.sort())
   /*
-   * 已知产品缺陷（2026-11 验收发现，未修）：`runImport()` 组装 `report.providers` 时只拷了
-   * copied / skipped / builtin / failed 四个字段（importer.ts:177-182），把 `mergeProviders()` 已经算好的
-   * `pluginManaged` 漏掉了 —— 同一轮 `report.secrets.pluginManaged` 是有的（importer.ts:207），
-   * 说明不是判定失败，是汇总漏拷。
-   *
-   * 后果：界面拿不到「有几个服务商归插件管」，那行提示永远不出现；用户在原版里看到的 magpie
-   * 到本应用里"消失了"，也没有任何解释。
-   *
-   * 这里**不写成预期失败吞掉**：把事实如实打出来，并单独给一条明确命名的 FAIL，
-   * 让它在汇总里一直可见，直到产品侧修好。修好后这条自然转绿（判据不变）。
+   * `report.providers.pluginManaged` 已由 importer.ts 汇总（13c8eff 修好）：这里断言它与**独立算出**的
+   * 托管集一致，而不是只检查字段存在。曾经这段是「已知缺陷、如实报红」的写法——汇总漏拷时一直红；
+   * 修好后不再需要那条豁免分支，改成直接比对两个集合，字段再被漏拷或判定退化都会立刻变红。
    */
   const reportedPluginManaged = (r1.providers as any).pluginManaged
   if (reportedPluginManaged === undefined) {
-    /*
-     * 契约不一致（不是用户可见缺陷）：`runImport()` 组装 `report.providers` 时只拷了
-     * copied / skipped / builtin / failed（importer.ts:177-182），把 `mergeProviders()` 算好的
-     * `pluginManaged` 漏了 —— 同轮 `report.secrets.pluginManaged` 是有的（importer.ts:207），
-     * 说明判定没问题，纯属汇总漏拷。
-     *
-     * 为什么仍要留一条红：`StepStat.pluginManaged` 是协议里声明的可选字段（import-protocol.ts:36），
-     * providers 步骤恰好是注释点名「会有它」的两步之一。前端此刻确实没读它（ImportPane 的 row()
-     * 只看 copied/skipped/failed），所以**当前没有用户可见后果**；但协议与实现不一致，
-     * 谁按协议去渲染那行「N 个服务商归插件管」都会踩空。
-     *
-     * 默认如实报红；`QA_ALLOW_KNOWN_BUG=1` 可降级成 INFO，便于只关注其它断言的人跑绿。
-     */
-    const known = process.env.QA_ALLOW_KNOWN_BUG === '1'
-    const detail = `独立算出 ${JSON.stringify([...pluginHosted])}，报告里没这个键；对照 report.secrets.pluginManaged=${JSON.stringify(r1.secrets.pluginManaged)} 是有的（同轮同源，证明是汇总漏拷）`
-    if (known) info('KNOWN-BUG 服务商：report.providers 缺 pluginManaged 字段（importer.ts:177-182 漏拷）', detail)
-    else fail('服务商：report.providers 缺 pluginManaged 字段（协议有声明、汇总漏拷，见 importer.ts:177-182）', detail)
+    fail(
+      '服务商：report.providers 缺 pluginManaged 字段（协议有声明，汇总又漏拷了）',
+      `独立算出 ${JSON.stringify([...pluginHosted])}`
+    )
   } else {
     eq(
       '服务商：插件托管的都报进 pluginManaged（与独立算出的一致）',
