@@ -4956,6 +4956,48 @@ async function scenarioSessionSync(): Promise<void> {
     eq('P1-①：保存后磁盘仍是同步来的新条数（旧缓存不得写回）', afterSave.messages.length, grown.length)
     eq('P1-①：缓存对象本身也已是新内容', getSession(id)!.messages.length, grown.length)
   }
+
+  /*
+   * ── ⑥ P1-③：主文件判定 skipped 时，它的拆分历史不得被替换 ──
+   *
+   * 目标主 JSON 因分叉保留本地版本，但源里有同名 compacted 且尺寸不同时，旧代码仍会把它备份并覆盖，
+   * 而主文件还指向本地 count。这里直接照原样构造：目标主文件 compacted.count 与源不同，两边 jsonl 行数不同。
+   * 断言「主文件字节未变」+「jsonl 字节未变」+「没有 compacted 成功记录」——静默改写必须可见/不发生。
+   */
+  {
+    const id = 'sess_compacted_skip'
+    // 同名 compacted：旧代码会因为尺寸不同把它备份后覆盖，正是 P1-③ 的路径
+    const localJsonl = `${id}.compacted-same.jsonl`
+    const localMsgs = [msg('user', '本地更早'), msg('assistant', '本地回一')]
+    const newer = [msg('user', '本地新一句')]
+    const targetMain = {
+      id,
+      title: id,
+      createdAt: 1,
+      updatedAt: 1,
+      // 目标主文件只存 compacted 边界之后的尾部，早期在 jsonl 里
+      messages: [msg('user', '共同的第一句'), msg('assistant', '本地的分支')],
+      compacted: { count: localMsgs.length, file: localJsonl }
+    }
+    fs.writeFileSync(path.join(dstChats, localJsonl), `${localMsgs.map((m) => JSON.stringify(m)).join('\n')}\n`)
+    fs.writeFileSync(path.join(dstChats, `${id}.json`), JSON.stringify(targetMain))
+    // 源：主文件从第 2 条起分叉；同一个 compacted 文件名但行数不同（3 行 vs 2 行）
+    fs.writeFileSync(
+      path.join(srcChats, localJsonl),
+      `${[...localMsgs, ...newer].map((m) => JSON.stringify(m)).join('\n')}\n`
+    )
+    fs.writeFileSync(
+      path.join(srcChats, `${id}.json`),
+      JSON.stringify({ ...targetMain, messages: [msg('user', '共同的第一句'), msg('assistant', '原版的分支')], compacted: { count: 3, file: localJsonl } })
+    )
+    const beforeMain = fs.readFileSync(path.join(dstChats, `${id}.json`), 'utf8')
+    const beforeJsonl = fs.readFileSync(path.join(dstChats, localJsonl), 'utf8')
+    const st4 = importSessions(srcHome)
+    eq('P1-③：目标主文件分叉 → 进 skipped', st4.skipped.includes(id), true)
+    eq('P1-③：主文件字节未变', fs.readFileSync(path.join(dstChats, `${id}.json`), 'utf8') === beforeMain, true)
+    eq('P1-③：本地拆分历史字节未变（不得被源替换）', fs.readFileSync(path.join(dstChats, localJsonl), 'utf8') === beforeJsonl, true)
+    eq('P1-③：没有把源拆分文件当成成功搬过来', st4.compacted.includes(localJsonl), false)
+  }
 }
 
 /**

@@ -167,7 +167,15 @@ export function importSessions(
       stat.failed.push({ step: 'sessions', id, reason: writeFailureReason(e) })
       continue
     }
-    copyCompacted(srcDir, dstDir, safe, stat, names)
+    /*
+     * ⚠️ 只有主文件**这次真的写了**（copied / updated）才连带搬它的拆分历史（P1-③）。
+     *
+     * 以前这行在 try 之外、循环里无条件执行：主 JSON 因分叉判定 skipped 保留本地版本时，
+     * 源里同名但尺寸不同的 compacted 仍会被备份并覆盖——主文件还指向本地 count，拆分文件却成了源那份，
+     * 行数与 pointer.count 对不上，加载缺段；报告里还是「compacted 成功、零失败」。
+     * 主文件没更新时，它引用的历史必须原样不动；要不要替换历史由主文件的决策统一决定（见 D2/D3）。
+     */
+    if (stat.copied.includes(id) || stat.updated.includes(id)) copyCompacted(srcDir, dstDir, safe, stat, names)
   }
   return stat
 }
