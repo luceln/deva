@@ -14,7 +14,7 @@ export interface MemberWorktreeRecovery extends MemberWorktreeIdentity {
   sourceFocusRoot: string | null
   createdAt: number
   /** 先记创建意图再调用 Git；重启后通过登记与身份校验确认是否已创建。 */
-  phase: 'creating' | 'created'
+  phase: 'intent' | 'creating' | 'created'
   reason: MemberWorktreeReason
 }
 
@@ -32,7 +32,7 @@ export type MemberWorktreeReason =
   | 'source-unavailable' | 'dirty-confirmation-required' | 'create-failed'
   | 'binding-unreadable' | 'cancelled' | 'execution-root-missing'
   | 'identity-mismatch' | 'bind-write-failed' | 'recovery-not-found'
-  | 'invalid-request'
+  | 'binding-uncertain' | 'invalid-request'
 
 export interface MemberWorktreePrecheckReq {
   sessionId: string
@@ -53,7 +53,6 @@ export interface MemberWorktreeRetryBindReq {
   expectedRevision: number
   operationId: string
 }
-
 export interface MemberWorktreeRejected {
   ok: false
   status: 'rejected'

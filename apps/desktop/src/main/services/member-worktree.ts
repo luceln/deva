@@ -1,8 +1,9 @@
 import { ipcMain } from 'electron'
 import { randomUUID } from 'crypto'
 import { isAbsolute, relative, resolve } from 'path'
-import { realpathSync } from 'fs'
+import { existsSync, realpathSync } from 'fs'
 import { getSession, save, verifyMemberBindingSaved } from './chat-store'
+import { recoverMemberBindingTransaction } from './member-binding-transaction'
 import { historyLocked } from './chat-state'
 import { setMemberFolder } from './chat-members'
 import { activeMember, pendingMemberBindings } from './member-binding-state'
@@ -28,14 +29,43 @@ const normalized = (p: string): string => {
   const value = resolve(realpathSync.native(p))
   return process.platform === 'win32' ? value.toLowerCase() : value
 }
+async function settleUnstartedIntent(sessionId: string): Promise<boolean> {
+  if (pendingMemberBindings.has(sessionId)) return true
+  const s = getSession(sessionId)
+  const recovery = s?.memberWorktreeRecovery
+  if (!s || !recovery || recovery.phase === 'created') return true
+  const record = getRecord(recovery.checkoutRoot)
+  if (record) {
+    if (record.branch !== recovery.branch || normalized(record.repoRoot) !== normalized(recovery.repoRoot)) return false
+    if (record.phase !== 'active') return false
+    recovery.phase = 'created'
+    recovery.checkoutRoot = record.path
+    save(s.id)
+    return verifyMemberBindingSaved(s)
+  }
+  // No record is not enough: prove the target, branch, and linked-worktree registration are all absent.
+  if (existsSync(recovery.checkoutRoot)) return false
+  const branch = await runGitRaw(recovery.repoRoot, ['show-ref', '--verify', '--quiet', `refs/heads/${recovery.branch}`])
+  if (branch.code === 0 || branch.code !== 1) return false
+  const worktrees = await runGitRaw(recovery.repoRoot, ['worktree', 'list', '--porcelain'])
+  if (worktrees.code !== 0 || worktrees.stdout.split(/\r?\n/).some((line) =>
+    line.startsWith('worktree ') && normalized(line.slice('worktree '.length)) === normalized(recovery.checkoutRoot))) return false
+  // Only the persisted create intent is removed; no unregistered or user-owned asset is deleted.
+  delete s.memberWorktreeRecovery
+  save(s.id)
+  if (verifyMemberBindingSaved(s)) return true
+  s.memberWorktreeRecovery = recovery
+  return false
+}
 function state(sessionId: string): MemberWorktreeState | null {
   const s = getSession(sessionId)
   if (!s?.parentId) return null
   return { sessionId, revision: s.memberBindingRevision ?? 0, focusRoot: s.focusRoot ?? null,
-    identity: s.memberWorktreeIdentity, recovery: s.memberWorktreeRecovery,
-    pending: pendingMemberBindings.has(sessionId) }
+    identity: s.memberWorktreeIdentity,
+    recovery: s.memberWorktreeRecovery, pending: pendingMemberBindings.has(sessionId) }
 }
 function eligibility(sessionId: string, revision: number): MemberWorktreeRejected | null {
+  if (!recoverMemberBindingTransaction(sessionId)) return reject('binding-uncertain')
   const m = activeMember(sessionId)
   if (!m) return reject('not-member')
   if (m.ref.removed) return reject('member-removed')
@@ -69,7 +99,8 @@ export async function precheckMemberWorktree(req: MemberWorktreePrecheckReq): Pr
   } catch (e) { return reject('source-unavailable', (e as Error).message) }
 }
 
-export function memberWorktreeState(sessionId: string): MemberWorktreeStateResult {
+export async function memberWorktreeState(sessionId: string): Promise<MemberWorktreeStateResult> {
+  await settleUnstartedIntent(sessionId)
   const snapshot = state(sessionId)
   return snapshot ? { ok: true, state: snapshot } : reject('not-member')
 }
@@ -79,7 +110,8 @@ function unbound(sessionId: string, r: MemberWorktreeRecovery, reason: MemberWor
   let saved = false
   if (s) {
     s.memberWorktreeRecovery = { ...r, reason }
-    saved = save(s.id) && verifyMemberBindingSaved(s)
+    save(s.id)
+    saved = verifyMemberBindingSaved(s)
   }
   return { ok: false, status: 'created-unbound', reason: saved ? reason : 'bind-write-failed',
     checkoutRoot: r.checkoutRoot, operationId: r.operationId, binding: saved ? state(sessionId) : null }
@@ -122,12 +154,16 @@ export async function bindMemberWorktree(req: MemberWorktreeBindReq): Promise<Me
   if (blocked) return blocked
   if (pendingMemberBindings.has(req.sessionId)) return reject('pending')
   const s = getSession(req.sessionId)!
-  if (s.memberWorktreeRecovery) return reject('pending', '已有未完成工作区，请先恢复或处理，避免重复创建')
+  if (s.memberWorktreeRecovery) {
+    if (!await settleUnstartedIntent(s.id) || s.memberWorktreeRecovery)
+      return reject('pending', '已有未完成或无法核实的工作区操作，请先恢复或处理，避免重复创建')
+  }
   if (checked.precheck.needsConfirm) return reject('dirty-confirmation-required')
   const operation = { requestId: req.requestId, cancelled: false }
   const recovery: MemberWorktreeRecovery = {
     operationId: randomUUID(), expectedRevision: req.expectedRevision,
-    sourceFocusRoot: s.focusRoot ?? null, createdAt: Date.now(), phase: 'creating', reason: 'create-failed',
+    sourceFocusRoot: s.focusRoot ?? null,
+    createdAt: Date.now(), phase: 'intent', reason: 'create-failed',
     checkoutRoot: checked.precheck.path, repoRoot: checked.precheck.repoRoot,
     branch: checked.precheck.branch, relativePath: checked.relativePath
   }
@@ -135,16 +171,30 @@ export async function bindMemberWorktree(req: MemberWorktreeBindReq): Promise<Me
   s.memberWorktreeRecovery = recovery
   try {
     // 创建前先持久化意图：进程中断后可以在相同路径核实事实，不重复 create。
-    if (!save(s.id) || !verifyMemberBindingSaved(s)) {
+    // save=false 也可能仅代表索引失败；是否存在意图以会话JSON回读为准。
+    save(s.id)
+    if (!verifyMemberBindingSaved(s)) {
       delete s.memberWorktreeRecovery
+      save(s.id)
+      if (!verifyMemberBindingSaved(s)) s.memberWorktreeRecovery = recovery
       return reject('bind-write-failed')
     }
     if (operation.cancelled) return unbound(s.id, recovery, 'cancelled')
     const result = await createWorktree({ ...req.create, repoRoot: recovery.repoRoot,
       path: recovery.checkoutRoot, branch: recovery.branch, skipDeps: true })
     if (!result.ok) {
-      delete s.memberWorktreeRecovery
-      if (!save(s.id) || !verifyMemberBindingSaved(s)) return reject('bind-write-failed')
+      recovery.reason = 'create-failed'
+      const record = getRecord(recovery.checkoutRoot)
+      if (record?.phase === 'active') {
+        recovery.phase = 'created'
+        recovery.checkoutRoot = record.path
+        save(s.id)
+        if (!verifyMemberBindingSaved(s)) return unbound(s.id, recovery, 'bind-write-failed')
+        return unbound(s.id, recovery, result.reason === 'needs-confirm' ? 'dirty-confirmation-required' : 'create-failed')
+      }
+      if (record?.phase === 'creating') return unbound(s.id, recovery, 'create-failed')
+      // 创建接口失败可能已做过清理；仅在严格证实无登记/路径/分支时清意图，未知资产保留原样。
+      if (!await settleUnstartedIntent(s.id)) return unbound(s.id, recovery, 'create-failed')
       return reject(result.reason === 'needs-confirm' ? 'dirty-confirmation-required' : 'create-failed', result.message)
     }
     recovery.phase = 'created'
