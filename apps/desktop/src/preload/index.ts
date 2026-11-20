@@ -1,4 +1,11 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import type {
+  MemberWorktreePrecheckReq, MemberWorktreePrecheckResult,
+  MemberWorktreeBindReq, MemberWorktreeBindResult,
+  MemberWorktreeCancelReq, MemberWorktreeCancelResult,
+  MemberWorktreeStateReq, MemberWorktreeStateResult,
+  MemberWorktreeRetryBindReq
+} from '../shared/member-worktree-protocol'
 import type { EffortLevel } from '../shared/effort'
 import type { UpdateState } from '../shared/update'
 import type { DeliverableInfo } from '../shared/deliverables'
@@ -945,6 +952,20 @@ const api = {
     /** 切换本对话思考等级并立即落库（不等下一次发送）。 */
     setEffort: (req: ChatSetEffortRequest): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:set-effort', req),
+    /** 用户主动开启成员独立工作区：预检不创建目录。 */
+    memberWorktreePrecheck: (req: MemberWorktreePrecheckReq): Promise<MemberWorktreePrecheckResult> =>
+      ipcRenderer.invoke('chat:member-worktree-precheck', req),
+    memberWorktreeBind: (req: MemberWorktreeBindReq): Promise<MemberWorktreeBindResult> =>
+      ipcRenderer.invoke('chat:member-worktree-bind', req),
+    /** 取消绑定意图；已创建的工作区不自动删除。 */
+    memberWorktreeCancel: (req: MemberWorktreeCancelReq): Promise<MemberWorktreeCancelResult> =>
+      ipcRenderer.invoke('chat:member-worktree-cancel', req),
+    /** 跨刷新/重启恢复 created-unbound；主进程是唯一真源。 */
+    memberWorktreeState: (req: MemberWorktreeStateReq): Promise<MemberWorktreeStateResult> =>
+      ipcRenderer.invoke('chat:member-worktree-state', req),
+    /** 仅重试绑定已创建工作区，不再次创建。 */
+    memberWorktreeRetryBind: (req: MemberWorktreeRetryBindReq): Promise<MemberWorktreeBindResult> =>
+      ipcRenderer.invoke('chat:member-worktree-retry-bind', req),
     /** 挂载 / 卸载本对话的聚焦工作区并立即落库（不等下一次发送）。 */
     setFocus: (req: ChatSetFocusRequest): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:set-focus', req),
