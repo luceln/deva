@@ -326,6 +326,7 @@ export const Composer = memo(function Composer({
   streaming,
   focusRoot,
   onMount,
+  onOpenWorktree,
   onSend,
   onStop,
   showJump,
@@ -344,6 +345,7 @@ export const Composer = memo(function Composer({
   streaming: boolean
   focusRoot: string | null
   onMount: (path: string | null) => void
+  onOpenWorktree?: () => void
   onSend: (text: string, attachments?: SendAttachment[]) => Promise<boolean>
   onStop: () => void
   showJump: boolean
@@ -992,6 +994,9 @@ export const Composer = memo(function Composer({
               >
                 <WorkspaceMenu root={focusRoot} />
                 <GitWidget root={focusRoot} streaming={streaming} />
+                {onOpenWorktree && (
+                  <button type="button" className="cf-wschip__x" title={t('cf.member.memberWorktree.title')} aria-label={t('cf.member.memberWorktree.title')} onClick={onOpenWorktree}>⋯</button>
+                )}
                 <button
                   type="button"
                   className="cf-wschip__x"
