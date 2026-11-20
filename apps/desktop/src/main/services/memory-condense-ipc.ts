@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import type { CompactModelConfig } from './compaction'
-import { condenseMemories, type CondenseResult } from './memory-consolidate'
+import { condenseMemories, type CondenseResult, type SkippedEntry } from './memory-consolidate'
 import { GLOBAL_SCOPE, listMemories, type MemoryScope } from './memory'
 import { resolveDefaultModel } from './model-resolve'
 import { resolveAvailability } from './model-availability'
@@ -44,6 +44,13 @@ export type CondenseIpcResult =
       changed: number
       /** 是否真的腾出了空间。`false` 时界面**不要**说「已腾出空间」。 */
       freedSpace: boolean
+      /**
+       * 归纳结果里被跳过的条目：等待模型返回期间，这些条目被用户改过（`modified`）或删掉（`deleted`）。
+       *
+       * 必须回传：跳过意味着「这次整理对这几条没生效」。静默吞掉的话，用户看到「已整理」却发现
+       * 某条既没被压、也没按他的新值显示，无从判断是模型没做还是系统挡了。
+       */
+      skipped: SkippedEntry[]
       /** 用哪个模型做的（`providerId:modelId`），便于用户确认。 */
       model: string
     }
@@ -182,6 +189,7 @@ export function registerMemoryCondenseIpc(): void {
         freed: r.freed,
         changed: r.changed,
         freedSpace: r.freedSpace,
+        skipped: r.skipped,
         model: picked.ref
       }
     }

@@ -374,6 +374,20 @@ export type MemoryCondenseResult =
       changed: number
       /** 是否真的腾出了空间。`false` 时界面不能说「已腾出空间」。 */
       freedSpace: boolean
+      /**
+       * 整理结果里被跳过的条目：等模型返回期间，用户改过（`modified`）或删掉（`deleted`）了这几条。
+       *
+       * 跳过的意思是「这次整理对这几条没生效」——已删除的不复活、已改动的不顶掉用户版本。
+       * 界面应如实提示，否则用户会以为整理没跑。
+       */
+      skipped: Array<{
+        id: string
+        reason: 'deleted' | 'modified'
+        /** 归纳结果原本想写成的样子（`null` = 归纳结果里没有这条，原本要删掉它）。 */
+        content: string | null
+        /** 当前存储里的样子（`deleted` 时为 `null`）。 */
+        current: string | null
+      }>
       /** 用哪个模型做的（`providerId:modelId`）。 */
       model: string
     }

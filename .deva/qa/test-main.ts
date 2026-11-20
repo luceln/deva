@@ -5354,11 +5354,25 @@ async function scenarioMemCondense(): Promise<void> {
 
   /** 模型下一轮该回什么（每个用例改它）。 */
   let replyJson = '{"entries":[]}'
+  /*
+   * 归纳请求到达时先跑一次，然后才回结果。
+   *
+   * 这是复现 P1-⑤ 的唯一窗口：`condenseMemories` 先读完 `before`、再 await 模型、最后才读一次
+   * 当前存储做合并。只有在「模型还没回」的这段时间里动记忆，才是真正的并发改动；
+   * 在 `invokeCondense()` 前后动都是同步的，碰不到那个窗口。
+   *
+   * 服务端 handler 是同步执行的（`req.on('end')` 里），所以这里改记忆不会被别的异步打散。
+   */
+  let beforeReply: (() => void) | null = null
   const server = http.createServer((req, res) => {
     // 吃掉请求体，否则 socket 不释放
     req.on('data', () => {})
     req.on('end', () => {
       seen.push({ url: String(req.url), head: String(replyJson).slice(0, 60) })
+      // 只动第一次：归纳失败会重试（ATTEMPTS=2），第二次不该再改一遍
+      const hook = beforeReply
+      beforeReply = null
+      hook?.()
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       /*
        * OpenAI 的流式形状：每行 `data: {chunk}`，最后 `data: [DONE]`。
@@ -5575,6 +5589,122 @@ async function scenarioMemCondense(): Promise<void> {
         used0
       )
     }
+    // ── ⑥ P1-⑤：归纳等待期间用户改了某条的值 → 归纳结束后用户的值仍在 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      for (let i = 0; i < 3; i++) writeMemory(`并发改值用例第${i}条-`.padEnd(110, 'c'), undefined, GLOBAL_SCOPE)
+      const entries = listMemories(GLOBAL_SCOPE)
+      const target = entries[1]
+      const userValue = '用户改过的新值（必须保留）'
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      /*
+       * 模型结果里 target 被改成了「模型版本」——若不做版本校验，这条会按 id 直接覆盖掉用户的值。
+       * 其余两条照常压缩，保证这次归纳在别处仍然生效（否则「全都跳过」也能骗过断言）。
+       */
+      replyJson = JSON.stringify({
+        entries: [
+          { id: entries[0].id, content: '第 0 条已被模型精简' },
+          { id: target.id, content: '模型版本（不该出现在盘上）' },
+          { id: entries[2].id, content: '第 2 条已被模型精简' }
+        ]
+      })
+      // 请求到达、模型还没回结果的那段时间里，用户改了 target 的值
+      beforeReply = () => {
+        const w = writeMemory(userValue, target.id, GLOBAL_SCOPE)
+        info('并发改值：等待期间的用户写入', JSON.stringify(w.ok ? { ok: true } : w))
+      }
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        changed?: number
+        skipped?: Array<{ id: string; reason: string; current: string | null }>
+      }
+      info('并发改值结果', JSON.stringify(r))
+      const after = listMemories(GLOBAL_SCOPE)
+      const kept = after.find((e) => e.id === target.id)
+      eq('并发改值：用户的值仍在（归纳结果不得覆盖）', kept?.content, userValue)
+      eq('并发改值：没有出现模型版本', after.some((e) => e.content === '模型版本（不该出现在盘上）'), false)
+      eq('并发改值：这一条被报为 modified（不静默）', r.skipped?.map((s) => `${s.id}:${s.reason}`), [
+        `${target.id}:modified`
+      ])
+      eq('并发改值：其余两条照常按归纳结果生效', after.filter((e) => e.content.startsWith('第')).length, 2)
+    }
+
+    // ── ⑦ P1-⑤：归纳等待期间用户删了某条 → 归纳结束后它仍是删除状态 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      for (let i = 0; i < 3; i++) writeMemory(`并发删除用例第${i}条-`.padEnd(110, 'd'), undefined, GLOBAL_SCOPE)
+      const entries = listMemories(GLOBAL_SCOPE)
+      const doomed = entries[1]
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      /*
+       * 模型在用户删除**之前**读到了它，结果里仍带着这条。
+       *
+       * 两种回法都要覆盖，因为它们是两条不同的复活路径：
+       *  a) 原 id 回（`{ id: doomed.id, content: doomed.content }`）—— 旧代码的 id 集合过滤恰好挡住了；
+       *  b) **id 填 null**（模型把它当新条目 / 合并产物吐出，`parseEntries` 会分配新 id）——
+       *     旧代码挡不住，已删除的内容会换个 id 复活。这是真正会漏的那条。
+       */
+      replyJson = JSON.stringify({
+        entries: [
+          { id: entries[0].id, content: '第 0 条已被模型精简' },
+          { id: null, content: doomed.content },
+          { id: entries[2].id, content: '第 2 条已被模型精简' }
+        ]
+      })
+      beforeReply = () => {
+        const d = deleteMemory(doomed.id, GLOBAL_SCOPE)
+        info('并发删除：等待期间的用户删除', JSON.stringify({ removed: !!d.removed, written: d.written }))
+      }
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        skipped?: Array<{ id: string; reason: string; current: string | null }>
+      }
+      info('并发删除结果', JSON.stringify(r))
+      const after = listMemories(GLOBAL_SCOPE)
+      eq('并发删除：该条目仍是删除状态（不复活）', after.some((e) => e.id === doomed.id), false)
+      eq(
+        '并发删除：被删的内容没以任何 id 回到盘上（模型换新 id 吐回也不复活）',
+        after.some((e) => e.content === doomed.content),
+        false
+      )
+      eq('并发删除：这一条被报为 deleted（不静默）', r.skipped?.map((s) => `${s.id}:${s.reason}`), [
+        `${doomed.id}:deleted`
+      ])
+      eq('并发删除：其余两条照常按归纳结果生效', after.filter((e) => e.content.startsWith('第')).length, 2)
+    }
+
+    // ── ⑦b 同上，但模型按**原 id** 回那条已删除的条目 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      for (let i = 0; i < 3; i++) writeMemory(`同 id 复活用例第${i}条-`.padEnd(110, 'e'), undefined, GLOBAL_SCOPE)
+      const entries = listMemories(GLOBAL_SCOPE)
+      const doomed = entries[1]
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      replyJson = JSON.stringify({
+        entries: [
+          { id: entries[0].id, content: '第 0 条已被模型精简' },
+          { id: doomed.id, content: doomed.content },
+          { id: entries[2].id, content: '第 2 条已被模型精简' }
+        ]
+      })
+      beforeReply = () => {
+        deleteMemory(doomed.id, GLOBAL_SCOPE)
+      }
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        skipped?: Array<{ id: string; reason: string; current: string | null }>
+      }
+      info('同 id 复活结果', JSON.stringify(r))
+      const after = listMemories(GLOBAL_SCOPE)
+      eq('同 id 复活：该条目仍是删除状态', after.some((e) => e.id === doomed.id), false)
+      eq('同 id 复活：被报为 deleted（不静默）', r.skipped?.map((s) => `${s.id}:${s.reason}`), [
+        `${doomed.id}:deleted`
+      ])
+    }
+
   } finally {
     /*
      * 关服务器这件事在 Windows 上有个坑：`close()` + 立刻 `process.exit()` 会撞上

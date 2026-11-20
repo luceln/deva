@@ -1940,8 +1940,17 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
     const w = await writeMemoryWithConsolidation(content, id, scope, ctx.memoryModel, ctx.signal)
     const r = w.result
     const c = w.consolidated
+    /*
+     * 归纳期间被用户改 / 删掉的条目：归纳结果对它们没生效，必须让模型（和用户）看得见。
+     * 静默的话，模型会以为「已经按我的整理写回去了」，下一轮再基于旧认知继续整理。
+     */
+    const skipNote = c?.skipped.length
+      ? `（归纳期间有 ${c.skipped.length} 条记忆被改动，已按当前内容保留、未采用归纳结果：${c.skipped
+          .map((s) => `${s.id}${s.reason === 'deleted' ? ' 已被删除，未复活' : ' 已被修改，保留新内容'}`)
+          .join('；')}）`
+      : ''
     const note = c
-      ? `${scopeLabel(scope)}已写满，已自动归纳：${c.before.count} 条 / ${c.before.used} 字 → ${c.after.count} 条 / ${c.after.used} 字（归纳前的内容已备份到 ${c.backup}；变化会随下一条消息的【记忆更新】告知）。
+      ? `${scopeLabel(scope)}已写满，已自动归纳：${c.before.count} 条 / ${c.before.used} 字 → ${c.after.count} 条 / ${c.after.used} 字${skipNote}（归纳前的内容已备份到 ${c.backup}；变化会随下一条消息的【记忆更新】告知）。
 `
       : ''
     if (!r.ok)
