@@ -92,6 +92,24 @@ async function settleUnstartedIntent(sessionId: string,
     return false
   } catch { return false }
 }
+/**
+ * A newer intent owns the session: an older callback must discard its result instead of clearing,
+ * rewriting, or downgrading that intent to pending. A cleared intent is not "newer" — plain rebinds
+ * already delete it and late results must still report created-unbound/stale (see memberwt gate).
+ */
+function intentReplaced(sessionId: string, recovery: MemberWorktreeRecovery): boolean {
+  const current = getSession(sessionId)?.memberWorktreeRecovery
+  return !!current && current !== recovery
+}
+
+/** Both the current pending entry and the requestId must still be the ones this callback started with. */
+function ownsOperation(sessionId: string, recovery: MemberWorktreeRecovery,
+  operation: { requestId: string; cancelled: boolean }): boolean {
+  const pending = pendingMemberBindings.get(sessionId)
+  return !!pending && pending === operation && pending.requestId === operation.requestId &&
+    !intentReplaced(sessionId, recovery)
+}
+
 function state(sessionId: string): MemberWorktreeState | null {
   const s = getSession(sessionId)
   if (!s?.parentId) return null
@@ -142,6 +160,8 @@ export async function memberWorktreeState(sessionId: string): Promise<MemberWork
 
 function unbound(sessionId: string, r: MemberWorktreeRecovery, reason: MemberWorktreeReason): MemberWorktreeBindResult {
   const s = getSession(sessionId)
+  // A newer intent must never be rewritten by this older callback's result.
+  if (intentReplaced(sessionId, r)) return reject('stale')
   let saved = false
   if (s) {
     s.memberWorktreeRecovery = { ...r, reason }
@@ -168,8 +188,9 @@ async function finishBinding(sessionId: string, recovery: MemberWorktreeRecovery
   }
   const blocked = eligibility(sessionId, recovery.expectedRevision)
   if (blocked) return unbound(sessionId, recovery, blocked.reason)
-  if (request && (request.cancelled || pendingMemberBindings.get(sessionId) !== request))
-    return unbound(sessionId, recovery, 'cancelled')
+  if (request && request.cancelled) return unbound(sessionId, recovery, 'cancelled')
+  // A late success callback must not mutate a newer intent, but plain rebinds keep created-unbound.
+  if (intentReplaced(sessionId, recovery)) return unbound(sessionId, recovery, 'stale')
   const s = getSession(sessionId)!
   if ((s.focusRoot ?? null) !== recovery.sourceFocusRoot) return unbound(sessionId, recovery, 'stale')
   if (!setMemberFolder(s, focusRoot, {
@@ -222,10 +243,8 @@ export async function bindMemberWorktree(req: MemberWorktreeBindReq): Promise<Me
     if (operation.cancelled) return unbound(s.id, recovery, 'cancelled')
     const result = await createWorktree({ ...req.create, repoRoot: recovery.repoRoot,
       path: recovery.checkoutRoot, branch: recovery.branch, skipDeps: true })
-    if (pendingMemberBindings.get(s.id) !== operation ||
-        (s.memberWorktreeRecovery && s.memberWorktreeRecovery !== recovery)) return reject('stale')
+    if (!ownsOperation(s.id, recovery, operation)) return reject('stale')
     if (!result.ok) {
-      if (s.memberWorktreeRecovery !== recovery) return reject('stale')
       recovery.reason = 'create-failed'
       const record = getRecord(recovery.checkoutRoot)
       if (record?.phase === 'active') {
@@ -237,7 +256,10 @@ export async function bindMemberWorktree(req: MemberWorktreeBindReq): Promise<Me
       }
       if (record?.phase === 'creating') return unbound(s.id, recovery, 'create-failed')
       // 创建接口失败可能已做过清理；仅在严格证实无登记/路径/分支时清意图，未知资产保留原样。
-      if (!await settleUnstartedIntent(s.id, operation)) return unbound(s.id, recovery, 'create-failed')
+      if (!await settleUnstartedIntent(s.id, operation)) {
+        if (!ownsOperation(s.id, recovery, operation)) return reject('stale')
+        return unbound(s.id, recovery, 'create-failed')
+      }
       return reject(result.reason === 'needs-confirm' ? 'dirty-confirmation-required' : 'create-failed', result.message)
     }
     recovery.phase = 'created'
@@ -245,8 +267,7 @@ export async function bindMemberWorktree(req: MemberWorktreeBindReq): Promise<Me
     return await finishBinding(s.id, recovery, operation)
   } catch (e) {
     // An old callback must not overwrite a newer operation, even when creation throws.
-    if (pendingMemberBindings.get(s.id) !== operation || s.memberWorktreeRecovery !== recovery)
-      return reject('stale')
+    if (!ownsOperation(s.id, recovery, operation)) return reject('stale')
     // 意外失败保留意图，state/retry-bind 走身份核实，绝不再建第二份。
     return unbound(s.id, recovery, 'create-failed')
   } finally {
