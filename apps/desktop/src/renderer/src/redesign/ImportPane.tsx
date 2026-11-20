@@ -94,6 +94,8 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   writeFailed: 'cf.profile.err.writeFailed',
   // 下面两个不限于某一步：config.json 写盘失败出现在服务商 / 角色启用态，link-failed 出现在技能建链接。
   'config-write-failed': 'settings.import.reason.configWriteFailed',
+  // 目标 config.json 在但读不出来。此刻写回会用空配置抹掉用户原有的 providers / 偏好，所以一条都不写。
+  'target-config-unreadable': 'settings.import.reason.targetConfigUnreadable',
   'link-failed': 'settings.import.reason.linkFailed',
   // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串含本机绝对路径，只进后台日志。
   'target-write-failed': 'settings.import.reason.targetWriteFailed'

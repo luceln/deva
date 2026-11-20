@@ -893,6 +893,8 @@ const zhCN: MessageTree = {
         importedProviderMissing:
           '导入的服务商没有留在配置里，可能被其他写入覆盖了，请重新导入一次补上',
         configWriteFailed: '配置写盘失败，权限或磁盘异常',
+        // 目标 config.json 在但读不出来（半截 JSON / 被占用）。此刻写回等于用空配置覆盖用户的原有配置。
+        targetConfigUnreadable: '本应用的 config.json 读不出来，为免覆盖原有配置，本次服务商一个都没有导入',
         linkFailed: '建立链接失败，可能缺少权限',
         // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串（含本机绝对路径）只进后台日志，不进界面。
         targetWriteFailed: '写入目标位置失败（权限、磁盘或路径异常），这一项没有导入',
@@ -2763,6 +2765,8 @@ const en: MessageTree = {
         importedProviderMissing:
           'An imported provider is no longer in the config — something else likely overwrote it. Import again to restore it.',
         configWriteFailed: 'Couldn’t write config — check permissions or disk space',
+        targetConfigUnreadable:
+          'This app’s config.json can’t be read — no providers were imported so your existing config stays untouched',
         linkFailed: 'Couldn’t create the link — permission likely denied',
         targetWriteFailed: 'Couldn’t write to the destination (permissions, disk or path) — this item was not imported',
         noEncryption: 'This machine can’t store keys — add them again by hand',

@@ -69,6 +69,8 @@ const ENV_OF = {
   keynoenc: { scenario: 'keytri', env: { TEST_NO_ENCRYPTION: '1' } },
   cfgcorrupt: { scenario: 'cfgcorrupt', env: { P13_KIND: 'corrupt' } },
   cfgabsent: { scenario: 'cfgcorrupt', env: { P13_KIND: 'absent' } },
+  // P1-④：目标 config.json 内容坏 → 导入服务商必须拒绝写入并如实报失败（配置载入态是模块级缓存，须独立进程）
+  cfgimport: { scenario: 'cfgcorrupt', env: { P13_KIND: 'corrupt', P14_IMPORT: '1' } },
   secretscorrupt: { scenario: 'secretskind', env: { S42_KIND: 'corrupt' } },
   secretsabsent: { scenario: 'secretskind', env: { S42_KIND: 'absent' } },
   /*

@@ -1,6 +1,6 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { getConfig, getDevaHome, setConfig } from './services/config'
+import { getConfig, getConfigLoadKind, getDevaHome, setConfig } from './services/config'
 import { readSecret, setSecret } from './services/secrets'
 import { decryptAsLegacy } from './services/secret-rekey'
 import { isPluginManagedKey, pluginManagedProviderIds } from './services/plugin-managed'
@@ -150,6 +150,29 @@ export function mergeProviders(srcHome: string, opts?: { excludeIds?: string[] }
   if (srcRead.kind === 'unreadable') return { copied: [], skipped: [], kept: [], builtin: [], pluginManaged: [], failed: [{ step: 'providers', id: '<config.json>', reason: srcRead.reason }] }
   const srcProviders = providersOf(srcRead.kind === 'ok' ? srcRead.cfg : null)
   if (!srcProviders.length) return stat
+
+  /*
+   * ⚠️ 目标配置读不出来时**一律不写**（P1-④）。
+   *
+   * `getConfig()` 在载入失败时回落成 `{}` 并 `loaded = true`；若照常合并再 `setConfig`，写回的就是
+   * 「空配置 + 这次导入的几项」——用户原本的 providers / 偏好被整份抹掉，且没有任何备份。文件在但读不出
+   * 不等于它真的空（半截 JSON 通常可修、EACCES/被占用时往往完全正常）。
+   *
+   * 这里返回可见失败而不是静默跳过：用户要知道「原版服务商这次一个都没进来，因为本应用配置读不出来」，
+   * 而不是看到「0 个服务商、ok:true」。磁盘字节保持原样，留给用户/后续修复。
+   */
+  /*
+   * ⚠️ 目标配置读不出来时**一律不写**（P1-④）。
+   *
+   * `getConfig()` 在载入失败时回落成 `{}` 并 `loaded = true`；若照常合并再 `setConfig`，写回的就是
+   * 「空配置 + 这次导入的几项」——用户原本的 providers / 偏好被整份抹掉，且没有任何备份。文件在但读不出
+   * 不等于它真的空（半截 JSON 通常可修、EACCES/被占用时往往完全正常）。
+   *
+   * 这里返回可见失败而不是静默跳过：用户要知道「原版服务商这次一个都没进来，因为本应用配置读不出来」，
+   * 而不是看到「0 个服务商、ok:true」。磁盘字节保持原样，留给用户/后续修复。
+   */
+  if (getConfigLoadKind() === 'corrupt')
+    return { ...stat, failed: [...(stat.failed ?? []), { step: 'providers', id: '<config.json>', reason: 'target-config-unreadable' }] }
 
   const dstCfg = getConfig() as Cfg
   const dstModels = (dstCfg.models && typeof dstCfg.models === 'object' ? dstCfg.models : {}) as Cfg

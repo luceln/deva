@@ -1561,6 +1561,37 @@ async function scenarioConfigCorrupt(): Promise<void> {
     eq('P1-3(corrupt)：载入状态是 corrupt（不是 ok/absent）', getConfigLoadKind(), 'corrupt')
     eq('P1-3(corrupt)：配置读坏 → 放行 ok:true（旧实现判 missing 并全库标红）', r.ok, true)
     eq('P1-3(corrupt)：放行时不该带 kind', r.kind, undefined)
+    if (process.env.P14_IMPORT === '1') {
+      /*
+       * P1-④：目标 config.json 内容坏时导入服务商。
+       *
+       * 旧实现照常合并再 setConfig，写回的是「空配置 + 这次导入的几项」——用户原有的 providers / 偏好
+       * 被整份抹掉，且报告里没有失败。修复后必须：磁盘字节不变 + 有一条可见失败。
+       */
+      const { mergeProviders } = await import('../../apps/desktop/src/main/importer-config')
+      const srcHome = path.join(DST, 'p14-src')
+      fs.mkdirSync(srcHome, { recursive: true })
+      fs.writeFileSync(
+        path.join(srcHome, 'config.json'),
+        JSON.stringify({
+          models: {
+            providers: [
+              { id: 'from-upstream', name: '原版服务商', kind: 'custom', apiHost: 'https://x.example/v1', enabled: true, models: [] }
+            ]
+          }
+        })
+      )
+      const beforeBytes = fs.readFileSync(cfgPath, 'utf8')
+      const st = mergeProviders(srcHome)
+      info('P1-④ mergeProviders', JSON.stringify({ copied: st.copied, failed: st.failed }))
+      eq('P1-④：目标 config 读不出来 → 整体不写（不看 copied）', st.copied.length, 0)
+      eq(
+        'P1-④：如实报一条 target-config-unreadable',
+        (st.failed ?? []).some((f) => f.reason === 'target-config-unreadable'),
+        true
+      )
+      eq('P1-④：目标 config.json 字节未被改写', fs.readFileSync(cfgPath, 'utf8'), beforeBytes)
+    }
   } else {
     // 对照：真没配过 ≠ 读坏，必须仍然判 missing，别把「没配」也放行了
     eq('P1-3(absent)：文件不存在 → absent', getConfigLoadKind(), 'absent')
