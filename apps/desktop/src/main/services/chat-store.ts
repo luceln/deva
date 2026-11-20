@@ -519,22 +519,33 @@ function loadSessionFile(id: string): StoredSession | undefined {
 }
 
 /**
+ * `save()` 的可区分结果（P2-⑦）。
+ *
+ * 以前只有 `boolean`，于是「主 JSON 已原子写入、只有索引落盘失败」与「主 JSON 根本没写进去」对调用方
+ * 完全一样。批量替换据此回滚内存并报失败——而磁盘上其实已经是新值：用户看到「失败」，重启后模型却是新的。
+ *
+ * 索引是**派生数据**（`ensureIndex()` 会扫目录重建），主文件才是真源。所以这里分开：
+ *  - `saved`：主文件与索引都写成功；
+ *  - `saved-index-stale`：主文件已落盘、索引待重建。**不得**回滚内存，也**不得**报成整体失败；
+ *  - `not-saved`：主文件没写（缓存里没有 / 序列化或写盘抛错）。调用方该回滚、该报失败。
+ */
+export type SaveOutcome = 'saved' | 'saved-index-stale' | 'not-saved'
+
+/**
  * 保存单条对话：写该对话文件 + 刷新其索引条目并落盘。
  * 只重写这一条 + 轻量索引，与其它对话无关（这是一对话一文件的核心收益）；压缩过的对话只重写模型还看得到的
  * 那部分，更早的追加进拆分文件（见 syncCompacted）。
  *
- * **返回是否真的写进了磁盘。**
+ * **`saveOutcome` 返回三态；`save` 是它的布尔投影**（保留既有调用方，不必全仓改签名）。
  *
- * 为什么必须返回：以前是 `void` 且 `catch { return }`，于是「保存失败」与「保存成功」对调用方完全一样。
+ * 为什么必须能区分：以前是 `void` 且 `catch { return }`，于是「保存失败」与「保存成功」对调用方完全一样。
  * 用返回值表达失败的函数被当语句调用，是本项目最危险的一类静默——批量替换 `applyModelSwap` 就是这样把
- * 「磁盘没改」算成「已替换 N 个」（P1-2）。改签名的成本很小：既有调用点忽略返回值即可，只有需要知道
- * 结果的地方显式检查。
+ * 「磁盘没改」算成「已替换 N 个」（P1-2）。之后又加了「索引失败也返回 false」，却把**已落盘**也算成没保存，
+ * 于是出现反向错误：磁盘已新、界面报失败、内存被回滚（P2-⑦）。
  *
- * 三种 false 的情况分开说清（界面文案要能对上）：
- *  - 缓存里没有这条对话（`sessionCache` 被清过）：**没写**，不是成功；
- *  - 序列化 / 写盘抛错（磁盘满、被占、权限）；
- *  - 索引落盘失败也算 false：单个对话文件是写了，但列表读的是索引——索引没更新，用户刷新一次就看不到了，
- *    对他而言与「没保存」等价。
+ * 在 `not-saved` 之前还有两种「没写」：
+ *  - 缓存里没有这条对话（`sessionCache` 被清过）；
+ *  - 序列化 / 写盘抛错（磁盘满、被占、权限）。
  *
  * ## 调用方什么时候**必须**检查返回值
  *
@@ -546,10 +557,10 @@ function loadSessionFile(id: string): StoredSession | undefined {
  *
  * ⚠️ 将来若有新的「承诺型」操作复用这个函数，这里会重演 P1-2：请把返回值接上去、把失败送到界面。
  */
-export function save(id: string): boolean {
+export function saveOutcome(id: string): SaveOutcome {
   const s = sessionCache.get(id)
-  // 缓存里没有 = 不知道要写什么。明确返回 false：静默返回会让调用方以为存过了。
-  if (!s) return false
+  // 缓存里没有 = 不知道要写什么。明确返回 not-saved：静默返回会让调用方以为存过了。
+  if (!s) return 'not-saved'
   let stale: string | null
   try {
     stale = syncCompacted(s)
@@ -558,12 +569,17 @@ export function save(id: string): boolean {
     writeFileAtomic(fileForId(id), JSON.stringify({ ...s, messages: live }, mediaReplacer, 2))
   } catch (e) {
     console.warn(`[chat-store] 对话 ${id} 落盘失败：`, (e as Error)?.message ?? e)
-    return false
+    return 'not-saved'
   }
   if (stale) removeCompactedFiles(id, s.compacted?.file)
   ensureIndex().set(id, metaOf(s))
-  // 索引是列表的真源：它没落盘，用户下次看到的仍是旧列表，与「没保存」同效。
-  return persistIndex()
+  // 主文件已经落地（上面的 writeFileAtomic 没抛）。索引失败只降级为「待重建」，不能反过来说没保存。
+  return persistIndex() ? 'saved' : 'saved-index-stale'
+}
+
+/** 布尔投影：`saved` 以外都为 false（索引待重建对「列表能不能看到」在当下仍算不完整）。 */
+export function save(id: string): boolean {
+  return saveOutcome(id) === 'saved'
 }
 
 /** 全部会话清单（无分桶——对话优先外壳一次列全部，按 updatedAt 倒序）。 */

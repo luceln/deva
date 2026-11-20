@@ -1581,6 +1581,63 @@ async function scenarioConfigCorrupt(): Promise<void> {
 }
 
 /**
+ * P2-⑦：主 JSON 已落盘、索引落盘失败时，**不得回滚内存、不得报成整体失败**。
+ *
+ * 原缺陷：`save()` 在索引写失败时返回 false，`applyModelSwap` 据此把会话推进 `failed` 并把内存态回滚成旧引用。
+ * 结果是「界面说没换成 / 重启后却是新模型」——数据其实已经落盘，索引只是派生数据（`ensureIndex()` 会扫目录重建）。
+ *
+ * 造法：把 `data/chats/_index.json` 换成同名**目录**（EISDIR），主 JSON 的写入路径完全正常。
+ */
+async function scenarioSwapIndexFail(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const { applyModelSwap } = await import('../../apps/desktop/src/main/services/model-swap')
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        { id: 'p', name: 'P', apiHost: 'https://a.example/v1', enabled: true, models: [{ id: 'm' }] },
+        { id: 'q', name: 'Q', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'n' }] }
+      ]
+    }
+  })
+  const s = cs.ensureSession('Sidx', { model: 'p:gone' })
+  s.title = 'IndexFail'
+  eq('P2-⑦：前置——会话正常落盘', cs.save('Sidx'), true)
+
+  const chatsDir = path.join(DST, 'data', 'chats')
+  const indexFile = path.join(chatsDir, '_index.json')
+  // 只删我们自己刚建的索引文件，再换成同名目录，让 persistIndex 必然 EISDIR
+  fs.rmSync(indexFile, { force: true })
+  fs.mkdirSync(indexFile)
+
+  // ① saveOutcome 必须能把「主文件已落盘」与「根本没写」分开
+  const s2 = cs.getSession('Sidx')!
+  s2.model = 'q:n'
+  eq('P2-⑦：索引失败时 saveOutcome = saved-index-stale（旧实现只能拿到 false）', cs.saveOutcome('Sidx'), 'saved-index-stale')
+  const onDisk = JSON.parse(fs.readFileSync(path.join(chatsDir, 'Sidx.json'), 'utf8')) as { model?: string }
+  eq('P2-⑦：主 JSON 确实已是新模型（证明「已落盘」不是错觉）', onDisk.model, 'q:n')
+
+  // ② applyModelSwap 不得把它算成 failed，也不得回滚内存
+  s2.model = 'p:gone'
+  const r = await applyModelSwap({ mainId: 'Sidx', fromRef: 'p:gone', toRef: 'q:n' })
+  if ('error' in r) {
+    fail('P2-⑦：不该整批拒绝（目标模型可用）', JSON.stringify(r))
+    return
+  }
+  info('P2-⑦ applyModelSwap 结果', JSON.stringify({ changed: r.changed.map((b) => b.sessionId), failed: (r.failed ?? []).map((b) => b.sessionId), indexStale: (r.indexStale ?? []).map((b) => b.sessionId) }))
+  eq('P2-⑦：索引待重建的会话仍算替换成功（不被算进 failed）', (r.failed ?? []).map((b) => b.sessionId), [])
+  eq('P2-⑦：它进了 changed', r.changed.map((b) => b.sessionId), ['Sidx'])
+  eq('P2-⑦：同时如实报告索引待重建', (r.indexStale ?? []).map((b) => b.sessionId), ['Sidx'])
+  eq('P2-⑦：内存态**没有**被回滚成旧引用（旧实现会回滚）', cs.getSession('Sidx')?.model, 'q:n')
+  const diskAfter = JSON.parse(fs.readFileSync(path.join(chatsDir, 'Sidx.json'), 'utf8')) as { model?: string }
+  eq('P2-⑦：磁盘与内存一致（都是新模型）', diskAfter.model, 'q:n')
+
+  // 恢复索引，避免影响后续场景
+  fs.rmdirSync(indexFile)
+}
+
+/**
  * P1-2：`save` 的写盘结果必须能被调用方看见，`applyModelSwap` 不许把「没写盘」算成「已替换」。
  *
  * 以前 `save` 返回 void 且 `catch { return }`，`applyModelSwap` 无条件 `changed.push()`：
@@ -5887,6 +5944,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   keytri: scenarioKeyTriState,
   cfgcorrupt: scenarioConfigCorrupt,
   swapfail: scenarioSwapWriteFail,
+  swapindex: scenarioSwapIndexFail,
   kindcopy: scenarioKindCopy,
   swapws: scenarioSwapWhitespace,
   blockedturn: scenarioBlockedTurnNoTrace,

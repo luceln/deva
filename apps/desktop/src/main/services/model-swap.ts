@@ -1,6 +1,6 @@
 import { activeMembers } from './members'
 import { markMemberSetting } from './chat-members'
-import { getSession, save as saveProject } from './chat-store'
+import { getSession, saveOutcome } from './chat-store'
 import { syncTaskModel } from './tasks'
 import { resolveAvailability, isUsableRef } from './model-availability'
 import type {
@@ -135,6 +135,8 @@ export async function applyModelSwap(p: {
   const skipped: BrokenRef[] = []
   // 写盘失败的那些：进这里而不是 changed——界面据此说「这几个没换成」，别混进成功数
   const failed: BrokenRef[] = []
+  // 主文件已落盘、只有索引待重建：不是失败，但要能看出来
+  const indexStale: BrokenRef[] = []
   for (const c of cands) {
     // 空引用（含只有空白）= 尚未定格模型（跟随全局默认）：它根本没引用任何具体模型，替换它只会凭空钉死一个模型，
     // 故既不替换也不计进 skipped（那会让界面上的「跳过 M 个」混进一堆本来就没坏、也没让用户单独指定过的会话）。
@@ -163,13 +165,21 @@ export async function applyModelSwap(p: {
      * 失败的会话要**回滚内存**：`getSession` 走 `loadSessionFile`，返回的是缓存里的同一个对象，
      * 不回滚的话界面刷新一次又会从内存读到新模型，用户以为换成了，实际磁盘还是旧值。
      */
-    const wrote = saveProject(c.id)
-    if (!wrote) {
-      // 回滚成**原始值**（c.ref），不是 trim 后的 from：归一化只用于比较，不许改用户数据
+    const wrote = saveOutcome(c.id)
+    if (wrote === 'not-saved') {
+      // 主文件确实没写：回滚成**原始值**（c.ref），不是 trim 后的 from（归一化只用于比较，不许改用户数据）
       session.model = c.ref
       failed.push({ sessionId: c.id, name: c.name, ref: c.ref, kind: fromKind ?? 'missing' })
       continue
     }
+    /*
+     * `saved-index-stale`：主 JSON 已原子写入，只有派生索引没落盘（`ensureIndex()` 下次读会扫目录重建）。
+     *
+     * 这里**绝不能回滚内存、也不能计进 failed**（P2-⑦ 的正是这个反向错误）：磁盘上已经是新模型，
+     * 回滚只会让界面显示旧值而磁盘是新值；报失败则会让用户以为没换成。但要如实让上层知道索引待重建，
+     * 所以记进 `indexStale`——它不是失败，只是「列表刷新一次才稳」。
+     */
+    if (wrote === 'saved-index-stale') indexStale.push({ sessionId: c.id, name: c.name, ref: c.ref, kind: fromKind ?? 'missing' })
     // 与用户在输入框里换模型（chat:set-model）走同一套后果，否则这次替换会被下一次活动静默改回去：
     //  · 任务对话：任务也跟着换（否则下一次定时运行又用旧模型，且任务与对话两边不一致）；
     //  · 成员会话：记为「用户亲自定过模型」（modelSet），此后派任务不再按主对话覆盖——否则主智能体下一次派任务就
@@ -179,5 +189,5 @@ export async function applyModelSwap(p: {
     markMemberSetting(session, 'modelSet')
     changed.push({ sessionId: c.id, name: c.name, ref: c.ref, kind: fromKind ?? 'missing' })
   }
-  return { changed, skipped, failed }
+  return { changed, skipped, failed, indexStale }
 }

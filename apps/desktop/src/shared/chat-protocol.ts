@@ -286,6 +286,14 @@ export interface ModelSwapResult {
   changed: BrokenRef[]
   skipped: BrokenRef[]
   failed: BrokenRef[]
+  /**
+   * 主 JSON 已落盘、但派生索引没写成功的会话（P2-⑦）。
+   *
+   * 它们**不是失败**：磁盘上已经是新模型，`ensureIndex()` 下次读会扫目录重建索引。单列出来是为了让界面
+   * 不要把这些算进 failed（那会提示「这些没换成」，而其实换了），也便于在结果里说明「列表刷新一次即可」。
+   * 缺省 = 没有这种情况（旧调用方/旧持久化数据不受影响）。
+   */
+  indexStale?: BrokenRef[]
 }
 
 /** 扫本对话里模型引用已失效的会话（主对话 + 未移除成员）。只读。见 chat:model-swap-scan。 */
