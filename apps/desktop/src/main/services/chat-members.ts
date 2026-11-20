@@ -33,7 +33,9 @@ import { NEW_MEMBER_TOKENS } from '../../shared/mention'
 import { withoutQuotes } from '../../shared/quote'
 import { DEFAULT_PERSONA_ID, getPersona, listPersonas, resolvePersonaId } from './personas'
 import { notifyReplyDone } from './reply-notify'
-import { ensureSession, getSession, save as saveProject, type StoredSession } from './chat-store'
+import { ensureSession, getSession, save as saveProject, verifyMemberBindingSaved, verifyMemberMirrorSaved, type StoredSession } from './chat-store'
+import { invalidateMemberBindingRequest } from './member-binding-state'
+import type { MemberWorktreeIdentity } from '../../shared/member-worktree-protocol'
 import { isEn } from '../locale'
 import {
   browserHasHandoff
@@ -309,8 +311,7 @@ function addMember(
     prior.root = p.root ?? memberFolder(prior)
     saveProject(main.id)
     if (sub && p.root) {
-      sub.focusRoot = p.root
-      saveProject(sub.id)
+      if (!setMemberFolder(sub, p.root)) return '成员恢复目录未能保存，请重试'
     }
     return { ref: prior, restored: true }
   }
@@ -402,16 +403,37 @@ export function markMemberSetting(sub: StoredSession, field: 'modelSet' | 'effor
 /**
  * 成员会话里挂载 / 卸载文件夹（null = 卸载，成员没有文件夹）：同步写回主对话名单（名单随消息下发，主智能体会收到更新）。
  */
-export function setMemberFolder(sub: StoredSession, folder: string | null): void {
+export function setMemberFolder(
+  sub: StoredSession,
+  folder: string | null,
+  identity?: MemberWorktreeIdentity
+): boolean {
   const main = sub.parentId ? getSession(sub.parentId) : undefined
   const ref = main?.members?.find((m) => m.sessionId === sub.id)
-  if (main && ref) {
-    ref.root = folder
-    saveProject(main.id)
-  }
+  if (!main || !ref || ref.removed) return false
+  invalidateMemberBindingRequest(sub.id)
+  const old = { root: sub.focusRoot, revision: sub.memberBindingRevision,
+    identity: sub.memberWorktreeIdentity, recovery: sub.memberWorktreeRecovery, mirror: ref.root }
   sub.focusRoot = folder
-  saveProject(sub.id)
+  sub.memberBindingRevision = (sub.memberBindingRevision ?? 0) + 1
+  sub.memberWorktreeIdentity = identity
+  delete sub.memberWorktreeRecovery
+  ref.root = folder
+  // 两份文件并非事务：失败时显式回滚并回读，调用者不可宣称绑定成功。
+  if (!saveProject(sub.id) || !verifyMemberBindingSaved(sub) || !saveProject(main.id) ||
+      !verifyMemberMirrorSaved(main.id, sub.id, folder)) {
+    sub.focusRoot = old.root
+    sub.memberBindingRevision = old.revision
+    sub.memberWorktreeIdentity = old.identity
+    sub.memberWorktreeRecovery = old.recovery
+    ref.root = old.mirror
+    const rolledBack = saveProject(sub.id) && verifyMemberBindingSaved(sub)
+    const mirrorSaved = saveProject(main.id)
+    if (!rolledBack || !mirrorSaved) console.warn('[member-binding] 绑定回滚未能确认落盘', sub.id)
+    return false
+  }
   publishSessionsChanged()
+  return true
 }
 
 /**

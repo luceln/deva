@@ -37,6 +37,10 @@ import type { TodoEntry } from './todos'
  */
 
 export interface StoredSession {
+  /** 用户目录绑定的持久化版本；缺省兼容旧会话为 0。 */
+  memberBindingRevision?: number
+  memberWorktreeIdentity?: import('../../shared/member-worktree-protocol').MemberWorktreeIdentity
+  memberWorktreeRecovery?: import('../../shared/member-worktree-protocol').MemberWorktreeRecovery
   id: string
   title: string
   createdAt: number
@@ -564,6 +568,24 @@ export function save(id: string): boolean {
   ensureIndex().set(id, metaOf(s))
   // 索引是列表的真源：它没落盘，用户下次看到的仍是旧列表，与「没保存」同效。
   return persistIndex()
+}
+
+/** 承诺型成员绑定操作必须回读磁盘确认，不能用缓存冒充落盘结果。 */
+export function verifyMemberBindingSaved(s: StoredSession): boolean {
+  try {
+    const disk = JSON.parse(readFileSync(fileForId(s.id), 'utf8')) as StoredSession
+    return JSON.stringify([disk.focusRoot ?? null, disk.memberBindingRevision ?? 0,
+      disk.memberWorktreeIdentity ?? null, disk.memberWorktreeRecovery ?? null]) ===
+      JSON.stringify([s.focusRoot ?? null, s.memberBindingRevision ?? 0,
+        s.memberWorktreeIdentity ?? null, s.memberWorktreeRecovery ?? null])
+  } catch { return false }
+}
+
+export function verifyMemberMirrorSaved(mainId: string, subId: string, root: string | null): boolean {
+  try {
+    const disk = JSON.parse(readFileSync(fileForId(mainId), 'utf8')) as StoredSession
+    return disk.members?.some((m) => m.sessionId === subId && m.root === root) === true
+  } catch { return false }
 }
 
 /** 全部会话清单（无分桶——对话优先外壳一次列全部，按 updatedAt 倒序）。 */

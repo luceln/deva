@@ -1,0 +1,195 @@
+import { ipcMain } from 'electron'
+import { randomUUID } from 'crypto'
+import { isAbsolute, relative, resolve } from 'path'
+import { realpathSync } from 'fs'
+import { getSession, save, verifyMemberBindingSaved } from './chat-store'
+import { historyLocked } from './chat-state'
+import { setMemberFolder } from './chat-members'
+import { activeMember, pendingMemberBindings } from './member-binding-state'
+import { validExecutionDirectory, verifyMemberWorktree } from './member-worktree-guard'
+import { runGitRaw } from './git'
+import { precheck } from './worktree/precheck'
+import { createWorktree } from './worktree/create'
+import { getRecord } from './worktree/store'
+import type {
+  MemberWorktreeState, MemberWorktreeStateResult, MemberWorktreeRejected, MemberWorktreeReason,
+  MemberWorktreePrecheckReq, MemberWorktreePrecheckResult, MemberWorktreeBindReq,
+  MemberWorktreeBindResult, MemberWorktreeCancelReq, MemberWorktreeCancelResult,
+  MemberWorktreeRetryBindReq, MemberWorktreeRecovery
+} from '../../shared/member-worktree-protocol'
+
+// 预检中的取消也必须生效，不能等 create 开始才识别；仅保存最近用户请求，避免无限增长。
+const cancelledRequests = new Set<string>()
+const requestKey = (sessionId: string, requestId: string): string => JSON.stringify([sessionId, requestId])
+
+const reject = (reason: MemberWorktreeReason, message?: string): MemberWorktreeRejected =>
+  ({ ok: false, status: 'rejected', reason, ...(message ? { message } : {}) })
+const normalized = (p: string): string => {
+  const value = resolve(realpathSync.native(p))
+  return process.platform === 'win32' ? value.toLowerCase() : value
+}
+function state(sessionId: string): MemberWorktreeState | null {
+  const s = getSession(sessionId)
+  if (!s?.parentId) return null
+  return { sessionId, revision: s.memberBindingRevision ?? 0, focusRoot: s.focusRoot ?? null,
+    identity: s.memberWorktreeIdentity, recovery: s.memberWorktreeRecovery,
+    pending: pendingMemberBindings.has(sessionId) }
+}
+function eligibility(sessionId: string, revision: number): MemberWorktreeRejected | null {
+  const m = activeMember(sessionId)
+  if (!m) return reject('not-member')
+  if (m.ref.removed) return reject('member-removed')
+  if ((m.sub.memberBindingRevision ?? 0) !== revision) return reject('stale')
+  if (historyLocked(sessionId)) return reject('busy')
+  return null
+}
+
+/** 预检显式 sourceRoot，不通过先改 focusRoot 传递用户选择。 */
+export async function precheckMemberWorktree(req: MemberWorktreePrecheckReq): Promise<MemberWorktreePrecheckResult> {
+  if (!req || typeof req.sessionId !== 'string' || !Number.isSafeInteger(req.expectedRevision) ||
+      typeof req.sourceRoot !== 'string' || !isAbsolute(req.sourceRoot) || !req.create)
+    return reject('invalid-request')
+  const blocked = eligibility(req.sessionId, req.expectedRevision)
+  if (blocked) return blocked
+  if (pendingMemberBindings.has(req.sessionId)) return reject('pending')
+  try {
+    validExecutionDirectory(req.sourceRoot)
+    const source = realpathSync.native(req.sourceRoot)
+    const top = await runGitRaw(source, ['rev-parse', '--show-toplevel'])
+    if (top.code !== 0) return reject('source-unavailable', top.stderr)
+    const checkout = realpathSync.native(top.stdout.trim())
+    if (normalized(req.create.repoRoot) !== normalized(checkout)) return reject('identity-mismatch')
+    const relativePath = relative(checkout, source)
+    if (relativePath === '..' || relativePath.startsWith('..\\') || relativePath.startsWith('../') || isAbsolute(relativePath))
+      return reject('identity-mismatch')
+    const checked = await precheck({ ...req.create, repoRoot: checkout })
+    if (!checked.ok) return reject('create-failed', checked.message)
+    return { ok: true, revision: req.expectedRevision, sourceFocusRoot: source,
+      sourceCheckoutRoot: checkout, relativePath, precheck: checked }
+  } catch (e) { return reject('source-unavailable', (e as Error).message) }
+}
+
+export function memberWorktreeState(sessionId: string): MemberWorktreeStateResult {
+  const snapshot = state(sessionId)
+  return snapshot ? { ok: true, state: snapshot } : reject('not-member')
+}
+
+function unbound(sessionId: string, r: MemberWorktreeRecovery, reason: MemberWorktreeReason): MemberWorktreeBindResult {
+  const s = getSession(sessionId)
+  let saved = false
+  if (s) {
+    s.memberWorktreeRecovery = { ...r, reason }
+    saved = save(s.id) && verifyMemberBindingSaved(s)
+  }
+  return { ok: false, status: 'created-unbound', reason: saved ? reason : 'bind-write-failed',
+    checkoutRoot: r.checkoutRoot, operationId: r.operationId, binding: saved ? state(sessionId) : null }
+}
+
+/** 校验后到同步提交之间不 await，避免检查通过后起轮/改绑插入。 */
+async function finishBinding(sessionId: string, recovery: MemberWorktreeRecovery,
+  request?: { requestId: string; cancelled: boolean }): Promise<MemberWorktreeBindResult> {
+  const focusRoot = resolve(recovery.checkoutRoot, recovery.relativePath)
+  try {
+    const rec = getRecord(recovery.checkoutRoot)
+    if (!rec || rec.phase !== 'active' || rec.branch !== recovery.branch ||
+        normalized(rec.repoRoot) !== normalized(recovery.repoRoot))
+      return unbound(sessionId, recovery, 'identity-mismatch')
+    await verifyMemberWorktree(recovery, focusRoot)
+  } catch (e) {
+    return unbound(sessionId, recovery, (e as NodeJS.ErrnoException).code === 'ENOENT'
+      ? 'execution-root-missing' : 'identity-mismatch')
+  }
+  const blocked = eligibility(sessionId, recovery.expectedRevision)
+  if (blocked) return unbound(sessionId, recovery, blocked.reason)
+  if (request && (request.cancelled || pendingMemberBindings.get(sessionId) !== request))
+    return unbound(sessionId, recovery, 'cancelled')
+  const s = getSession(sessionId)!
+  if ((s.focusRoot ?? null) !== recovery.sourceFocusRoot) return unbound(sessionId, recovery, 'stale')
+  if (!setMemberFolder(s, focusRoot, {
+    checkoutRoot: recovery.checkoutRoot, repoRoot: recovery.repoRoot,
+    branch: recovery.branch, relativePath: recovery.relativePath
+  })) return unbound(sessionId, recovery, 'bind-write-failed')
+  return { ok: true, status: 'bound', revision: s.memberBindingRevision!, checkoutRoot: recovery.checkoutRoot, focusRoot }
+}
+
+export async function bindMemberWorktree(req: MemberWorktreeBindReq): Promise<MemberWorktreeBindResult> {
+  if (!req || typeof req.requestId !== 'string' || !req.requestId.trim()) return reject('invalid-request')
+  const checked = await precheckMemberWorktree(req)
+  if (cancelledRequests.has(requestKey(req.sessionId, req.requestId))) return reject('cancelled')
+  if (!checked.ok) return checked
+  // 预检有异步窗口，取得 pending 前必须再次核验。
+  const blocked = eligibility(req.sessionId, req.expectedRevision)
+  if (blocked) return blocked
+  if (pendingMemberBindings.has(req.sessionId)) return reject('pending')
+  const s = getSession(req.sessionId)!
+  if (s.memberWorktreeRecovery) return reject('pending', '已有未完成工作区，请先恢复或处理，避免重复创建')
+  if (checked.precheck.needsConfirm) return reject('dirty-confirmation-required')
+  const operation = { requestId: req.requestId, cancelled: false }
+  const recovery: MemberWorktreeRecovery = {
+    operationId: randomUUID(), expectedRevision: req.expectedRevision,
+    sourceFocusRoot: s.focusRoot ?? null, createdAt: Date.now(), phase: 'creating', reason: 'create-failed',
+    checkoutRoot: checked.precheck.path, repoRoot: checked.precheck.repoRoot,
+    branch: checked.precheck.branch, relativePath: checked.relativePath
+  }
+  pendingMemberBindings.set(s.id, operation)
+  s.memberWorktreeRecovery = recovery
+  try {
+    // 创建前先持久化意图：进程中断后可以在相同路径核实事实，不重复 create。
+    if (!save(s.id) || !verifyMemberBindingSaved(s)) {
+      delete s.memberWorktreeRecovery
+      return reject('bind-write-failed')
+    }
+    if (operation.cancelled) return unbound(s.id, recovery, 'cancelled')
+    const result = await createWorktree({ ...req.create, repoRoot: recovery.repoRoot,
+      path: recovery.checkoutRoot, branch: recovery.branch, skipDeps: true })
+    if (!result.ok) {
+      delete s.memberWorktreeRecovery
+      if (!save(s.id) || !verifyMemberBindingSaved(s)) return reject('bind-write-failed')
+      return reject(result.reason === 'needs-confirm' ? 'dirty-confirmation-required' : 'create-failed', result.message)
+    }
+    recovery.phase = 'created'
+    recovery.checkoutRoot = result.record.path
+    return await finishBinding(s.id, recovery, operation)
+  } catch (e) {
+    // 意外失败保留意图，state/retry-bind 走身份核实，绝不再建第二份。
+    return unbound(s.id, recovery, 'create-failed')
+  } finally {
+    if (pendingMemberBindings.get(s.id) === operation) pendingMemberBindings.delete(s.id)
+  }
+}
+
+export function cancelMemberWorktree(req: MemberWorktreeCancelReq): MemberWorktreeCancelResult {
+  if (!req || typeof req.sessionId !== 'string' || typeof req.requestId !== 'string') return reject('invalid-request')
+  const snapshot = state(req.sessionId)
+  if (!snapshot) return reject('not-member')
+  cancelledRequests.add(requestKey(req.sessionId, req.requestId))
+  if (cancelledRequests.size > 256) cancelledRequests.delete(cancelledRequests.values().next().value!)
+  const p = pendingMemberBindings.get(req.sessionId)
+  const cancelled = !p || p.requestId === req.requestId
+  if (cancelled && p) p.cancelled = true
+  return { ok: true, cancelled, state: state(req.sessionId)! }
+}
+
+export async function retryMemberWorktreeBind(req: MemberWorktreeRetryBindReq): Promise<MemberWorktreeBindResult> {
+  if (!req || typeof req.sessionId !== 'string' || typeof req.operationId !== 'string' ||
+      !Number.isSafeInteger(req.expectedRevision)) return reject('invalid-request')
+  const blocked = eligibility(req.sessionId, req.expectedRevision)
+  if (blocked) return blocked
+  if (pendingMemberBindings.has(req.sessionId)) return reject('pending')
+  const recovery = getSession(req.sessionId)?.memberWorktreeRecovery
+  if (!recovery || recovery.operationId !== req.operationId) return reject('recovery-not-found')
+  // 旧 revision 不能由 retry 默默覆盖；用户需要重新选择/处理旧工作区。
+  if (recovery.expectedRevision !== req.expectedRevision) return reject('stale')
+  const operation = { requestId: req.operationId, cancelled: false }
+  pendingMemberBindings.set(req.sessionId, operation)
+  try { return await finishBinding(req.sessionId, recovery, operation) }
+  finally { if (pendingMemberBindings.get(req.sessionId) === operation) pendingMemberBindings.delete(req.sessionId) }
+}
+
+export function registerMemberWorktreeIpc(): void {
+  ipcMain.handle('chat:member-worktree-precheck', (_e, req: MemberWorktreePrecheckReq) => precheckMemberWorktree(req))
+  ipcMain.handle('chat:member-worktree-bind', (_e, req: MemberWorktreeBindReq) => bindMemberWorktree(req))
+  ipcMain.handle('chat:member-worktree-cancel', (_e, req: MemberWorktreeCancelReq) => cancelMemberWorktree(req))
+  ipcMain.handle('chat:member-worktree-state', (_e, req: { sessionId: string }) => memberWorktreeState(req?.sessionId))
+  ipcMain.handle('chat:member-worktree-retry-bind', (_e, req: MemberWorktreeRetryBindReq) => retryMemberWorktreeBind(req))
+}

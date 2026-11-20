@@ -13,6 +13,8 @@ export interface MemberWorktreeRecovery extends MemberWorktreeIdentity {
   expectedRevision: number
   sourceFocusRoot: string | null
   createdAt: number
+  /** 先记创建意图再调用 Git；重启后通过登记与身份校验确认是否已创建。 */
+  phase: 'creating' | 'created'
   reason: MemberWorktreeReason
 }
 

@@ -625,7 +625,8 @@ export function registerChatIpc(getWin: () => BrowserWindow | null): void {
   ipcMain.handle('chat:set-focus', (_e, payload: ChatSetFocusRequest): { ok: true } => {
     const session = getSession(payload.sessionId)
     if (session?.parentId) {
-      setMemberFolder(session, payload.focusRoot)
+      if (historyLocked(session.id)) throw new Error('成员正在执行，请结束当前操作后更换工作目录')
+      if (!setMemberFolder(session, payload.focusRoot)) throw new Error('成员目录绑定未能确认保存，请重试')
       return { ok: true }
     }
     if (session) {

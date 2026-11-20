@@ -5779,6 +5779,10 @@ async function scenarioWorktreeMerge(): Promise<void> {
 }
 
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
+  memberwt: async () => {
+    const { testMemberWorktree } = await import('./member-worktree-tests')
+    await testMemberWorktree({ dst: DST, makeRepo, eq, check })
+  },
   full: scenarioFull,
   sweep: scenarioSweep,
   memidem: scenarioMemIdem,
