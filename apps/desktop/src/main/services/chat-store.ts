@@ -41,6 +41,7 @@ export interface StoredSession {
   memberBindingRevision?: number
   memberWorktreeIdentity?: import('../../shared/member-worktree-protocol').MemberWorktreeIdentity
   memberWorktreeRecovery?: import('../../shared/member-worktree-protocol').MemberWorktreeRecovery
+  memberBindingTransaction?: import('./member-binding-transaction').MemberWorktreeBindingTransaction
   id: string
   title: string
   createdAt: number
@@ -571,14 +572,40 @@ export function save(id: string): boolean {
 }
 
 /** 承诺型成员绑定操作必须回读磁盘确认，不能用缓存冒充落盘结果。 */
-export function verifyMemberBindingSaved(s: StoredSession): boolean {
+export interface MemberBindingDiskSnapshot {
+  focusRoot: string | null
+  revision: number
+  identity?: StoredSession['memberWorktreeIdentity']
+  recovery?: StoredSession['memberWorktreeRecovery']
+  transaction?: StoredSession['memberBindingTransaction']
+}
+
+export function readMemberBindingSnapshot(sessionId: string): MemberBindingDiskSnapshot | null {
   try {
-    const disk = JSON.parse(readFileSync(fileForId(s.id), 'utf8')) as StoredSession
-    return JSON.stringify([disk.focusRoot ?? null, disk.memberBindingRevision ?? 0,
-      disk.memberWorktreeIdentity ?? null, disk.memberWorktreeRecovery ?? null]) ===
-      JSON.stringify([s.focusRoot ?? null, s.memberBindingRevision ?? 0,
-        s.memberWorktreeIdentity ?? null, s.memberWorktreeRecovery ?? null])
+    const disk = JSON.parse(readFileSync(fileForId(sessionId), 'utf8')) as StoredSession
+    return { focusRoot: disk.focusRoot ?? null, revision: disk.memberBindingRevision ?? 0,
+      identity: disk.memberWorktreeIdentity, recovery: disk.memberWorktreeRecovery,
+      transaction: disk.memberBindingTransaction }
+  } catch { return null }
+}
+
+export function verifyMemberBindingSnapshot(sessionId: string, expected: MemberBindingDiskSnapshot): boolean {
+  const actual = readMemberBindingSnapshot(sessionId)
+  return !!actual && JSON.stringify([actual.focusRoot, actual.revision, actual.identity ?? null, actual.recovery ?? null]) ===
+    JSON.stringify([expected.focusRoot, expected.revision, expected.identity ?? null, expected.recovery ?? null])
+}
+
+export function verifyMemberTransactionMarker(sessionId: string, expected: StoredSession['memberBindingTransaction']): boolean {
+  try {
+    const disk = JSON.parse(readFileSync(fileForId(sessionId), 'utf8')) as StoredSession
+    return JSON.stringify(disk.memberBindingTransaction ?? null) === JSON.stringify(expected ?? null)
   } catch { return false }
+}
+
+export function verifyMemberBindingSaved(s: StoredSession): boolean {
+  return verifyMemberBindingSnapshot(s.id, { focusRoot: s.focusRoot ?? null,
+    revision: s.memberBindingRevision ?? 0, identity: s.memberWorktreeIdentity,
+    recovery: s.memberWorktreeRecovery })
 }
 
 export function verifyMemberMirrorSaved(mainId: string, subId: string, root: string | null): boolean {

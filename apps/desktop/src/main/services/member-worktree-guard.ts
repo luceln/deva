@@ -2,6 +2,7 @@ import { statSync, realpathSync } from 'fs'
 import { resolve, relative, isAbsolute } from 'path'
 import { runGitRaw } from './git'
 import { getSession, listSessions } from './chat-store'
+import { readMemberBindingTransaction, recoverMemberBindingTransaction } from './member-binding-transaction'
 import { activeMember, pendingMemberBindings } from './member-binding-state'
 import type { MemberWorktreeIdentity } from '../../shared/member-worktree-protocol'
 
@@ -36,6 +37,13 @@ export async function assertMemberExecution(sessionId: string | undefined, execu
   if (!sessionId) return
   const session = getSession(sessionId)
   if (!session?.parentId) return
+  const transaction = readMemberBindingTransaction(sessionId)
+  if (transaction.status !== 'absent') {
+    // 即使能成功恢复，也让当前起轮/工具失败；不能让触发恢复的旧上下文立刻派发。
+    const recovered = recoverMemberBindingTransaction(sessionId)
+    if (!recovered) throw new Error('成员目录绑定状态无法恢复核实，已停止执行；保留恢复日志，请处理后重试')
+    throw new Error('成员目录绑定状态曾发生不一致，已拒绝本次执行；旧绑定已恢复，请重新发起')
+  }
   const member = activeMember(sessionId)
   if (!member || member.ref.removed) throw new Error('成员已移除，不能继续执行')
   if (pendingMemberBindings.has(sessionId)) throw new Error('成员正在创建或绑定独立工作区，请稍后再执行')
