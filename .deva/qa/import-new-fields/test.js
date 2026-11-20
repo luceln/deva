@@ -1,7 +1,7 @@
 /**
  * 导入新状态 —— 在真实 DOM 上断言三处展示接线。
  *
- *  A. pluginManaged（导入报告）：单列成「归插件管，未导入」，与「已存在，跳过」区分，且不被算成失败或跳过数。
+ *  A. pluginManaged（导入报告）：单列成「由插件管理，未导入」，与「已存在，跳过」区分，且不被算成失败或跳过数。
  *  B. indexStale（模型替换结果）：说成「已保存、索引待重建」，绝不出现在失败清单里。
  *  C. superseded（模型替换结果）：显示「未改动」+ 当前真实模型名，不能静默消失。
  *
@@ -136,7 +136,7 @@ const ok = (name, fn) => CASES.push({ name, fn })
 
 // ── A. pluginManaged ─────────────────────────────────────────────
 
-ok('A1 服务商行显示「归插件管，未导入」，且不混进「跳过」', async () => {
+ok('A1 服务商行显示「由插件管理，未导入」，且不混进「跳过」', async () => {
   setLocale('zh-CN')
   await runImport(
     report({
@@ -148,7 +148,7 @@ ok('A1 服务商行显示「归插件管，未导入」，且不混进「跳过�
   const row = rowOf('服务商')
   assert(row, '找不到服务商行')
   const tags = [...row.querySelectorAll('.cf-imp__note-tag')].map((t) => t.textContent ?? '')
-  assert(tags.some((t) => /1 个归插件管，未导入/.test(t)), `缺插件托管标签：${JSON.stringify(tags)}`)
+  assert(tags.some((t) => /1 个由插件管理，未导入/.test(t)), `缺插件托管标签：${JSON.stringify(tags)}`)
   // 关键：不能把插件托管算成「跳过 1」，那会被读成「已存在、不用管」
   const numText = [...row.querySelectorAll('.cf-imp__num')].map((n) => n.textContent ?? '').join('|')
   assert(/跳过 0/.test(numText), `跳过数应为 0：${numText}`)
@@ -177,7 +177,7 @@ ok('A3 只有插件托管项的行仍然显示（0 新增 0 跳过也不会被�
   )
   const row = rowOf('MCP 服务')
   assert(row, 'MCP 行被过滤掉了——有东西被排除却在界面上一个字都没有')
-  assert(/归插件管，未导入/.test(row.textContent), `缺插件托管标签：${row.textContent}`)
+  assert(/由插件管理，未导入/.test(row.textContent), `缺插件托管标签：${row.textContent}`)
 })
 
 ok('A4 密钥行的插件托管密钥不落进「需要重新填写」警告', async () => {
@@ -189,7 +189,7 @@ ok('A4 密钥行的插件托管密钥不落进「需要重新填写」警告', a
   )
   const row = rowOf('API 密钥')
   assert(row, '找不到密钥行')
-  assert(/归插件管，未导入/.test(row.textContent), `密钥行缺插件标签：${row.textContent}`)
+  assert(/由插件管理，未导入/.test(row.textContent), `密钥行缺插件标签：${row.textContent}`)
   // 它是「归插件管」，不是「去设置重填」——走错那条指引会让用户扑空
   eq(!!q('.cf-imp__warn'), false, '不该出现「需要重新填写」警告面板')
 })
@@ -206,7 +206,7 @@ ok('A5 英文环境用插件口径的文案，不是「跳过」', async () => {
   const row = rowOf('Providers')
   assert(row, '找不到 Providers 行')
   const txt = row.textContent ?? ''
-  assert(/1 belong to a plugin, not imported/.test(txt), `英文插件标签不对：${txt}`)
+  assert(/1 managed by a plugin, not imported/.test(txt), `英文插件标签不对：${txt}`)
   assert(/0 skipped/.test(txt), `英文跳过数应为 0：${txt}`)
 })
 
@@ -290,6 +290,130 @@ ok('C3 字段缺省时不凭空多出区块（旧结果兼容）', async () => {
   eq(summary, '已替换 1 个', `只有成功时标题应保持原样：${summary}`)
   eq(qa('.modal__card .cf-swap__note').length, 0, '不该出现索引/放弃说明')
   eq(qa('.modal__card .cf-swap__row').length, 1, '只应有 changed 那一行')
+})
+
+// ── E. 文案缺陷（验收实测那三处 + toast 漏失败项）─────────────────
+
+ok('E1 查不到名字时不把内部引用摆给用户（只进 title）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [],
+    skipped: [],
+    failed: [],
+    indexStale: [],
+    // 这条引用不在 providers 里：查不到名字
+    superseded: [broken('s9', '成员丁', 'openai:gpt-mystery')]
+  })
+  const row = qa('.modal__card .cf-swap__row').find((r) => (r.textContent ?? '').includes('成员丁'))
+  assert(row, '被放弃的行没显示')
+  const kind = row.querySelector('.cf-swap__kind')
+  assert(kind, '缺「未改动」那一句')
+  const visible = kind.textContent ?? ''
+  assert(!/openai:gpt-mystery/.test(visible), `可见文本里不该出现内部引用：${visible}`)
+  assert(/另一个模型/.test(visible), `应换成一句人话：${visible}`)
+  // 原始引用仍可供悬停查看
+  assert(/openai:gpt-mystery/.test(kind.getAttribute('title') ?? ''), `title 里应保留原始引用：${kind.getAttribute('title')}`)
+  const cardText = q('.modal__card').textContent ?? ''
+  assert(!/openai:gpt-mystery/.test(cardText), `整个对话框的可见文本都不该有它：${cardText.slice(0, 300)}`)
+})
+
+ok('E2 查得到名字时仍显示模型名（没把 E1 的修复做成「一律另一个模型」）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [],
+    skipped: [],
+    failed: [],
+    indexStale: [],
+    superseded: [broken('s4', '成员丙', 'anthropic:claude-lite')]
+  })
+  const kind = qa('.modal__card .cf-swap__kind').find((k) => /未改动/.test(k.textContent ?? ''))
+  assert(kind, '缺「未改动」那一句')
+  assert(/Claude Lite/.test(kind.textContent), `应显示模型名：${kind.textContent}`)
+  assert(!/另一个模型/.test(kind.textContent), `查得到名字时不该说「另一个模型」：${kind.textContent}`)
+})
+
+ok('E3 英文摘要不含全角标点（逗号/顿号/冒号）', async () => {
+  await runSwap(
+    {
+      changed: [broken('s1', 'Main', 'anthropic:claude')],
+      skipped: [broken('s5', 'Member E', 'anthropic:claude')],
+      failed: [broken('s3', 'Member B', 'anthropic:claude')],
+      indexStale: [broken('s2', 'Member A', 'anthropic:claude')],
+      superseded: [broken('s4', 'Member C', 'anthropic:claude-lite')]
+    },
+    'en'
+  )
+  const text = q('.modal__card').textContent ?? ''
+  for (const bad of ['，', '、', '：', '；']) {
+    assert(!text.includes(bad), `英文界面不该出现全角标点「${bad}」：${text.slice(0, 300)}`)
+  }
+  // 分隔符确实是英文逗号，不是把标点删掉拼在一起
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  assert(/switched, /.test(summary) || /switched,/.test(summary), `条目之间应以英文逗号分隔：${summary}`)
+})
+
+ok('E4 英文插件托管标签单复数正确、并说明「由插件管理」', async () => {
+  setLocale('en')
+  await runImport(
+    report({
+      top: {
+        providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] },
+        mcp: { copied: [], skipped: [], failed: [], pluginManaged: ['magpie', 'other'] }
+      }
+    })
+  )
+  const tags = qa('.cf-imp__note-tag').map((x) => x.textContent ?? '')
+  assert(tags.includes('1 managed by a plugin, not imported'), `单数应为 1 managed：${JSON.stringify(tags)}`)
+  assert(tags.includes('2 managed by a plugin, not imported'), `复数应为 {n} managed：${JSON.stringify(tags)}`)
+  assert(!tags.some((x) => /1 belong\b/.test(x)), `不该出现 1 belong 这种主谓不一致：${JSON.stringify(tags)}`)
+})
+
+ok('E5 导入明细里「分组名 + id」用英文冒号与逗号', async () => {
+  const row = rowOf('Providers')
+  assert(row, '找不到 Providers 行')
+  await expandRow(row)
+  const sub = row.querySelector('.cf-imp__sub')
+  assert(sub, '明细区没出现')
+  const text = sub.textContent ?? ''
+  assert(!text.includes('：'), `英文明细不该出现全角冒号：${text}`)
+  assert(!text.includes('、'), `英文明细不该出现顿号：${text}`)
+  assert(/Owned by a plugin, not imported: magpie/.test(text), `分组名后应是英文冒号：${text}`)
+})
+
+ok('E6 toast 与对话框摘要项数一致，失败项不能漏', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [broken('s1', '主对话', 'anthropic:claude')],
+    skipped: [broken('s5', '成员戊', 'anthropic:claude')],
+    failed: [broken('s3', '成员乙', 'anthropic:claude')],
+    indexStale: [broken('s2', '成员甲', 'anthropic:claude')],
+    superseded: [broken('s4', '成员丙', 'anthropic:claude-lite')]
+  })
+  const dialog = q('.modal__card .cf-swap__result').textContent ?? ''
+  const toastEl = await waitFor(() => q('.toast__msg'), 'toast 没出现')
+  const toast = toastEl.textContent ?? ''
+  // 失败是最不该漏的一项：toast 少一句，只看 toast 的人就会以为全都换好了。
+  assert(/1 个没能写入/.test(toast), `失败项在 toast 里丢了：${toast}`)
+  // 两边必须是同一份摘要（同口径、同顺序）——注意「已保存，索引待重建」这句本身含逗号，
+  // 所以按逗号切分算项数是错的，直接比整串。
+  eq(toast, dialog, `toast 与对话框摘要应完全一致（toast=${toast} / dialog=${dialog}）`)
+  for (const piece of ['已替换 1 个', '1 个已保存', '索引待重建', '跳过 1 个', '1 个未改动', '1 个没能写入']) {
+    assert(dialog.includes(piece), `摘要缺「${piece}」：${dialog}`)
+  }
+})
+
+ok('E7 中文侧仍是全角分隔符（没为英文把中文改坏）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [broken('s1', '主对话', 'anthropic:claude')],
+    skipped: [broken('s5', '成员戊', 'anthropic:claude')],
+    failed: [],
+    indexStale: [],
+    superseded: []
+  })
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  assert(/，/.test(summary), `中文摘要应用全角逗号：${summary}`)
+  assert(!/, /.test(summary), `中文摘要不该用英文逗号：${summary}`)
 })
 
 ok('D1 英文环境下三项都说英文，且不出现 RPC 字段名', async () => {

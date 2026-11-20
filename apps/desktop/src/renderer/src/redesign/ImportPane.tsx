@@ -340,7 +340,7 @@ export function ImportPane(): React.JSX.Element {
                 {/* 插件托管、因此没导入的项：与「跳过」分开说，用户要能看出它归插件、不是漏导。 */}
                 {!!r.plugins?.length && (
                   <span className="cf-imp__note-tag is-plain">
-                    {t('settings.import.pluginManagedN').replace('{n}', String(r.plugins.length))}
+                    {t(r.plugins.length === 1 ? 'settings.import.pluginManagedNOne' : 'settings.import.pluginManagedN').replace('{n}', String(r.plugins.length))}
                   </span>
                 )}
                 {(r.detail.length > 0 || (r.noteIds?.length ?? 0) > 0 || !!r.plugins?.length) && (
@@ -356,8 +356,9 @@ export function ImportPane(): React.JSX.Element {
                       ? r.noteIds.map((g) =>
                           g.ids.length ? (
                             <li key={g.kind}>
-                              {t(`settings.import.secretGroup.${g.kind}`)}：
-                              {g.ids.slice(0, DETAIL_LIMIT).join('、')}
+                              {t(`settings.import.secretGroup.${g.kind}`)}
+                              {t('settings.import.listColon')}
+                              {g.ids.slice(0, DETAIL_LIMIT).join(t('settings.import.listSep'))}
                               {g.ids.length > DETAIL_LIMIT
                                 ? t('settings.import.moreDetail').replace('{n}', String(g.ids.length - DETAIL_LIMIT))
                                 : ''}
@@ -371,8 +372,9 @@ export function ImportPane(): React.JSX.Element {
                     {/* 插件托管的那几条逐条列出并加一句去插件里改——只给数字，用户不知道说的是哪些。 */}
                     {!!r.plugins?.length && (
                       <li className="cf-imp__plugin">
-                        {t('settings.import.secretGroup.pluginManaged')}：
-                        {r.plugins.slice(0, DETAIL_LIMIT).join('、')}
+                        {t('settings.import.secretGroup.pluginManaged')}
+                        {t('settings.import.listColon')}
+                        {r.plugins.slice(0, DETAIL_LIMIT).join(t('settings.import.listSep'))}
                         {r.plugins.length > DETAIL_LIMIT
                           ? t('settings.import.moreDetail').replace('{n}', String(r.plugins.length - DETAIL_LIMIT))
                           : ''}

@@ -14,7 +14,7 @@
 ```bash
 node .deva/qa/import-new-fields/build.cjs
 # 用内置浏览器打开 .deva/qa/import-new-fields/page.html（file:// 会拿缓存，改完加 ?v=时间戳）
-# 页面标题变 DONE n/11 即结束；window.__logs 里是逐条 PASS/FAIL
+# 页面标题变 DONE n/18 即结束；window.__logs 里是逐条 PASS/FAIL
 ```
 
 `build.cjs` 用 esbuild 把**真实的 `ImportPane` 与 `ModelSwapDialog`**（含 `Modal` / `Select` / i18n / CSS）
@@ -27,17 +27,18 @@ node .deva/qa/import-new-fields/build.cjs
 | `store/models` | 要断言 superseded 显示的是**模型名**（`Claude Lite`）而不是引用原文，需要固定服务商 |
 | `store/extensions` / `modelSettingsBus` | 导入成功后只调 refresh；本用例不验跳转 |
 
-## 11 条用例
+## 18 条用例
 
 **pluginManaged（A，导入报告）**
 
 | 用例 | 证明了什么 |
 |---|---|
-| 服务商行有「归插件管，未导入」标签，跳过数仍为 0 | 不把插件托管算成「已存在，跳过」 |
+| 服务商行有「由插件管理，未导入」标签，跳过数仍为 0 | 不把插件托管算成「已存在，跳过」 |
 | 展开明细逐条列出 id + 「去插件里改」 | 用户知道说的是哪些、该去哪改 |
 | 只有插件托管项的行仍然显示 | 0 新增 0 跳过不被行过滤吞掉（否则等于界面上一字不提） |
 | 密钥行的插件托管不落进「需要重新填写」警告 | 不给一条走不通的指引（插件密钥在设置页没有输入框） |
 | 英文环境用插件口径 | 中英都到位，不是中文硬编码 |
+| 英文单复数（1 managed / 2 managed）+ 明细用英文冒号逗号 | 不出现「1 belong to a plugin」「not imported：magpie」 |
 
 **indexStale（B，替换结果）**
 
@@ -54,15 +55,29 @@ node .deva/qa/import-new-fields/build.cjs
 | 说明讲清「没有覆盖」+「下面是现在实际使用的」 | 用户知道是自己的选择被保留了 |
 | 字段缺省时不多出区块 | 旧持久化结果 / 旧调用方不受影响 |
 
+**文案缺陷（E，验收实测那三处 + toast 漏失败项）**
+
+| 用例 | 证明了什么 |
+|---|---|
+| 查不到名字时不把内部引用摆给用户 | `openai:gpt-mystery` 只进 `title`，可见文本是「另一个模型」 |
+| 查得到名字时仍显示模型名 | 修复没有退化成「一律另一个模型」 |
+| 英文摘要不含全角标点（，、：；） | 分隔符按语言取，不是写死 |
+| 英文插件标签单复数正确 | 不再出现「1 belong to a plugin」 |
+| 导入明细用英文冒号与逗号 | 不再出现「not imported：magpie」 |
+| toast 与对话框摘要**完全一致** | 失败项不在 toast 里消失 |
+| 中文侧仍是全角分隔符 | 没为英文把中文改坏 |
+
 **英文与字段名（D）**：英文环境下三项都说英文，且界面上不出现 `indexStale` / `superseded` / `pluginManaged`
 这类字段名。
 
 ## 结果
 
-- 修复后：**11/11 PASS**，`window.__errors` 为空。
-- 反向验证：把三处渲染分别短路（插件标签、indexStale 区块、superseded 区块）→ **1/11**，
-  失败的 10 条正好是依赖这三处展示的用例；唯一仍通过的是 C3（「字段缺省不多出区块」），它本来就该通过。
-  恢复源码后回到 11/11。
+- 修复后：**18/18 PASS**，`window.__errors` 为空。
+- 反向验证 ①：把三处渲染分别短路（插件标签、indexStale 区块、superseded 区块）→ **1/11**（当时 11 条），
+  失败的 10 条正好是依赖这三处展示的用例；唯一仍通过的是 C3，它本来就该通过。
+- 反向验证 ②（文案缺陷这批）：把 `refLabel` 回落改回引用原文、分隔符写死全角逗号、toast 去掉失败项、
+  明细写死全角冒号顿号 → **14/18**，失败的是 E1 / E3 / E5 / E6；再把英文单复数改回 `{n} belong to a plugin`
+  → E4 失败。恢复后回到 **18/18**。
 - 深色模式（`data-theme="dark"`）下看过一遍：标签颜色档位正常，无串色。
 
 ## 边界

@@ -183,17 +183,20 @@ export function ModelSwapDialog({
     toast.show({
       variant: 'success',
       title: t('cf.modelSwap.done'),
+      // 五项与对话框摘要**同一口径、同一顺序**：失败是最不该漏的一项，这里少写一句，
+      // 用户就会以为全部换好了（对话框摘要有、toast 没有 = 只看 toast 的人被误导）。
       message: [
         t('cf.modelSwap.appliedN').replace('{n}', String(res.changed.length)),
         stale ? t('cf.modelSwap.indexStaleN').replace('{n}', String(stale)) : '',
         res.skipped.length ? t('cf.modelSwap.skippedN').replace('{n}', String(res.skipped.length)) : '',
         // 被放弃的项也要在提示里出现一次：否则只有点开对话框才看得到「这一项没换」。
-        superSeded ? t('cf.modelSwap.supersededN').replace('{n}', String(superSeded)) : ''
+        superSeded ? t('cf.modelSwap.supersededN').replace('{n}', String(superSeded)) : '',
+        res.failed.length ? t('cf.modelSwap.failedN').replace('{n}', String(res.failed.length)) : ''
       ]
         .filter(Boolean)
-        .join('，'),
+        .join(t('cf.modelSwap.listSep')),
       // 有跳过/放弃/索引待重建时留足时间看是哪些会话（它们是正常保留，但用户可能会疑惑为什么没全换）。
-      duration: res.skipped.length || superSeded || stale ? 8000 : undefined
+      duration: res.skipped.length || superSeded || stale || res.failed.length ? 8000 : undefined
     })
   }
 
@@ -219,7 +222,7 @@ export function ModelSwapDialog({
             {changeable.length
               ? t('cf.modelSwap.willChange').replace('{n}', String(changeable.length))
               : ''}
-            {changeable.length && kept.length ? '，' : ''}
+            {changeable.length && kept.length ? t('cf.modelSwap.listSep') : ''}
             {kept.length ? t('cf.modelSwap.keep').replace('{n}', String(kept.length)) : ''}
           </span>
         </div>
@@ -327,13 +330,22 @@ function Result({
 }): React.JSX.Element {
   const { t } = useI18n()
   const { providers } = useModels()
-  /** 引用 → 模型显示名。查不到（模型已被删）时原样显示引用，不吞掉信息。 */
+  /**
+   * 引用 → 人看得懂的名字。
+   *
+   * 查不到名字（模型已被删 / 引用是手改进去的）时**不能回落成引用原文**：`openai:gpt-mystery` 是内部字段值，
+   * 摆给用户既看不懂也帮不上忙。退回一句「另一个模型」，原始引用挂在该行的 title 上供悬停查看。
+   * 空引用（跟随全局默认，没定格任何具体模型）那条回落是对的：它本来就该说「未指定模型」。
+   */
   const refLabel = (ref: string): string => {
     const idx = ref ? ref.indexOf(':') : -1
-    if (idx <= 0) return ref || t('cf.modelSwap.refUnknown')
+    if (idx <= 0) return t('cf.modelSwap.refUnknown')
     const name = providers.find((p) => p.id === ref.slice(0, idx))?.models.find((m) => m.id === ref.slice(idx + 1))?.name
-    return name ?? ref
+    return name ?? t('cf.modelSwap.refOther')
   }
+  /** 悬停提示用的原始引用：只在这里露出机器字段。 */
+  const refTitle = (b: BrokenRef): string => `${b.name || b.sessionId} · ${b.ref || t('cf.modelSwap.refUnknown')}`
+  const sep = t('cf.modelSwap.listSep')
   const indexStale = result.indexStale ?? []
   const superseded = result.superseded ?? []
   const summary = [
@@ -347,7 +359,7 @@ function Result({
     result.failed.length ? t('cf.modelSwap.failedN').replace('{n}', String(result.failed.length)) : ''
   ]
     .filter(Boolean)
-    .join('，')
+    .join(sep)
   return (
     <div className="cf-swap__section">
       <div className="cf-swap__result">{summary}</div>
@@ -377,7 +389,7 @@ function Result({
                 <span className="cf-swap__name" title={b.name || b.sessionId}>
                   {b.name || b.sessionId}
                 </span>
-                <span className="cf-swap__kind is-warn">
+                <span className="cf-swap__kind is-warn" title={refTitle(b)}>
                   {t('cf.modelSwap.supersededKept').replace('{ref}', refLabel(b.ref))}
                 </span>
               </li>

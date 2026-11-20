@@ -931,9 +931,14 @@ const zhCN: MessageTree = {
         rekeyed: '其中 {n} 条之前用不了，这次修好了'
       },
       // 由外部插件托管、因此没有导入的项。{n} 是条数。与「已存在，跳过」严格分开说。
-      pluginManagedN: '{n} 个归插件管，未导入',
+      // 单复数分开写，英文不能出现「1 belong to a plugin」。
+      pluginManagedN: '{n} 个由插件管理，未导入',
+      pluginManagedNOne: '1 个由插件管理，未导入',
       pluginManagedHint:
         '这些由插件自己创建和维护，装上对应插件就会自动出现，不需要也不应该手动导入。要改它们请去插件里改。',
+      // 明细里「分组名 + 具体 id」之间、以及 id 之间的分隔符：英文不能用全角冒号/顿号。
+      listColon: '：',
+      listSep: '、',
       // 密钥明细里按分类列 id 时的分组标题
       secretGroup: {
         noEncryption: '需手动重填',
@@ -1439,6 +1444,10 @@ const zhCN: MessageTree = {
       supersededKept: '未改动，现在用的是 {ref}',
       supersededHint: '点替换之后、写进去之前，这几项的状态变了（你自己换了模型，或成员被移除），所以没有覆盖。下面显示的是它们现在实际使用的模型：',
       refUnknown: '（未指定模型）',
+      // 查不到名字的引用（模型已被删 / 手改进去的）：给一句人话，原始引用只进 title。
+      refOther: '另一个模型',
+      // 摘要分隔符：英文不能用全角逗号（实测会渲染成「1 switched，1 skipped」）。
+      listSep: '，',
       skipped: '跳过',
       skippedHint: '以下会话用的是别的模型，未改动：',
       showSkipped: '查看跳过的会话',
@@ -2830,9 +2839,12 @@ const en: MessageTree = {
         failed: '{n} couldn’t be written',
         rekeyed: '{n} of them were unusable before and are fixed now'
       },
-      pluginManagedN: '{n} belong to a plugin, not imported',
+      pluginManagedN: '{n} managed by a plugin, not imported',
+      pluginManagedNOne: '1 managed by a plugin, not imported',
       pluginManagedHint:
         'A plugin creates and maintains these itself — they appear automatically once that plugin is installed, and should not be imported by hand. To change them, edit them in the plugin.',
+      listColon: ': ',
+      listSep: ', ',
       secretGroup: {
         noEncryption: 'Add by hand',
         invalid: 'Empty in source',
@@ -3325,6 +3337,8 @@ const en: MessageTree = {
       supersededHint:
         'Between clicking Switch and writing, these changed (you picked another model, or the member was removed), so they were left alone. Each row shows the model it actually uses now:',
       refUnknown: '(no model set)',
+      refOther: 'another model',
+      listSep: ', ',
       skipped: 'Skipped',
       skippedHint: 'These use a different model and were left alone:',
       showSkipped: 'Show skipped conversations',
