@@ -43,7 +43,7 @@ export function ModelPanel(): React.JSX.Element {
   const { setSessionModel, setSessionEffort } = useChatActions()
   const [open, setOpen] = useState<Open>(null)
   const [narrow, setNarrow] = useState(false)
-  const [swapOpen, setSwapOpen] = useState(false)
+  const [swapTarget, setSwapTarget] = useState<{ mainId: string; fromRef: string } | null>(null)
   const popRef = useRef<HTMLDivElement>(null)
 
   // 只列对话模型（purpose==='llm'）：决策模型（如 Jev）不生成文本，绝不可被选为对话模型。
@@ -102,31 +102,6 @@ export function ModelPanel(): React.JSX.Element {
 
   const accent = active?.provider.accent ?? 'var(--fg-subtle)'
 
-  // 失效：贴片不弹常规面板，直接开批量替换——用户此刻唯一要处理的就是它。
-  if (broken.broken) {
-    return (
-      <div className="model-pick cf-mp">
-        <PanelChip
-          active={active}
-          accent={accent}
-          usage={active && usage && usage.used != null ? usage : null}
-          effort={effort}
-          open={false}
-          onToggle={() => setSwapOpen(true)}
-          broken={broken}
-        />
-        {swapOpen && (
-          <ModelSwapDialog
-            // 换掉的正是本会话指向的那个失效引用；同一对话里别的失效引用换完会重新亮红标。
-            mainId={broken.mainId}
-            fromRef={broken.swapFromRef}
-            onClose={() => setSwapOpen(false)}
-          />
-        )}
-      </div>
-    )
-  }
-
   return (
     <div className="model-pick cf-mp">
       <PanelChip
@@ -134,10 +109,20 @@ export function ModelPanel(): React.JSX.Element {
         accent={accent}
         usage={active && usage && usage.used != null ? usage : null}
         effort={effort}
-        open={!!open}
-        onToggle={() => setOpen((o) => (o ? null : 'panel'))}
+        open={!broken.broken && !!open}
+        broken={broken}
+        onToggle={() => {
+          if (broken.broken) {
+            setOpen(null)
+            setSwapTarget({ mainId: broken.mainId, fromRef: broken.swapFromRef })
+          } else {
+            setOpen((o) => (o ? null : 'panel'))
+          }
+        }}
       />
-      {open && (
+      {/* 替换 action 在返回结果前会清空并重扫失效缓存；弹窗范围固定为打开时的引用。 */}
+      {swapTarget && <ModelSwapDialog {...swapTarget} onClose={() => setSwapTarget(null)} />}
+      {!broken.broken && open && (
         <>
           <div className="model-pick__backdrop" onClick={() => setOpen(null)} />
           <div ref={popRef} className={`cf-mp__pop${narrow ? ' is-narrow' : ''}`}>
