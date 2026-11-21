@@ -59,6 +59,14 @@ let loaded = false
 export type ConfigLoadKind = 'ok' | 'absent' | 'corrupt'
 let loadKind: ConfigLoadKind = 'ok'
 
+/**
+ * 内存态是否曾经与磁盘对齐过（载入成功，或本进程写盘成功过）。
+ *
+ * 用来区分「首次初始化」与「用户把配置文件删了」：两者 `readFileSync` 都是 ENOENT，但前者该写第一份，
+ * 后者**不能**把用户主动删掉的配置静默复活（那等于撤销用户的操作）。
+ */
+let baselineEstablished = false
+
 /** 同步载入（配置很小；同步读简化了首帧同步 IPC）。 */
 function ensureLoaded(): void {
   if (loaded) return
@@ -68,6 +76,7 @@ function ensureLoaded(): void {
     if (parsed && typeof parsed === 'object') {
       config = parsed as Record<string, unknown>
       loadKind = 'ok'
+      baselineEstablished = true
     } else {
       // 解析成非对象（字符串 / 数字 / null）：内容不合约定，等同坏文件
       loadKind = 'corrupt'
@@ -93,6 +102,50 @@ function ensureLoaded(): void {
 export function getConfigLoadKind(): ConfigLoadKind {
   ensureLoaded()
   return loadKind
+}
+
+/**
+ * 写盘前**重读磁盘**，把「此刻磁盘上真实是什么」与内存态对齐。返回能否继续写。
+ *
+ * 为什么不能只信内存 `loaded`：`ensureLoaded` 只在首次调用时读一次。文件被用户改坏 / 被别的进程改成
+ * 不一致的内容之后，内存里仍是陈旧快照，照着它写回去就是**用旧内容覆盖新内容**，而且没有任何一方报错。
+ *
+ * 三种结论：
+ *  - `ok`：读到了对象。配置内容**换成磁盘这份**（后续 merge 与 patch 都以它为基准），内存同步更新；
+ *  - `corrupt`：文件在但读不出 / 解析不了——不知道里面有什么，**绝不写**；
+ *  - `missing`：ENOENT。首次初始化允许写；已有过合法基线则是用户主动删除，**拒绝**（不复活）；
+ *  - `unreadable`：非 ENOENT 的读取失败（EACCES / EBUSY / EPERM…），**绝不写**。
+ *
+ * 注意这里**不改** `loadKind` 的既有语义（那是启动时那一次载入的历史事实，可用性判定依赖它）；
+ * 本函数只是写入路径的即时体检，结论装在返回值里。
+ */
+type RereadKind = 'ok' | 'corrupt' | 'missing' | 'unreadable'
+
+function rereadForWrite(): { kind: RereadKind; detail?: string } {
+  let raw: string
+  try {
+    raw = readFileSync(configPath(), 'utf8')
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') {
+      // 从来没有过基线 = 真的首次初始化；有过基线 = 用户主动删了，不能替他重建。
+      return baselineEstablished ? { kind: 'missing' } : { kind: 'ok' }
+    }
+    return { kind: 'unreadable', detail: (e as Error)?.message ?? String(e) }
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    return { kind: 'corrupt', detail: (e as Error)?.message ?? String(e) }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+    return { kind: 'corrupt', detail: 'config.json 顶层不是对象' }
+  // 写回以磁盘为基准：别的进程 / 用户加进来的键必须留住。
+  config = parsed as Record<string, unknown>
+  loadKind = 'ok'
+  baselineEstablished = true
+  return { kind: 'ok' }
 }
 
 /**
@@ -178,15 +231,32 @@ export function getConfig(): Record<string, unknown> {
  * 合并语义下「incoming 里没有」不再等于「用户删了」（也可能只是快照旧）。渲染层必须显式列出本轮主动删掉的 id，
  * 删才生效——所以 `removedProviders` 不是可选优化，是这个语义的必要条件。
  */
+/**
+ * 只读地拿一份「磁盘上现在是什么」用于**合并基准**，不改模块内存态。
+ *
+ * `mergeModelsPatch` 是纯函数（不写盘），但它的「磁盘基准」不能再用内存快照：渲染层整段回写来的补丁要跟
+ * **磁盘当前**的 providers 合并，否则主进程刚并入的服务商会被陈旧快照抹掉，而内存态也已过时的话连判据都没有。
+ * 读不出来 / 不存在时退回内存态（与既有行为一致：那种情况本来就该由 setConfigDetailed 拒绝写入）。
+ */
+function peekConfigForMerge(): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(readFileSync(configPath(), 'utf8'))
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+  } catch {
+    /* 读不出 / 解析不了 → 退回内存态 */
+  }
+  ensureLoaded()
+  return config
+}
+
 export function mergeModelsPatch(patch: Record<string, unknown>): Record<string, unknown> {
   if (!patch || typeof patch !== 'object') return patch
   const incoming = patch.models as Record<string, unknown> | undefined
   if (incoming === undefined) return patch // undefined = 删键，原样交给 setConfig
   if (!incoming || typeof incoming !== 'object') return patch
 
-  const disk = (getConfig().models && typeof getConfig().models === 'object'
-    ? getConfig().models
-    : {}) as { providers?: unknown }
+  const diskCfg = peekConfigForMerge()
+  const disk = (diskCfg.models && typeof diskCfg.models === 'object' ? diskCfg.models : {}) as { providers?: unknown }
   const diskProviders = Array.isArray(disk.providers) ? (disk.providers as Array<{ id?: unknown }>) : []
   const inProviders = Array.isArray((incoming as { providers?: unknown }).providers)
     ? ((incoming as { providers?: unknown }).providers as Array<{ id?: unknown }>)
@@ -265,18 +335,38 @@ export function applyHeldPatches(held: Array<Record<string, unknown>>): HeldPatc
 }
 
 /**
- * 主进程内写配置（顶层浅合并，值为 undefined 时删除该键），并落盘。返回是否落盘成功。
- * 供 skills.ts / personas.ts 等服务在进程内维护启用态（config.json 内的 skills/personas 段），
- * 与渲染层的 `config:set` IPC 走同一份内存态 + 持久化路径。
+ * 写配置的详细结果。`ok:false` 时 `code` 说明是**哪一类**失败——调用方大多忽略返回值，但
+ * 「磁盘读不出」「被外部改过」与「写盘失败」对用户要做的事完全不同，不能压成同一个 false。
+ */
+export interface ConfigWriteResult {
+  ok: boolean
+  /**
+   * - `config-unreadable`：磁盘上的 config.json 此刻读不出来（半截 JSON / 被占用 / 权限）；
+   * - `config-changed-externally`：本次 patch 要覆盖的键在磁盘上已被改过，或文件被外部删除；
+   * - `config-write-failed`：读得到、也没冲突，但写盘失败（磁盘满、被占）。
+   */
+  code?: 'config-unreadable' | 'config-changed-externally' | 'config-write-failed'
+  detail?: string
+}
+
+/**
+ * 写配置的完整实现。`setConfig` 是它的布尔投影（保留既有调用方）。
  *
- * ⚠️ **写盘失败会回滚内存**。以前是先改内存再 `persist()`，失败就只返回 false 而内存保持新值：
- * 于是「界面显示开着、磁盘是关的」，用户重启后发现开关变回去了，中间零提示。
- * 只把 boolean 透给界面（`mcp:set-enabled` / `skills:set-enabled`）**不够**——界面刷新一次就会按内存态
- * 又画成「已开启」，那比不报错更糟。所以回滚点必须在这里，而不是散在每个调用方：
- * 调用方拿到 false 时，内存态已经与磁盘一致（都是旧值），界面拿到 false 去提示就说得通。
+ * ## 为什么写前必须重读磁盘
  *
- * 回滚只针对**本次 `patch` 覆盖到的键**：记下旧值（含「本来没有这个键」）再整体恢复，
- * 不影响并发的其它键写入。
+ * `ensureLoaded` 只在首次调用时读一次，`config` 是那一刻的快照。文件被用户手改坏、或被别的进程改成别的
+ * 内容之后，照内存写回去就是**用旧内容覆盖新内容**。更糟的是载入态那一份：`ensureLoaded` 把「内容坏」
+ * 折成 `{}`，于是同一轮里 MCP 启用 / 角色启用会写出「空配置 + 这次补丁」——用户其余所有键（主题、模型、
+ * 服务商）一次性消失，而调用方（`mcp-config.ts` / `personas.ts` / `skills.ts` …）**都不检查返回值**。
+ *
+ * 所以这里的顺序是：**先重读** → 判能不能写 → 再合并与落盘。
+ *
+ * ## 为什么冲突要整次失败，而不是「磁盘优先、静默忽略本次」
+ *
+ * 调用方忽略返回值，失败必须整体、可观察。若只跳过冲突的那个键、把其余键写下去，上层状态与磁盘就再次
+ * 不一致（它以为全写好了），而界面上没有任何提示。整次失败时内存态也保持不动，与磁盘维持同一份已知状态。
+ *
+ * 回滚只针对**本次 `patch` 覆盖到的键**：记下旧值（含「本来没有这个键」）再整体恢复，不影响并发的其它键写入。
  *
  * ⚠️ **这里是替换语义，不做 models 合并**（合并只在 `config:set` / `applyHeldPatches` 那条「渲染层快照写回」
  * 路径上）。`mergeProviders` 写的是自己算好的完整合并结果，若再被「保留未知 id」过滤一遍，用户删掉的服务商
@@ -286,9 +376,37 @@ export function applyHeldPatches(held: Array<Record<string, unknown>>): HeldPatc
  * 若每次写盘都广播，就会形成「广播 → 渲染层重载 → 回写 → 广播」的刷新循环（打字卡顿、磁盘狂写）。
  * 需要通知渲染层的场景只有「外部批量改动」（导入），由调用方在改完后显式调 `publishConfigChanged`。
  */
-export function setConfig(patch: Record<string, unknown>): boolean {
+export function setConfigDetailed(patch: Record<string, unknown>): ConfigWriteResult {
   ensureLoaded()
-  if (!patch || typeof patch !== 'object') return true
+  if (!patch || typeof patch !== 'object') return { ok: true }
+
+  const fresh = rereadForWrite()
+  if (fresh.kind === 'corrupt' || fresh.kind === 'unreadable') {
+    // 不知道磁盘上有什么：一个字节都不写，内存也保持原样（下一个调用方看到的是同一份「未知」）。
+    console.warn('[config] config.json 读不出来，拒绝写入：', fresh.detail ?? fresh.kind)
+    return { ok: false, code: 'config-unreadable', detail: fresh.detail }
+  }
+  if (fresh.kind === 'missing') {
+    // 曾经有过合法基线，现在没了：用户主动删的，不能替他重建。
+    console.warn('[config] config.json 已被外部删除，拒绝重建')
+    return { ok: false, code: 'config-changed-externally', detail: 'config.json 已被删除' }
+  }
+
+  /*
+   * 到这一步 `config` 已是磁盘的最新内容（见 rereadForWrite）。冲突判定拿它当基线没有意义——
+   * 基线要的是「上一次成功写盘后，这些键在我这边的值」。用内存态里的旧值比对同样不可靠（它就是被重读覆盖掉的那份），
+   * 故基线由 `lastWritten` 维护：每次写盘成功后更新成「这次写下去的这几个键」。
+   */
+  for (const key of Object.keys(patch)) {
+    const seen = lastWritten.get(key)
+    if (!seen) continue // 本进程从没写过这个键：磁盘内容就是权威，没有「被外部改过」可言
+    const diskValue = Object.prototype.hasOwnProperty.call(config, key) ? config[key] : undefined
+    if (JSON.stringify(diskValue) !== JSON.stringify(seen.value)) {
+      console.warn(`[config] ${key} 在磁盘上已被外部改动，整次写入取消`)
+      return { ok: false, code: 'config-changed-externally', detail: key }
+    }
+  }
+
   /*
    * 记旧值，键不存在时用 `undefined` 表示「本来没有」。
    *
@@ -304,13 +422,31 @@ export function setConfig(patch: Record<string, unknown>): boolean {
     if (v === undefined) delete config[k]
     else config[k] = v
   }
-  if (persist()) return true
+  if (persist()) {
+    for (const k of Object.keys(patch)) {
+      lastWritten.set(k, { value: structuredClone(hasOwn(config, k) ? config[k] : undefined) })
+    }
+    baselineEstablished = true
+    return { ok: true }
+  }
   // 写盘失败：把内存恢复成写之前的样貌，让「内存态」与「磁盘」一致（见上方说明）
   for (const [k, v] of before) {
     if (v === undefined) delete config[k]
     else config[k] = v
   }
-  return false
+  return { ok: false, code: 'config-write-failed' }
+}
+
+function hasOwn(o: Record<string, unknown>, k: string): boolean {
+  return Object.prototype.hasOwnProperty.call(o, k)
+}
+
+/** 本进程上次成功写盘时，各键写下去的值（冲突判定的基线）。 */
+const lastWritten = new Map<string, { value: unknown }>()
+
+/** 布尔投影：既有调用方只看成功与否。 */
+export function setConfig(patch: Record<string, unknown>): boolean {
+  return setConfigDetailed(patch).ok
 }
 
 /* ───────────── 配置变更广播 ───────────── */
