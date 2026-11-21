@@ -11,6 +11,7 @@ import {
 import { join } from 'path'
 import { writeFileAtomic } from './atomic-write'
 import { getDevaHome } from './config'
+import { historyLocked } from './chat-locks'
 import { historyLocked } from './chat-state'
 import { hydrateMessages, mediaReplacer } from './media-store'
 import { modelFirst } from './model-view'

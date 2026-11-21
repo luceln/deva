@@ -3,7 +3,7 @@ import * as path from 'path'
 import { createHash } from 'crypto'
 import { importSessions } from '../../apps/desktop/src/main/importer-sessions'
 import { ensureSession, getSession, save, adoptSessionFile } from '../../apps/desktop/src/main/services/chat-store'
-import { busySessions, compacting, rewinding } from '../../apps/desktop/src/main/services/chat-state'
+import { busySessions, compacting, rewinding } from '../../apps/desktop/src/main/services/chat-locks'
 
 type Eq = (name: string, actual: unknown, expected: unknown) => unknown
 const home = () => process.env.DEVA_HOME!
