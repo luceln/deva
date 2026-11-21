@@ -371,10 +371,15 @@ export function writeMemory(content: string, id?: string, scope: MemoryScope = G
 export function deleteMemory(
   id: string,
   scope: MemoryScope = GLOBAL_SCOPE
-): { removed: MemoryEntry | null; written: boolean } {
+): { removed: MemoryEntry | null; written: boolean; readError?: string } {
   const read = readMemories(scope)
-  // 读不出来时删什么都不确定：写成「没删掉」比抹掉全量安全。界面已有「删除失败」文案。
-  if (read.kind === 'unreadable') return { removed: null, written: false }
+  /*
+   * 读不出来时删什么都不确定：写成「没删掉」比抹掉全量安全。
+   *
+   * `readError` 供调用方把「读失败」与「没有这条」分开（P2-14）：两者都返回 `removed: null`，
+   * 只看 `removed` 会把「文件坏了」讲成「不存在 id 为 X 的记忆」，用户于是去查 id，而真正要修的是文件。
+   */
+  if (read.kind === 'unreadable') return { removed: null, written: false, readError: read.error }
   const entries = read.entries
   const idx = entries.findIndex((e) => e.id === id)
   if (idx < 0) return { removed: null, written: true }
@@ -489,11 +494,30 @@ export interface MemorySnapshot {
   budget: number
   maxEntries: number
   maxChars: number
+  /**
+   * 读失败时的原因（P2-14）。
+   *
+   * 以前这里只有 `entries`：文件损坏时 `listMemories()` 给出空数组，界面于是显示「还没有记忆」。
+   * 用户按这个提示去写新条目，会拿一份空集合覆盖掉那份可能还能手工抢救的文件。必须能把「读不出来」
+   * 与「确实没有」分开传到界面。
+   */
+  readError?: string
 }
 
 function snapshot(scope: MemoryScope): MemorySnapshot {
-  const entries = listMemories(scope)
   const lim = memoryLimits(scope)
+  const read = readMemories(scope)
+  // 读不出来时**不**回落成空列表：那会让界面把「文件坏了」显示成「还没有记忆」。
+  if (read.kind === 'unreadable')
+    return {
+      entries: [],
+      used: 0,
+      budget: lim.budget,
+      maxEntries: lim.maxEntries,
+      maxChars: lim.maxChars,
+      readError: read.error
+    }
+  const entries = read.entries
   return {
     entries,
     used: memoryUsage(entries),

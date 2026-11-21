@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import type { CompactModelConfig } from './compaction'
 import { condenseMemories, type CondenseResult, type SkippedEntry } from './memory-consolidate'
-import { GLOBAL_SCOPE, listMemories, type MemoryScope } from './memory'
+import { GLOBAL_SCOPE, readMemories, scopeLabel, type MemoryScope } from './memory'
 import { resolveDefaultModel } from './model-resolve'
 import { resolveAvailability } from './model-availability'
 import { readSecret } from './secrets'
@@ -56,7 +56,7 @@ export type CondenseIpcResult =
     }
   | {
       ok: false
-      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit'
+      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit' | 'readFailed'
       /** 给用户看的一句话（可直接显示；技术细节更全的说明放 detail）。 */
       reason: string
       /** 技术定位（provider id / 错误信息），供排查；界面可折叠显示。 */
@@ -160,8 +160,19 @@ export function registerMemoryCondenseIpc(): void {
       /*
        * 先看有没有东西可压：空作用域连模型都不用挑。放在 pickModel 之前——
        * 「项目记忆还是空的」这种提示比「模型不可用」更贴近用户此刻的处境。
+       *
+       * ⚠️ 必须三态读（P2-14）：`listMemories()` 把「文件读不出来」折成空数组，于是文件损坏会被
+       * 报成「这里还没有记忆条目」。用户据此以为记忆丢了 / 不需要整理，真正要做的是去修那个文件。
        */
-      if (listMemories(scope).length === 0) {
+      const peek = readMemories(scope)
+      if (peek.kind === 'unreadable')
+        return {
+          ok: false,
+          code: 'readFailed',
+          reason: `${scopeLabel(scope)}文件读不出来，请先检查该文件`,
+          detail: peek.error
+        }
+      if (peek.entries.length === 0) {
         return { ok: false, code: 'empty', reason: '这里还没有记忆条目，不需要整理' }
       }
       const picked = await pickModel()

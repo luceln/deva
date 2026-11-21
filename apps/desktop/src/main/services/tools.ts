@@ -11,7 +11,7 @@ import { skillsDir, upsertSkill } from './skills'
 import {
   deleteMemory,
   formatMemoryLine,
-  listMemories,
+  readMemories,
   scopeKindOfId,
   scopeLabel,
   GLOBAL_SCOPE,
@@ -1883,11 +1883,30 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
     }
   },
   memory_read: async (_a, ctx) => {
-    const globals = listMemories(GLOBAL_SCOPE)
+    /*
+     * ⚠️ 三态读（P2-14）：`listMemories()` 把「读不出来」折成空数组，于是文件损坏时这里会告诉模型
+     * 「当前尚无全局记忆」——模型据此认为记忆是空的，接着用 memory_write 写一条，就把那份可能还能
+     * 手工抢救的文件整份覆盖掉。读失败必须如实说，并明确「先别写」。
+     */
+    const globalsRead = readMemories(GLOBAL_SCOPE)
+    if (globalsRead.kind === 'unreadable')
+      return {
+        content: `全局记忆文件读不出来（${globalsRead.error}）。为避免用空内容覆盖掉它，请先让用户检查 ~/.deva-plus/memory.json，不要据此写入任何记忆。`,
+        summary: '读取失败',
+        isError: true
+      }
+    const globals = globalsRead.entries
     const out = ['【全局记忆】', ...(globals.length ? globals.map(formatMemoryLine) : ['（当前尚无全局记忆）'])]
     let total = globals.length
     if (ctx.memoryScopeRoot) {
-      const projects = listMemories({ kind: 'project', root: ctx.memoryScopeRoot })
+      const projRead = readMemories({ kind: 'project', root: ctx.memoryScopeRoot })
+      if (projRead.kind === 'unreadable')
+        return {
+          content: `项目私有记忆文件读不出来（${projRead.error}）。为避免用空内容覆盖掉它，请先让用户检查该项目的 memory.json，不要据此写入任何记忆。`,
+          summary: '读取失败',
+          isError: true
+        }
+      const projects = projRead.entries
       total += projects.length
       out.push(
         '',
@@ -1982,6 +2001,16 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
     const scope: MemoryScope =
       kind === 'project' ? { kind: 'project', root: ctx.memoryScopeRoot as string } : GLOBAL_SCOPE
     const r = deleteMemory(id, scope)
+    /*
+     * 先判「读失败」再判「不存在」（P2-14）：以前只看 `removed`，文件损坏时会告诉模型「不存在 id 为 X 的
+     * 记忆」，它会据此认为那条已经没了（或去改 id 重试），而真正的问题是记忆文件读不出来。
+     */
+    if (r.readError)
+      return {
+        content: `${scopeLabel(scope)}文件读不出来（${r.readError}），无法确认这条记忆是否存在，请先让用户检查该文件`,
+        summary: '读取失败',
+        isError: true
+      }
     if (!r.removed)
       return { content: `不存在 id 为 ${id} 的记忆（可先用 memory_read 查看）`, summary: '未找到', isError: true }
     // 盘上没删掉就不能回「已删除」：模型会据此告诉用户「记下了」，而重启后它又回来

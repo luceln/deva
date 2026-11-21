@@ -395,7 +395,7 @@ export type MemoryCondenseResult =
     }
   | {
       ok: false
-      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit'
+      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit' | 'readFailed'
       reason: string
       detail?: string
       /** 只有 `concurrent-change` 带：被改动 / 删除 / 新增的条目 id。 */

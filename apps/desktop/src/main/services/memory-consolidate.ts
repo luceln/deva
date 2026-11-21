@@ -171,6 +171,13 @@ export type CondenseFailCode =
   | 'concurrent-change'
   /** 归纳后的集合仍超限（条数 / 预算 / 单条长度）：不提交。 */
   | 'over-limit'
+  /**
+   * 记忆文件**读不出来**（损坏 / 被占用 / 无权限）。
+   *
+   * 与 `empty` 必须分开（P2-14）：`empty` 是「确实没有条目」，读失败时用户要做的事完全不同
+   * （去检查 / 修复那个文件，而不是「没什么可整理」）。
+   */
+  | 'readFailed'
 
 export type CondenseResult =
   | ({ ok: true } & CondenseStats)
@@ -268,7 +275,10 @@ export async function condenseMemories(
   model: CompactModelConfig,
   signal?: AbortSignal
 ): Promise<CondenseResult> {
-  const before = listMemories(scope)
+  const read = readMemories(scope)
+  if (read.kind === 'unreadable')
+    return { ok: false, code: 'readFailed', reason: `${scopeLabel(scope)}文件读不出来（${read.error}），请先检查该文件` }
+  const before = read.entries
   if (before.length === 0) return { ok: false, code: 'empty', reason: '没有可整理的条目' }
   return condense(scope, before, model, signal)
 }
@@ -290,9 +300,16 @@ function condense(
    */
   if (running) {
     return running.then(() => {
-      const now = listMemories(scope)
-      if (now.length === 0) return { ok: false as const, code: 'empty' as const, reason: '没有可整理的条目' }
-      return runCondense(scope, now, model, signal)
+      const again = readMemories(scope)
+      if (again.kind === 'unreadable')
+        return {
+          ok: false as const,
+          code: 'readFailed' as const,
+          reason: `${scopeLabel(scope)}文件读不出来（${again.error}），请先检查该文件`
+        }
+      if (again.entries.length === 0)
+        return { ok: false as const, code: 'empty' as const, reason: '没有可整理的条目' }
+      return runCondense(scope, again.entries, model, signal)
     })
   }
   const p = runCondense(scope, before, model, signal).finally(() => inflight.delete(key))
@@ -422,7 +439,10 @@ async function run(
   model: CompactModelConfig,
   signal?: AbortSignal
 ): Promise<ConsolidateResult> {
-  const before = listMemories(scope)
+  const read = readMemories(scope)
+  if (read.kind === 'unreadable')
+    return { ok: false, reason: `${scopeLabel(scope)}文件读不出来（${read.error}），为避免覆盖原有内容，本次没有归纳` }
+  const before = read.entries
   if (before.length === 0) return { ok: false, reason: '没有可归纳的条目' }
   const { system, user } = buildPrompt(scope, before, normalizeMemory(incoming), replacing)
   let reason = ''
