@@ -18,10 +18,25 @@
  *
  * 浏览器来源（按优先级）：
  *   1. `DEVA_CHROME_PATH` 环境变量 —— 指向已有的 Chrome / Edge / Chromium 可执行文件
- *   2. puppeteer 自带的 Chromium（装了完整版 `puppeteer` 时可用）
- *   3. 常见系统安装路径（Windows / macOS / Linux 各试一遍）
+ *   2. puppeteer 自带的 Chromium（装了完整版 `puppeteer` 且下载成功时可用）
+ *   3. 常见系统安装路径（Linux `/usr/bin/google-chrome` 等 / Windows / macOS）
  *
- * 退出码：0 = 6 条全过；1 = 有失败或页面没跑起来。CI 与本地都按退出码判定。
+ * 注意 CI 上不用装浏览器：`ubuntu-latest`（24.04）镜像预装 Google Chrome，
+ * 版本与 puppeteer 要求的 Chrome for Testing 一致，候选链第 3 步就能命中。
+ *
+ * ## 退出码：三种结果必须能分开
+ *
+ * 「浏览器装不上、用例根本没跑」和「用例跑了、代码真有 bug」是完全不同的两件事。
+ * 都 exit 1 会让人以为是代码坏了，白查半天；反过来若环境问题被算成通过，就是假绿。
+ * 所以：
+ *
+ * | 退出码 | 含义 | 该找谁 |
+ * |---|---|---|
+ * | 0 | 6 条全过 | — |
+ * | 1 | **用例真的失败了**（有 FAIL） | 改代码 |
+ * | 2 | **环境问题，用例未执行**（找不到/起不来浏览器、页面没渲染） | 改 CI 或本机环境 |
+ *
+ * 退出码 2 的所有输出都以 `ENV` 开头，workflow 会把它转成 `::error::` 并写明「不是代码问题」。
  */
 const fs = require('fs')
 const path = require('path')
@@ -29,6 +44,17 @@ const path = require('path')
 const QA = __dirname
 const REPO = path.resolve(QA, '..', '..', '..')
 const PAGE = path.join(QA, 'page.html')
+
+/** 退出码：用例失败 vs 环境问题。 */
+const EXIT_FAIL = 1
+const EXIT_ENV = 2
+
+/** 打印环境问题并给退出码 2。必须在浏览器已关闭之后调用，避免进程残留。 */
+function reportEnv(msg) {
+  console.error(`\nENV 插话带附件用例未执行：${msg}`)
+  console.error('ENV 这是环境问题，不是代码问题——用例一条都没跑，不能据此判断功能好坏。')
+  process.exit(EXIT_ENV)
+}
 
 /**
  * 找浏览器：`DEVA_CHROME_PATH` → puppeteer 自带 Chromium → 各平台常见安装路径。
@@ -40,56 +66,70 @@ const PAGE = path.join(QA, 'page.html')
 async function findBrowser() {
   const env = process.env.DEVA_CHROME_PATH
   if (env) {
-    if (!fs.existsSync(env)) throw new Error(`DEVA_CHROME_PATH 指向的文件不存在：${env}`)
-    return env
+    if (!fs.existsSync(env)) {
+      reportEnv(`DEVA_CHROME_PATH 指向的文件不存在：${env}`)
+    }
+    return { exe: env, from: 'DEVA_CHROME_PATH' }
   }
   // puppeteer 自带 Chromium（v22+ 的 executablePath 是异步的）
   try {
     const puppeteer = require('puppeteer')
     const p = await puppeteer.executablePath()
-    if (p && fs.existsSync(p)) return p
+    if (p && fs.existsSync(p)) return { exe: p, from: 'puppeteer 自带' }
   } catch {
     /* 没装完整版 puppeteer 或浏览器没下载，继续找系统浏览器 */
   }
   const candidates = [
+    // Linux（GitHub Actions 的 ubuntu-latest 镜像预装 /usr/bin/google-chrome）
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable',
+    '/opt/google/chrome/chrome',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    // Windows
     'C:/Program Files/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
     'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    // macOS
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/usr/bin/google-chrome',
-    '/usr/bin/google-chrome-stable',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-    '/snap/bin/chromium'
+    '/Applications/Chromium.app/Contents/MacOS/Chromium'
   ]
-  for (const c of candidates) if (fs.existsSync(c)) return c
+  for (const c of candidates) if (fs.existsSync(c)) return { exe: c, from: '系统安装' }
   return null
 }
 
 async function main() {
   if (!fs.existsSync(PAGE)) {
-    console.error(`没有 ${path.relative(REPO, PAGE)}：先跑 node .deva/qa/insert-attach/build.cjs`)
-    process.exit(1)
+    reportEnv(`没有 ${path.relative(REPO, PAGE)}——先跑 node .deva/qa/insert-attach/build.cjs`)
   }
 
   const puppeteer = require('puppeteer')
-  const exe = await findBrowser()
-  if (!exe) {
-    console.error(
-      '找不到可用的 Chrome / Chromium。设 DEVA_CHROME_PATH 指过去，或安装完整版 puppeteer（自带 Chromium）。'
+  const found = await findBrowser()
+  if (!found) {
+    reportEnv(
+      '找不到任何 Chrome / Chromium。三种办法：设 DEVA_CHROME_PATH 指向浏览器可执行文件；' +
+        '或 `pnpm exec puppeteer browsers install chrome` 下载 puppeteer 自带的；' +
+        '或装系统浏览器（apt install google-chrome-stable / chromium）。'
     )
-    process.exit(1)
   }
-  console.log(`  browser: ${exe}`)
+  console.log(`  browser: ${found.exe}（来自 ${found.from}）`)
 
-  const browser = await puppeteer.launch({
-    executablePath: exe,
-    headless: true,
-    // --no-sandbox 是 CI（容器内 root）跑 Chromium 必需的；--disable-dev-shm-usage 防 /dev/shm 太小
-    args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
-  })
+  let browser
+  try {
+    browser = await puppeteer.launch({
+      executablePath: found.exe,
+      headless: true,
+      // --no-sandbox 是 CI（容器内 root）跑 Chromium 必需的；--disable-dev-shm-usage 防 /dev/shm 太小
+      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+    })
+  } catch (e) {
+    // 启动不了 = 环境问题（缺系统库、沙箱、权限），不是用例失败
+    reportEnv(`浏览器启动失败：${(e && e.message ? e.message : String(e)).slice(0, 500)}`)
+  }
 
-  let code = 1
+  let code
+  let envIssue = null
   try {
     const page = await browser.newPage()
     const pageErrors = []
@@ -123,17 +163,19 @@ async function main() {
       for (const e of pageErrors.slice(0, 10)) console.log(`    ${e}`)
     }
 
-    if (!finished) {
-      console.log(`\n插话带附件：页面没跑完（title=${JSON.stringify(title)}）`)
-      code = 1
-    } else if (fail.length) {
+    if (fail.length) {
+      // 有 FAIL = 用例真的红了，无论跑没跑完
       console.log(`\n插话带附件：${pass.length}/${total} 通过，${fail.length} 条失败`)
       for (const f of fail) console.log(`  ✗ ${f}`)
-      code = 1
+      code = EXIT_FAIL
     } else if (total === 0) {
-      // 一条用例都没跑 = 测试脚本自己没起来（例如 bundle 崩了），不能算通过
-      console.log('\n插话带附件：一条用例都没执行（测试脚本没跑起来）')
-      code = 1
+      // 一条都没执行 = 测试脚本自己没起来（bundle 崩了 / 页面没渲染），这不是「通过」
+      envIssue =
+        `一条用例都没执行（title=${JSON.stringify(title)}）` +
+        (pageErrors.length ? `；页面首条报错：${pageErrors[0]}` : '')
+    } else if (!finished) {
+      // 跑了几条但没跑完（卡住 / 崩溃），不能算通过，也不是明确的用例失败
+      envIssue = `页面没跑完（title=${JSON.stringify(title)}，已执行 ${total} 条）`
     } else {
       console.log(`\n插话带附件：${pass.length}/${total} 全部通过`)
       code = 0
@@ -141,10 +183,13 @@ async function main() {
   } finally {
     await browser.close()
   }
+
+  // 环境问题在浏览器关掉之后再报，避免进程残留
+  if (envIssue) reportEnv(envIssue)
   process.exit(code)
 }
 
 main().catch((e) => {
-  console.error('插话带附件：运行失败 —', e && e.message)
-  process.exit(1)
+  // 没预料到的异常（脚本自身 bug、依赖缺失等）也归环境，避免冒充「用例失败」
+  reportEnv(`运行失败：${(e && e.message ? e.message : String(e)).slice(0, 500)}`)
 })

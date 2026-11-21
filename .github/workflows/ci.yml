@@ -128,13 +128,51 @@ jobs:
       # 这里在真 Chromium 里渲染真实 Composer，跑 6 条用例，其中第 6 条守的正是
       # 「插话失败 / 回合被停时，附件必须回到输入框」（二开 50e2868 的验收点）。
       # 实测：加那句短路后，只有这条用例会红（5/6），其余形状检查全绿——所以它不可替代。
-      - name: 安装 Chromium（插话带附件的运行时用例）
-        # puppeteer 的 postinstall 在 pnpm 下被跳过（不在 onlyBuiltDependencies），且
-        # ELECTRON_SKIP_BINARY_DOWNLOAD 会让 install 阶段少下东西，所以显式装一次。
-        # --install-deps 补 Linux 上 Chromium 需要的系统库（容器内需 root，runner 有 sudo）。
-        run: pnpm exec puppeteer browsers install chrome --install-deps
-
+      #
+      # 浏览器不用自己装：ubuntu-latest（24.04）镜像**预装** Google Chrome 157.0.8103.78
+      # （与 puppeteer 25.18.1 要求的版本一致）与 Chromium 157，`run.cjs` 的候选链会命中
+      # /usr/bin/google-chrome。早先这里跑 `puppeteer browsers install chrome --install-deps`
+      # 会红：`--install-deps` 要装系统库，需要 root，而 runner 默认不是 root（实测报
+      # "Installing system dependencies requires root privileges"）。既然镜像已有浏览器，
+      # 就不装、也不下载——少一个会红的环节。
+      #
+      # 退出码约定（见 run.cjs 头部）：0 全过 / 1 用例真失败 / 2 环境问题用例没跑。
+      # 这里把 2 转成一步的结论，交给下面的兜底步骤决定要不要装浏览器。
       - name: 插话带附件（运行时）
+        id: insert-attach
         run: |
           node .deva/qa/insert-attach/build.cjs
+          set +e
           node .deva/qa/insert-attach/run.cjs
+          code=$?
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -eq 2 ]; then
+            echo "::warning::插话带附件用例未执行——环境里没有可用浏览器，交给兜底步骤"
+            exit 0
+          fi
+          exit "$code"
+
+      # 兜底：只有上一步返回「环境问题（2）」时才装浏览器重跑，平时零开销。
+      # 直接装 Google 官方 deb（与 runner 镜像自身 install-google-chrome.sh 的做法一致），
+      # 不用手写 apt 包名列表——deb 的依赖由 apt 自动解析，正好绕开 Ubuntu 24.04 的 t64 改名坑：
+      # `apt-get install libasound2` 在 24.04 上会失败（它已变成 virtual package，只有 libasound2t64
+      # 提供实现），但作为 deb 的依赖时 apt 会自动挑到 libasound2t64，所以不用管包名。
+      # 也不用 `chromium-browser`：24.04 上那是 snap 过渡包，装完也用不了。
+      - name: 插话带附件（运行时，兜底装浏览器）
+        id: insert-attach-fallback
+        if: steps.insert-attach.outputs.code == '2'
+        run: |
+          echo "环境里没有可用浏览器，改为安装 Google 官方 deb"
+          curl -fsSL -o /tmp/google-chrome.deb \
+            https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+          sudo apt-get install -y /tmp/google-chrome.deb
+          DEVA_CHROME_PATH=/usr/bin/google-chrome node .deva/qa/insert-attach/run.cjs
+
+      # 兜底也救不回来时，必须明确说「用例没跑」，不能让它看起来像「用例失败」。
+      # 条件是「主步骤报了环境问题」且「兜底步骤真的失败了」——兜底成功就不该再报错。
+      - name: 插话带附件（环境问题汇总）
+        if: steps.insert-attach.outputs.code == '2' && failure()
+        run: |
+          echo "::error::插话带附件用例未执行——连兜底装浏览器都失败，这不是代码问题，请检查 CI 环境"
+          exit 1

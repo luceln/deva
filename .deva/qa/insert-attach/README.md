@@ -8,37 +8,57 @@
 
 ## 跑法
 
-**CI 与本地同一条命令**（有退出码，绿红由程序判定）：
+**CI 与本地同一条命令**：
 
 ```bash
 node .deva/qa/insert-attach/build.cjs   # 产出 page.html（bundle.js + deva-stub.js + test.ts 内联）
-node .deva/qa/insert-attach/run.cjs     # 用真 Chromium 加载它，跑完 6 条并按结果 exit 0 / 1
+node .deva/qa/insert-attach/run.cjs     # 用真 Chromium 加载它，跑完 6 条并按结果给退出码
 ```
 
-`run.cjs` 会依次找浏览器：`DEVA_CHROME_PATH` 环境变量 → puppeteer 自带的 Chromium →
-常见系统路径（Windows / macOS / Linux）。找不到就 exit 1 并说明怎么装。
+### 退出码：三种结果必须能分开
+
+「浏览器装不上、用例根本没跑」和「用例跑了、代码真有 bug」是两件事。都 exit 1 会让人以为是代码坏了白查半天；反过来把环境问题算成通过就是假绿。
+
+| 退出码 | 含义 | 该找谁 |
+|---|---|---|
+| `0` | 6 条全过 | — |
+| `1` | **用例真的失败了**（有 FAIL） | 改代码 |
+| `2` | **环境问题，用例未执行**（找不到/起不来浏览器、页面没渲染） | 改 CI 或本机环境 |
+
+退出码 2 的输出全部以 `ENV` 开头，并明确写「这是环境问题，不是代码问题」。CI 里会被转成 `::error::` / `::warning::`，不会伪装成用例失败。
+
+### 浏览器从哪来
+
+`run.cjs` 依次找：`DEVA_CHROME_PATH` 环境变量 → puppeteer 自带的 Chromium → 常见系统路径（Linux `/usr/bin/google-chrome` 等 / Windows / macOS）。都没有就 exit 2 并说明怎么装。
+
+CI **不需要装浏览器**：`ubuntu-latest`（24.04）镜像预装 Google Chrome 157.0.8103.78（与 puppeteer 25.18.1 要求的版本一致）和 Chromium 157，候选链会命中 `/usr/bin/google-chrome`。若哪天真没有，workflow 有一步兜底：装 Google 官方 deb 再用 `DEVA_CHROME_PATH` 指过去重跑。
+
+> 曾经这里跑 `puppeteer browsers install chrome --install-deps`，在 CI 上必红：
+> `--install-deps` 要装系统库、需要 root，而 runner 默认不是 root，报
+> `Installing system dependencies requires root privileges`。
+> 另外别用 `apt install libasound2`：Ubuntu 24.04 起它成了 virtual package（实现是
+> `libasound2t64`），单独装会 `no installation candidate`；也别用 `chromium-browser`
+> （24.04 上是 snap 过渡包）。走 deb 让 apt 自己解析依赖就不会碰到这两个坑。
 
 也可以人工看：浏览器打开 `page.html`，`document.title` 形如 `DONE 6/6`，逐条结果在 `window.__logs`。
-
-CI 里由 `安装 Chromium` + `插话带附件（运行时）` 两步跑（见 `.github/workflows/ci.yml`）。
-
-> 为什么 CI 要显式装 Chromium：`puppeteer` 的 postinstall 在 pnpm 下被跳过（不在
-> `onlyBuiltDependencies`），且 workflow 里 `ELECTRON_SKIP_BINARY_DOWNLOAD=1`。
-> `pnpm exec puppeteer browsers install chrome --install-deps` 会连带补 Linux 上 Chromium 缺的系统库。
 
 ## 这条守的语义（为什么不能只靠静态检查）
 
 **插话带的图不能因为回合被停 / 队友点了撤回就凭空消失。**
 
-用户贴那张图花的力气不比打字少，丢了只能重新截一次。这条是二开 `50e2868` 的验收点，
-也是全套检查里**唯一**覆盖它的地方：
+用户贴那张图花的力气不比打字少，丢了只能重新截一次。这条是二开 `50e2868` 的验收点，也是全套检查里**唯一**覆盖它的地方：
 
-- `check-insert-attachments.cjs` 是**形状检查**——看签名有没有 `attachments`、函数体里有没有
-  调 `mergePicked` / `mergeDraftAttachments`。**在 `restoreToComposer` 开头写一句
-  `if (attachments) { return }`，它照样 19 PASS / 0 FAIL 全绿**，而功能已经废了。
-- 本目录的第 6 条用例从 **DOM** 断言（附件 chip 真的回来了），短路后必然红。
+- `check-insert-attachments.cjs` 是**形状检查**——看签名有没有 `attachments`、函数体里有没有调 `mergePicked` / `mergeDraftAttachments`。
+- 本目录的第 6 条用例从 **DOM** 断言（附件 chip 真的回来了）。
 
-实测（破坏验证）：加那句短路 → `5/6`，只有第 6 条红；复原 → `6/6`。
+这组对照是最好的例子，说明「静态判据全绿」和「功能没坏」不是一回事。在 `restoreToComposer` 开头插一句 `if (attachments) { return }`（模拟「附件永远不还回去」的回归）：
+
+| 检查 | 结果 |
+|---|---|
+| `check-insert-attachments.cjs`（静态形状） | **19 PASS / 0 FAIL，exit=0** —— 完全看不出问题 |
+| `run.cjs`（运行时用例） | **5/6，exit=1** —— 第 6 条红：`超时：插话失败后附件没放回输入框` |
+
+复原后两边都绿（19/0、6/6）。所以形状检查守着「代码长什么样」，运行时用例守着「用户还能不能用」——两者缺一不可。
 
 ## 用例（6 条）
 
