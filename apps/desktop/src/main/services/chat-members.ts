@@ -390,13 +390,22 @@ export function noteMemberDirectTask(sub: StoredSession, text: string): void {
   publishSessionsChanged()
 }
 
-/** 成员会话里用户亲自改了模型 / 思考等级：记到主对话名单上，此后派任务不再覆盖。 */
-export function markMemberSetting(sub: StoredSession, field: 'modelSet' | 'effortSet'): void {
+/**
+ * 成员会话里用户亲自改了模型 / 思考等级：记到主对话名单上，此后派任务不再覆盖。
+ *
+ * 返回「这条标记是否已经落实在磁盘上」（P2-10）。以前是 void + 忽略 `saveProject` 的结果：
+ * 父会话写盘失败时标记只活在内存里，重启后派任务又会用主对话的模型把成员的模型覆盖回去，
+ * 而批量替换那边已经把它计进「已替换」，用户看到的是「换成功了，下次派任务又变回去」。
+ *
+ * 不是成员会话 / 本来就有这个标记 → 视为已落实（没有需要写的东西）。
+ */
+export function markMemberSetting(sub: StoredSession, field: 'modelSet' | 'effortSet'): boolean {
   const main = sub.parentId ? getSession(sub.parentId) : undefined
   const ref = main?.members?.find((m) => m.sessionId === sub.id)
-  if (!main || !ref || ref[field]) return
+  if (!main || !ref) return true
+  if (ref[field]) return true
   ref[field] = true
-  saveProject(main.id)
+  return saveProject(main.id)
 }
 
 /**

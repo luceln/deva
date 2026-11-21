@@ -164,6 +164,13 @@ export async function applyModelSwap(p: {
   // 逐条提交前的复核发现状态已变（用户在上一项写盘期间换了模型 / 移除了成员）：放弃这次提交，
   // 保留用户的新选择。它不是「写盘失败」，所以单列，界面上可以按「跳过」讲，但原因不同。
   const superseded: BrokenRef[] = []
+  /*
+   * 主文件已写成新模型，但**关联绑定没落实**（任务记录 / 成员名单没存下去）。
+   *
+   * 不清成 failed（主文件的模型确实换了、磁盘也不回滚），也不进 changed（否则用户以为完全成功，
+   * 而重启后派任务会用主对话的模型把它改回去）。单列出来，界面据实说「已换，但绑定没存下去」。
+   */
+  const unbound: BrokenRef[] = []
   for (const c of cands) {
     // 空引用（含只有空白）= 尚未定格模型（跟随全局默认）：它根本没引用任何具体模型，替换它只会凭空钉死一个模型，
     // 故既不替换也不计进 skipped（那会让界面上的「跳过 M 个」混进一堆本来就没坏、也没让用户单独指定过的会话）。
@@ -269,9 +276,17 @@ export async function applyModelSwap(p: {
     //  · 成员会话：记为「用户亲自定过模型」（modelSet），此后派任务不再按主对话覆盖——否则主智能体下一次派任务就
     //    把这里刚换好的值覆盖回主对话的引用，用户以为批量换成功了，实际只在下次派任务前有效。用户点批量替换
     //    就是在为这些会话定模型，语义与亲手逐个换一致。
-    syncTaskModel(c.id, to)
-    markMemberSetting(session, 'modelSet')
-    changed.push({ sessionId: c.id, name: c.name, ref: c.ref, kind: fromKind ?? 'missing' })
+    //
+    // ⚠️ 两处结果都必须看（P2-10）：主文件写成功了，但**绑定没落实**时，重启后派任务会把它改回去。
+    // 这不是「写盘失败」（主文件的模型确实已经是新值），也不能算完整成功，故单列 `unbound`。
+    const taskBound = syncTaskModel(c.id, to)
+    const memberBound = markMemberSetting(session, 'modelSet')
+    const entry = { sessionId: c.id, name: c.name, ref: c.ref, kind: fromKind ?? 'missing' }
+    if (!taskBound || !memberBound) {
+      unbound.push(entry)
+      continue
+    }
+    changed.push(entry)
   }
-  return { changed, skipped, failed, indexStale, superseded }
+  return { changed, skipped, failed, indexStale, superseded, ...(unbound.length ? { unbound } : {}) }
 }
