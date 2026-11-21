@@ -2,6 +2,7 @@ import { copyFileSync, mkdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { adoptSessionFile } from './services/chat-store'
+import { historyLocked } from './services/chat-state'
 import { backupBroken, inspectTarget } from './importer-target'
 import { decideExisting, sourceTail, type ExistingDecision } from './importer-session-merge'
 import { writeFileAtomic } from './services/atomic-write'
@@ -104,6 +105,11 @@ export function importSessions(
     if (!safe) continue
     const from = join(srcDir, name)
     const to = join(dstDir, `${safe}.json`)
+    // Active turns hold the history array across awaits. Defer the entire session, not just cache adoption.
+    if (historyLocked(safe)) {
+      stat.failed.push({ step: 'sessions', id, reason: 'session-history-locked' })
+      continue
+    }
     try {
       /*
        * 「目标已存在」要分清到底是什么占了位置。以前只判 `existsSync(to)`，于是**目标被同名目录占住**时也走

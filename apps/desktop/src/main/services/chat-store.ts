@@ -11,6 +11,7 @@ import {
 import { join } from 'path'
 import { writeFileAtomic } from './atomic-write'
 import { getDevaHome } from './config'
+import { historyLocked } from './chat-state'
 import { hydrateMessages, mediaReplacer } from './media-store'
 import { modelFirst } from './model-view'
 import { removeToolResults } from './tool-results'
@@ -613,7 +614,7 @@ export function getSession(id: string): StoredSession | undefined {
  * 未载入时磁盘就是唯一真源，下次 `getSession` 自然读到新内容。
  */
 export function adoptSessionFile(id: string): boolean {
-  if (!sessionCache.has(id)) return false
+  if (historyLocked(id) || !sessionCache.has(id)) return false
   let parsed: StoredSession
   try {
     parsed = JSON.parse(readFileSync(fileForId(id), 'utf8')) as StoredSession
