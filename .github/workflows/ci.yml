@@ -45,18 +45,23 @@ jobs:
       - name: 同类扫描
         run: node .deva/qa/scan-same-class.cjs
 
-      # 拆模块后的形状完整性：编译与类型都看不出「漏搬一个方法 / 丢一个词条」——
-      # preload 删掉一个方法、i18n 少一个 key，tsc 和 build 全绿，界面点下去才炸。
-      # 判据是单向的：只守「我们二开该有的还在」，上游新增通道/词条不拦截。
+      # 静态契约护栏（三项）：preload 形状、i18n 结构、品牌与数据目录。
+      # 共同点：都是「编译与类型看不出、界面跑起来才炸」的静默失效——
+      #  · preload 删一个方法 → 界面点下去 undefined is not a function；
+      #  · i18n 少一个 key → 界面直接显示点分 key 或空白；
+      #  · 默认数据目录/安装标识一变 → 程序安静地去新目录，用户看到「技能、配置、记忆全没了」，
+      #    且 driver 的每个场景都设了 DEVA_HOME，默认路径只有这条护栏在守。
+      # 判据都是单向的：只守「我们该有的还在」，上游新增通道/词条不拦截。
       #
-      # 注意：这一步与 driver.cjs 的 shape 场景**跑的是同两个脚本**（那里也会跑一遍），是有意保留的重复。
-      # 保留原因：driver 的汇总只列「52 个场景里 shape 失败」，CI 日志里看不出是 preload 还是 i18n 漂移；
-      # 单独一步能让失败步骤名直接点出类别，排查时少翻一层日志。代价是多跑两遍 esbuild，可接受。
-      # 别把它当冗余删掉——删了之后这两类静默失效就只剩 driver 汇总里一行字。
-      - name: preload 形状与 i18n 结构
+      # 注意：这一步与 driver.cjs 的 shape / brandhome 场景**跑的是同一批脚本**，是有意保留的重复。
+      # 保留原因：driver 的汇总只列「某场景失败」，CI 日志里看不出是 preload、i18n 还是品牌路径漂移；
+      # 单独一步能让失败步骤名直接点出类别，排查时少翻一层日志。代价是多跑几遍 esbuild，可接受。
+      # 别把它当冗余删掉——删了之后这几类静默失效就只剩 driver 汇总里一行字。
+      - name: 静态契约护栏（preload 形状 / i18n 结构 / 品牌与数据目录）
         run: |
           node .deva/qa/check-preload-shape.cjs
           node .deva/qa/check-i18n-keys.cjs
+          node .deva/qa/check-brand-home.cjs
 
       # 导入功能的行为场景（esbuild 打包后逐个独立进程跑）。
       # Linux 上有 2 个场景的夹具不成立（full 要真实 ~/.deva、gate 要 powershell.exe），
