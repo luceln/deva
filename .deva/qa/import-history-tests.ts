@@ -130,3 +130,52 @@ export async function importDependencyRetry(eq: Eq): Promise<void> {
   importSessions(f.src)
   eq('retry: local JSONL conflict never overwritten', fs.readFileSync(targetDependency, 'utf8'), retainedBytes)
 }
+
+export async function importMedia(eq: Eq): Promise<void> {
+  const id = 'media-import', src = path.join(process.env.TEST_HOME!, '.deva')
+  const from = path.join(chats(src), `${id}.json`), to = path.join(chats(home()), `${id}.json`)
+  fs.mkdirSync(chats(src), { recursive: true })
+  fs.mkdirSync(chats(home()), { recursive: true })
+  write(path.join(src, 'config.json'), { models: { providers: [] } })
+  write(from, shell(id, [msg('prefix')]))
+  const first = await runImport()
+  eq('media: seed import completes through runImport', 'error' in first, false)
+  const live = ensureSession(id)
+  const data = Buffer.from('isolated-media').toString('base64')
+  const hash = createHash('sha256').update(data).digest('hex')
+  const image = { type: 'image', mediaType: 'image/png', blob: hash }
+  const document = { type: 'document', mediaType: 'application/pdf', name: 'paper.pdf', blob: hash }
+  const tool = { type: 'tool_result', tool_use_id: 'tool-1', content: 'ok', images: [image] }
+  write(from, shell(id, [msg('prefix'), { role: 'user', content: [image, document, tool] }]))
+  const srcMedia = path.join(src, 'data', 'media'), dstMedia = path.join(home(), 'data', 'media')
+  fs.mkdirSync(srcMedia, { recursive: true }); fs.writeFileSync(path.join(srcMedia, hash), Buffer.from(data, 'base64'))
+  // Fault in copyAssoc: destination media path is a file, so dependencies cannot be prepared.
+  fs.writeFileSync(dstMedia, 'blocked')
+  const order: string[] = []
+  const before = fs.readFileSync(to, 'utf8'), failed = await runImport((p) => {
+    if (!order.includes(p.step)) order.push(p.step)
+  })
+  eq('media: copyAssoc precedes session publication', order.indexOf('assoc') < order.indexOf('sessions'), true)
+  eq('media unavailable: dependency failure is visible', 'error' in failed ? true : failed.sessions.failed.some((x) => x.id === id), true)
+  eq('media unavailable: no main publish', fs.readFileSync(to, 'utf8'), before)
+  eq('media unavailable: cache not replaced/degraded', live.messages.length, 1)
+  fs.unlinkSync(dstMedia)
+  const retry = await runImport()
+  eq('media retry: no error', 'error' in retry, false)
+  if ('error' in retry) return
+  eq('media retry: session updated', retry.sessions.updated.includes(id), true)
+  const parts = getSession(id)!.messages[1]?.content as any
+  eq('media retry: image hydrated before provider consumption', parts?.[0]?.data, data)
+  eq('media retry: PDF hydrated', parts?.[1]?.data, data)
+  eq('media retry: tool image hydrated', parts?.[2]?.images?.[0]?.data, data)
+  eq('media retry: no unresolved blob in cache', JSON.stringify(parts).includes('"blob"'), false)
+  // 源自己也没有这个 blob：不是依赖没准备好，正常降级为文字说明，不能把会话判成失败。
+  const absentId = 'media-absent', absentFrom = path.join(chats(src), `${absentId}.json`)
+  const absentHash = createHash('sha256').update('never-stored').digest('hex')
+  write(absentFrom, shell(absentId, [{ role: 'user', content: [{ type: 'image', mediaType: 'image/png', blob: absentHash }] }]))
+  const absent = await runImport()
+  eq('media absent in source: session still imports', 'error' in absent ? false : absent.sessions.copied.includes(absentId), true)
+  const absentParts = getSession(absentId)!.messages[0]?.content as any
+  eq('media absent in source: degrades to a loss notice, not a blob', absentParts?.[0]?.type, 'text')
+  eq('media absent in source: notice says data lost', /数据已丢失/.test(absentParts?.[0]?.text ?? ''), true)
+}

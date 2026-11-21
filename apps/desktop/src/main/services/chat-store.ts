@@ -12,7 +12,6 @@ import { join } from 'path'
 import { writeFileAtomic } from './atomic-write'
 import { getDevaHome } from './config'
 import { historyLocked } from './chat-locks'
-import { historyLocked } from './chat-state'
 import { hydrateMessages, mediaReplacer } from './media-store'
 import { modelFirst } from './model-view'
 import { removeToolResults } from './tool-results'
@@ -634,6 +633,7 @@ export function adoptSessionFile(id: string): boolean {
     older = readCompacted(parsed.compacted)
     if (older) parsed.messages = [...older, ...parsed.messages]
   }
+  if (Array.isArray(parsed.messages)) hydrateMessages(parsed.messages)
   // old persistedPrefix 属于旧对象，先丢；下面的 assign 结束后再按新内容记一次
   persistedPrefix.delete(live)
   for (const key of Object.keys(live) as (keyof StoredSession)[]) {

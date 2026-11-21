@@ -9,6 +9,8 @@ import { writeFileAtomic } from './services/atomic-write'
 import { readImportSession, readImportHistory, prepareImportHistory } from './importer-session-history'
 import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, writeFailureReason } from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
+import { missingSourceMedia } from './services/media-store'
+import type { Message } from './providers/types'
 
 /**
  * 导入第 ⑥ 步：会话（`data/chats/`）。
@@ -32,9 +34,8 @@ import type { Failure, StepStat } from '../shared/import-protocol'
  * 所以扫描时把「parentId 非空」的成员会话与其父一起纳入本批；反过来父文件里的 members 也已随父文件整体复制过去。
  * id 原样保留——引用天然有效，不需要任何映射。
  *
- * ⚠️ **compacted 同批**：主 JSON 的 `compacted.file` 存的是拆分文件名（`<id>.compacted-<ts>.jsonl`），
- * 缺了它早期历史读不出来（chat-store 的 readCompacted 返回 null → 那段历史当作不存在）。id 不变则文件名也不用改，
- * 照原文件名复制即可。
+ * ⚠️ **compacted 依赖先行**：主 JSON 的 `compacted.file` 存拆分文件名。写主 JSON 前先验证完整 JSONL；若目标缺失，
+ * 仅在源指针与历史内容能证明同一依赖时原子补齐；已有但不一致的 JSONL 绝不按尺寸覆盖。
  *
  * **不搬 `_index.json`**：它是派生数据，由 ensureIndex() 自愈重建；搬过去反而可能带着指向不存在文件的条目。
  * `model` 与 `focusRoot` 也无需重写：前者是 providerId:modelId（provider id 原样保留，引用天然有效），
@@ -128,6 +129,10 @@ export function importSessions(
          * 才覆盖，此时目标里的内容一条都不会丢。其余一律保留本应用这份。
          */
         const source = readImportSession(from), target = readImportSession(to)
+        if (!sourceDependenciesAvailable(srcHome, from, source)) {
+          stat.failed.push({ step: 'sessions', id, reason: SOURCE_FILE_UNREADABLE })
+          continue
+        }
         const repaired = prepareImportHistory(from, to, source, target)
         if (repaired && target.compacted) stat.compacted.push(target.compacted.file)
         const decision = decideExistingByFile(from, to)
@@ -178,6 +183,10 @@ export function importSessions(
          * 备份名不以 `.json` 结尾（见 backupBroken）：否则 `data/chats` 的索引重建会把它当成一个会话读进来。
          */
         const source = readImportSession(from)
+        if (!sourceDependenciesAvailable(srcHome, from, source)) {
+          stat.failed.push({ step: 'sessions', id, reason: SOURCE_FILE_UNREADABLE })
+          continue
+        }
         if (prepareImportHistory(from, to, source, source) && source.compacted)
           stat.compacted.push(source.compacted.file)
         if (state === 'broken') {
@@ -208,6 +217,15 @@ export function importSessions(
  * 这一点很要紧：`JSON.parse` 对半截文件抛错时，若被 catch 成「内容不一样 → 不覆盖」，
  * 用户看到的是「跳过」，而真相是「这条根本没比对过」。
  */
+function sourceDependenciesAvailable(
+  srcHome: string,
+  file: string,
+  session: ReturnType<typeof readImportSession>
+): boolean {
+  try { return !missingSourceMedia(readImportHistory(file, session) as Message[], srcHome) }
+  catch { return false }
+}
+
 function decideExistingByFile(from: string, to: string): ExistingDecision | 'read-failed' {
   try {
     const t = readImportSession(to), s = readImportSession(from)
