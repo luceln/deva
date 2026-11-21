@@ -29,11 +29,26 @@ function walk(dir, out = []) {
 const files = walk(ROOT)
 info('扫描文件数', String(files.length))
 
-// preload 里 invoke/send 的通道名
-const preloadSrc = fs.readFileSync(path.join(ROOT, 'preload', 'index.ts'), 'utf8')
+/*
+ * preload 里 invoke/send 的通道名。
+ *
+ * **必须扫整个 `preload/` 目录，不能只读 `index.ts`**：二开通道已经拆到 `import.ts` /
+ * `worktree.ts` 等文件里（拆分本身是为了减少上游合并冲突）。只读 index.ts 会静默漏掉这些，
+ * 于是「preload 能调、主进程没实现」这类最危险的漂移在拆分后**再也查不出来**——
+ * 脚本仍然 exit 0，但它已经没在看那部分了。
+ */
+const PRELOAD_DIR = path.join(ROOT, 'preload')
+const preloadFiles = fs
+  .readdirSync(PRELOAD_DIR)
+  .filter((f) => f.endsWith('.ts') && !f.endsWith('.d.ts'))
+  .map((f) => path.join(PRELOAD_DIR, f))
 const invoked = new Set()
-for (const m of preloadSrc.matchAll(/ipcRenderer\.(?:invoke|send)\(\s*'([^']+)'/g)) invoked.add(m[1])
-for (const m of preloadSrc.matchAll(/ipcRenderer\.(?:invoke|send)\(\s*`([^`$]+)`/g)) invoked.add(m[1])
+for (const f of preloadFiles) {
+  const preloadSrc = fs.readFileSync(f, 'utf8')
+  for (const m of preloadSrc.matchAll(/ipcRenderer\.(?:invoke|send)\(\s*'([^']+)'/g)) invoked.add(m[1])
+  for (const m of preloadSrc.matchAll(/ipcRenderer\.(?:invoke|send)\(\s*`([^`$]+)`/g)) invoked.add(m[1])
+}
+info('preload 文件数', String(preloadFiles.length) + ' ' + preloadFiles.map((f) => path.basename(f)).join(', '))
 info('preload 声明的通道数', String(invoked.size))
 
 // 主进程 handler 注册的通道名

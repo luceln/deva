@@ -27,7 +27,9 @@ const path = require('path')
 
 const REPO = path.resolve(__dirname, '..', '..')
 const PANE = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'WorktreePane.tsx')
-const MSG = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'i18n', 'messages.ts')
+// 词条不再从 `messages.ts` 的文本里抠：二开词条已搬到 `i18n/fork.ts`（由 messages.ts 深合并），
+// 扫文本会在拆分后静默失效（「找不到 block」→ 报红，或更坏：同名子串还在→假 PASS）。改读运行时值。
+const { readI18n, checkKeys } = require('./lib/i18n-source.cjs')
 
 const passes = []
 const problems = []
@@ -60,13 +62,19 @@ const read = (p) => {
 }
 
 const pane = read(PANE)
-const msg = read(MSG)
 if (pane === null) bad('G0 读得到 WorktreePane.tsx', PANE)
-if (msg === null) bad('G0 读得到 messages.ts', MSG)
+
+/** i18n 词条（运行时值）。读失败给 null，依赖它的检查会如实报红。 */
+let i18n = null
+try {
+  i18n = readI18n()
+} catch (e) {
+  bad('G0 读得到 i18n 词条', String(e && e.message))
+}
 
 const BLOCKERS = ['target-not-set', 'source-missing', 'source-branch-changed', 'installing']
 
-if (pane !== null && msg !== null) {
+if (pane !== null && i18n !== null) {
   // ── G1：合并按钮的 disabled 绑 mergeGate.mayMerge ──
   /*
    * 锚点不能写死成某个占位字符串：`onNotWired('merge')` 只在按钮**还没接上**时存在，
@@ -146,39 +154,17 @@ if (pane !== null && msg !== null) {
     bad('G3 BLOCKER_KEY 有 4 个 key', `实际 ${keyNames.length}`)
   } else {
     const flat = keyNames.map((k) => k.replace('cf.wt.merge.blocker.', ''))
-    // 取中英各一个 blocker 块：`blocker: {` 之后到配对的 `}` 之前。
-    const blockerBlocks = []
-    const reB = /blocker:\s*\{/g
-    let mb
-    while ((mb = reB.exec(msg)) !== null) {
-      let depth = 0
-      for (let i = mb.index + mb[0].length - 1; i < msg.length; i++) {
-        if (msg[i] === '{') depth++
-        else if (msg[i] === '}') {
-          depth--
-          if (depth === 0) {
-            blockerBlocks.push(msg.slice(mb.index, i + 1))
-            break
-          }
-        }
-      }
-    }
-    if (blockerBlocks.length < 2) {
-      bad('G3 找得到中英两个 blocker 块', `只找到 ${blockerBlocks.length} 个`)
-    } else {
-      const missing = []
-      for (const n of flat) {
-        // 每个块里都要有一条 `n: '...'`，且键名精确（`installingRenamed:` 不算）。
-        const re = new RegExp(`(?<![\\w$])${n}:\\s*'([^']*)'`, 'g')
-        for (const [i, blk] of blockerBlocks.entries()) {
-          const hits = [...blk.matchAll(re)]
-          if (hits.length !== 1) missing.push(`${n} 在第 ${i + 1} 个块里 ${hits.length} 条`)
-          else if (hits[0][1].trim().length === 0) missing.push(`${n} 在第 ${i + 1} 个块里是空串`)
-        }
-      }
-      if (missing.length > 0) bad('G3 四个 blocker 中英文案各一条且非空', missing.join('、'))
-      else ok('G3 四个 blocker 中英文案各一条且非空', `${flat.join(', ')}（中英两块各一条）`)
-    }
+    /*
+     * 读运行时值：每个 blocker key 必须在**所有语言**里都存在且非空。
+     *
+     * 原实现靠两个文本特征：`blocker: {` 出现两次（中英各一块）、每块里 `n: '…'` 恰好一条。
+     * 那套判据绑死了「词条住在同一个文件、中英各写一块、缩进形状不变」。词条搬进 fork.ts、
+     * 或上游调整了字典嵌套，就会误报「找不到 block」。改为按 key 取值后，语义反而更准：
+     * 「四个 blocker 在每种语言里各有一条且非空」。
+     */
+    const r = checkKeys(keyNames)
+    if (!r.ok) bad('G3 四个 blocker 中英文案各一条且非空', r.detail)
+    else ok('G3 四个 blocker 中英文案各一条且非空', `${flat.join(', ')}（${i18n.locales.join('/')} 各一条）`)
   }
 
   // ── G4：dirtyCount 三态分别渲染 ──
@@ -196,8 +182,9 @@ if (pane !== null && msg !== null) {
     const nullK = pane.match(/dirtyCount\s*===\s*null[\s\S]{0,200}?t\('(cf\.wt\.\w+)'\)/)
     const cleanK = pane.match(/dirtyClean/)
     if (nullK && cleanK) {
-      const zeroLiteral = msg.includes('dirtyClean:')
-      if (!zeroLiteral) bad('G4 null 与 0 用不同词条', 'dirtyClean 词条不存在')
+      // 读运行时值判断 `cf.wt.dirtyClean` 是否存在（原来在 messages.ts 文本里找 `dirtyClean:`）
+      const zeroLiteral = i18n.locales.every((loc) => Object.hasOwn(i18n.entry('cf.wt.dirtyClean') ?? {}, loc))
+      if (!zeroLiteral) bad('G4 null 与 0 用不同词条', 'cf.wt.dirtyClean 词条不存在')
       else ok('G4 null 与 0 用不同词条', `null → ${nullK[1]}，0 → cf.wt.dirtyClean`)
     }
   }

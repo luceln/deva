@@ -20,11 +20,13 @@ const bad = (what, detail) => problems.push(`${what} —— ${detail}`)
 
 const REPO = path.resolve(__dirname, '..', '..')
 const PANE = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'ImportPane.tsx')
-const MSG = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'i18n', 'messages.ts')
+// 词条不再从 `messages.ts` 的文本里抠：二开词条已搬到 `i18n/fork.ts`（由 messages.ts 深合并），
+// 扫文本会在拆分后静默失效。改读运行时值，见 lib/i18n-source。
+const { readI18n, checkKeys } = require('./lib/i18n-source.cjs')
 const CSS = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'redesign.css')
 
 const pane = fs.readFileSync(PANE, 'utf8')
-const msg = fs.readFileSync(MSG, 'utf8')
+const i18n = readI18n()
 const css = fs.readFileSync(CSS, 'utf8')
 
 // ── A. 源码形状 ────────────────────────────────────────────────────
@@ -74,19 +76,31 @@ const css = fs.readFileSync(CSS, 'utf8')
   notesIt ? ok('A7 rekeyed 进了密钥行说明（成功面板补一句）') : bad('A7 rekeyed 进密钥行说明', '没找到 rekeyed 的 note push')
 }
 {
-  // 已移除的 reason 不得再用
-  const stale = /secrets-rekey-failed/.test(pane) || /secrets-rekey-failed/.test(msg)
+  /*
+   * 已移除的 reason 不得再用。
+   *
+   * 词条侧改为查运行时值：这个 key 若还在任何语言里，`entry()` 就会返回它。
+   * （原实现扫 `messages.ts` 文本，词条搬走后会误判为「已移除」——正好把这条检查变成假 PASS。）
+   */
+  const inPane = /secrets-rekey-failed/.test(pane)
+  const inI18n = i18n.locales.filter((loc) => Object.hasOwn(i18n.entry('settings.import.secretGroup.secretsRekeyFailed') ?? {}, loc)
+    || /secrets-rekey-failed/.test(Object.keys(i18n.locale(loc)).join(',')))
+  const stale = inPane || inI18n.length > 0
   !stale
     ? ok('A8 不再引用已移除的 reason secrets-rekey-failed')
-    : bad('A8 secrets-rekey-failed', '仍出现在源码 / 词条里')
+    : bad('A8 secrets-rekey-failed', `源码里=${inPane}，词条里=${inI18n.join('/') || '无'}`)
 }
 {
-  // 中英双语各一套
-  const zh = /unrecoverable:\s*\{\s*title:/.test(msg)
-  const enCount = (msg.match(/goSettings:/g) || []).length
-  zh && enCount === 2
-    ? ok('A9 unrecoverable 词条中英各一套')
-    : bad('A9 unrecoverable 词条', `zh=${zh} goSettings 出现 ${enCount} 次（应 2）`)
+  /*
+   * 中英双语各一套。
+   *
+   * 原实现靠两个文本特征：`unrecoverable: { title:` 出现、`goSettings:` 恰好 2 次（中英各一）。
+   * 改为按 key 查运行时值——每个语言都必须有 `unrecoverable.title` 与 `goSettings` 两个词条。
+   * 语义等价（「中英各一套」），但不再依赖词条住在哪个文件、也不依赖缩进/换行等文本形状。
+   */
+  const r = checkKeys(['settings.import.unrecoverable.title', 'settings.import.unrecoverable.goSettings'])
+  if (!r.ok) bad('A9 unrecoverable 词条中英各一套', r.detail)
+  else ok('A9 unrecoverable 词条中英各一套', `${i18n.locales.join('/')} 各一套`)
 }
 {
   // 字号只用 12px / 13px（规范），不引入 11.5/12.5
@@ -149,6 +163,14 @@ async function runtime() {
     if (JSON.stringify(a) !== JSON.stringify(b))
       throw new Error(`${m}（期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}）`)
   }
+  /*
+   * SecretsStat 的夹具。
+   *
+   * 必须覆盖该类型的**全部必填字段**：`secretsRow` 会读 `pluginManaged` / `failed` / `rekeyed`
+   * 等每一栏，漏一个就是 `Cannot read properties of undefined (reading 'length')`——
+   * 看着像功能坏了，其实只是夹具没跟上类型（上游后来又加了 `pluginManaged`）。
+   * 这里是该类型的完整空值，**新增字段时这份夹具要跟着补**。
+   */
   const st = (patch) => ({
     copied: [],
     skipped: [],
@@ -157,6 +179,8 @@ async function runtime() {
     invalid: [],
     unrecoverable: [],
     rekeyed: [],
+    pluginManaged: [],
+    failed: [],
     ...patch
   })
 
