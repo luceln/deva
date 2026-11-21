@@ -107,7 +107,13 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   'target-config-unreadable': 'settings.import.reason.targetConfigUnreadable',
   'link-failed': 'settings.import.reason.linkFailed',
   // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串含本机绝对路径，只进后台日志。
-  'target-write-failed': 'settings.import.reason.targetWriteFailed'
+  'target-write-failed': 'settings.import.reason.targetWriteFailed',
+  // 会话这一轮还在进行、历史被锁定：这次**没导**，但磁盘一点没动，聊完重试就能补上。
+  // 不写成「失败」——写成失败会让人以为数据丢了、要去手工补救。
+  'session-history-locked': 'settings.import.reason.sessionHistoryLocked',
+  // 会话引用的附件在源里存在、目标还没有：主档暂不发布，避免带进来一个引用不到附件的会话。
+  // 与「源里就没有」不同，用户要做的是确认附件是否完整 / 等附件导完再重试。
+  'session-media-missing': 'settings.import.reason.sessionMediaMissing'
 }
 
 /**

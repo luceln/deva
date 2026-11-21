@@ -919,7 +919,13 @@ const zhCN: MessageTree = {
         secretsWriteFailed: '密钥没能写入本地密钥文件（权限或磁盘异常）',
         secretsStoreUnreadable:
           '本地密钥文件本身读不出来（内容损坏或被占用），为避免覆盖掉里面的其它密钥，这次一条都没写。请检查 secrets.json',
-        avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用'
+        avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用',
+        // 会话这一轮还在进行、历史被锁定：说明「不是失败、稍后会补」，并给出下一步。
+        sessionHistoryLocked:
+          '这轮对话还在进行，历史暂时锁定，这次没有导入——数据没有丢，聊完再重新导入一次就会补上',
+        // 附件没准备好：主档先不发布，避免带进来一个打不开附件的会话。
+        sessionMediaMissing:
+          '这条会话的附件（图片、PDF 等）还没准备好，为避免导入后打不开附件，这条会话这次没有导入。请确认原版数据目录里的附件是否完整，或等附件导完后重新导入一次'
       },
       // 密钥行的附加说明（见 ImportPane 的 secretsRow）。{n} 是条数。
       secretNote: {
@@ -2829,7 +2835,11 @@ const en: MessageTree = {
         secretsWriteFailed: 'The key couldn’t be written to the local secrets file — check permissions or disk space',
         secretsStoreUnreadable:
           'The local secrets file itself can’t be read (corrupted or in use). Nothing was written so the other keys inside are not overwritten — check secrets.json',
-        avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable'
+        avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable',
+        sessionHistoryLocked:
+          'This conversation is still running, so its history is locked and nothing was imported this time. No data was lost — import again after that turn finishes and it will be picked up',
+        sessionMediaMissing:
+          'The attachments for this conversation (images, PDFs) aren’t ready yet. It was left out this time so you don’t end up with a conversation whose attachments can’t be opened. Check that the attachments exist upstream, or import again once they finish'
       },
       secretNote: {
         noEncryption: 'This machine can’t store keys — {n} to add by hand',

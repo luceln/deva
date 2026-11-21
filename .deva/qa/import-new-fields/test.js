@@ -498,6 +498,74 @@ ok('F4 英文同一屏只有一套插件术语（标签与明细都是 managed b
   assert(!/Owned by/.test(screen), `同一屏不该再出现旧说法 Owned by：${screen}`)
 })
 
+ok('G1 中文：历史锁定与会话附件缺失显示人话，不露出错误码', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({
+      top: {
+        // 失败清单里两条会话失败：一条历史仍在写、一条附件没就位
+        failures: [
+          { step: 'sessions', id: 'sess-locked', reason: 'session-history-locked' },
+          { step: 'sessions', id: 'sess-media', reason: 'session-media-missing' }
+        ]
+      }
+    })
+  )
+  const fails = q('.cf-imp__fails')
+  assert(fails, '失败清单没出现')
+  const reasons = [...fails.querySelectorAll('.cf-imp__reason')].map((n) => n.textContent ?? '')
+  const all = reasons.join('\n')
+  assert(!/session-history-locked/.test(all), `不该露出错误码：${all}`)
+  assert(!/session-media-missing/.test(all), `不该露出错误码：${all}`)
+
+  const locked = reasons.find((x) => /锁定/.test(x))
+  assert(locked, `缺「历史锁定」的人话：${JSON.stringify(reasons)}`)
+  // 关键语义：不是失败、数据没丢、聊完重试可补
+  assert(/没有丢/.test(locked), `要说清数据没丢：${locked}`)
+  assert(/不是失败|没有导入/.test(locked), `要说清这次只是没导：${locked}`)
+  assert(/聊完|重新导入/.test(locked), `要给出下一步：${locked}`)
+
+  const media = reasons.find((x) => /附件/.test(x))
+  assert(media, `缺「附件未就位」的人话：${JSON.stringify(reasons)}`)
+  assert(/重新导入|确认/.test(media), `要给出下一步：${media}`)
+  // 中文全角标点
+  assert(/，|。/.test(locked), `中文应用全角标点：${locked}`)
+  assert(!/[a-zA-Z]{2,}-[a-zA-Z]/.test(locked), `中文里不该有连字符码：${locked}`)
+})
+
+ok('G2 英文：同一组失败码说英文，且只有半角标点', async () => {
+  setLocale('en')
+  await runImport(
+    report({
+      top: {
+        failures: [
+          { step: 'sessions', id: 'sess-locked', reason: 'session-history-locked' },
+          { step: 'sessions', id: 'sess-media', reason: 'session-media-missing' }
+        ]
+      }
+    })
+  )
+  const fails = q('.cf-imp__fails')
+  assert(fails, '失败清单没出现')
+  const all = [...fails.querySelectorAll('.cf-imp__reason')].map((n) => n.textContent ?? '').join('\n')
+  assert(!/session-history-locked/.test(all), `英文下也不该露出错误码：${all}`)
+  assert(!/session-media-missing/.test(all), `英文下也不该露出错误码：${all}`)
+  assert(/No data was lost/.test(all), `英文该说清数据没丢：${all}`)
+  assert(/still running/.test(all), `英文该说清还在进行：${all}`)
+  for (const bad of ['，', '、', '：', '。']) {
+    assert(!all.includes(bad), `英文不该出现全角标点「${bad}」：${all}`)
+  }
+})
+
+ok('G3 未知码仍原样显示（没有为这两条把兜底吞掉）', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({ top: { failures: [{ step: 'sessions', id: 'x', reason: 'some-future-code' }] } })
+  )
+  const reasons = [...document.querySelectorAll('.cf-imp__reason')].map((n) => n.textContent ?? '')
+  assert(reasons.some((x) => x === 'some-future-code'), `未知码应原样显示：${JSON.stringify(reasons)}`)
+})
+
 ok('D1 英文环境下三项都说英文，且不出现 RPC 字段名', async () => {
   setLocale('en')
   await runSwap(
