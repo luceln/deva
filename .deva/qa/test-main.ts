@@ -401,7 +401,13 @@ async function scenarioFull(): Promise<void> {
   // 第一轮
   const r1 = await runOnce()
   info('progress 顺序', progressSteps.join(' → '))
-  check('进度：十步按序 + done', progressSteps.join(',') === 'providers,mcp,personas,personaEnabled,memories,skills,sessions,assoc,cache,done', progressSteps.join(','))
+  /*
+   * 顺序里 `assoc` 在 `sessions` **之前**（P2-7）。这不是笔误，也不能改回去：
+   * 会话主档会引用 media / checkpoints 等附件，必须先备好依赖再发布会话，
+   * 否则会留下「引用不到附件」的半成品会话（媒体被降级成「数据已丢失」，而它其实在源里）。
+   * 见 importer.ts 第 ⑦/⑧ 步的注释。
+   */
+  check('进度：十步按序 + done', progressSteps.join(',') === 'providers,mcp,personas,personaEnabled,memories,skills,assoc,sessions,cache,done', progressSteps.join(','))
 
   if ('error' in r1) {
     fail('run1 不该返回 error', JSON.stringify(r1))
