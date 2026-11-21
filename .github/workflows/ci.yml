@@ -115,3 +115,10 @@ jobs:
       # 「贴进去的图真的随插话交出去、失败时真的回到输入框」要浏览器，见 .deva/qa/insert-attach/。
       - name: 插话带附件
         run: node .deva/qa/check-insert-attachments.cjs
+
+      # 导入的密钥重加密：跨应用密文解不开时必须单独报、不能混进「跳过」或「失败」。
+      # 混进任何一栏用户都不知道要做什么，结果是下次发消息才发现「服务商连不上」。
+      # 这条脚本曾长期不在 CI 里，`ad9519c` 上就已经 10 PASS / 6 FAIL 红着没人发现
+      # （夹具漏了上游后加的 `pluginManaged` 必填字段，六条 B 断言全挂）——接进来才守得住。
+      - name: 导入密钥重加密
+        run: node .deva/qa/check-import-rekey.cjs
