@@ -24,6 +24,7 @@ import { indexRecovery } from './index-recovery-tests'
 import { swapIdentity } from './swap-identity-tests'
 import { swapBinding } from './swap-binding-tests'
 import { memoryReadFailure } from './memory-read-failure-tests'
+import { mcpOwnership } from './mcp-ownership-tests'
 import { importSkills } from '../../apps/desktop/src/main/importer-skills'
 import { importMemories } from '../../apps/desktop/src/main/importer-memory'
 import { importPersonas } from '../../apps/desktop/src/main/importer-personas'
@@ -6305,6 +6306,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   swapidentity: () => swapIdentity(eq),
   swapbinding: () => swapBinding(eq),
   memreadfail: () => memoryReadFailure(eq),
+  mcpown: () => mcpOwnership(eq),
   wtmerge: scenarioWorktreeMerge,
   memcond: scenarioMemCondense,
   dangclass: scenarioDanglingClassify,
