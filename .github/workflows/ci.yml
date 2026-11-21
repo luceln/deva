@@ -122,3 +122,19 @@ jobs:
       # （夹具漏了上游后加的 `pluginManaged` 必填字段，六条 B 断言全挂）——接进来才守得住。
       - name: 导入密钥重加密
         run: node .deva/qa/check-import-rekey.cjs
+
+      # 插话带附件的**运行时**验证：上面那条 check-insert-attachments 只查形状（签名 + 子串），
+      # 在 restoreToComposer 开头加一句 `if (attachments) return` 就能让它 19/0 全绿而功能已经废了。
+      # 这里在真 Chromium 里渲染真实 Composer，跑 6 条用例，其中第 6 条守的正是
+      # 「插话失败 / 回合被停时，附件必须回到输入框」（二开 50e2868 的验收点）。
+      # 实测：加那句短路后，只有这条用例会红（5/6），其余形状检查全绿——所以它不可替代。
+      - name: 安装 Chromium（插话带附件的运行时用例）
+        # puppeteer 的 postinstall 在 pnpm 下被跳过（不在 onlyBuiltDependencies），且
+        # ELECTRON_SKIP_BINARY_DOWNLOAD 会让 install 阶段少下东西，所以显式装一次。
+        # --install-deps 补 Linux 上 Chromium 需要的系统库（容器内需 root，runner 有 sudo）。
+        run: pnpm exec puppeteer browsers install chrome --install-deps
+
+      - name: 插话带附件（运行时）
+        run: |
+          node .deva/qa/insert-attach/build.cjs
+          node .deva/qa/insert-attach/run.cjs

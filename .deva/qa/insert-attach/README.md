@@ -8,12 +8,37 @@
 
 ## 跑法
 
+**CI 与本地同一条命令**（有退出码，绿红由程序判定）：
+
 ```bash
-node .deva/qa/insert-attach/build.cjs     # 产出 page.html（bundle.js + deva-stub.js + test.ts 内联）
-# 然后用浏览器打开 .deva/qa/insert-attach/page.html，看 document.title 与页面上的 __logs
+node .deva/qa/insert-attach/build.cjs   # 产出 page.html（bundle.js + deva-stub.js + test.ts 内联）
+node .deva/qa/insert-attach/run.cjs     # 用真 Chromium 加载它，跑完 6 条并按结果 exit 0 / 1
 ```
 
-`document.title` 形如 `DONE 6/6`；逐条结果在 `window.__logs` 里。
+`run.cjs` 会依次找浏览器：`DEVA_CHROME_PATH` 环境变量 → puppeteer 自带的 Chromium →
+常见系统路径（Windows / macOS / Linux）。找不到就 exit 1 并说明怎么装。
+
+也可以人工看：浏览器打开 `page.html`，`document.title` 形如 `DONE 6/6`，逐条结果在 `window.__logs`。
+
+CI 里由 `安装 Chromium` + `插话带附件（运行时）` 两步跑（见 `.github/workflows/ci.yml`）。
+
+> 为什么 CI 要显式装 Chromium：`puppeteer` 的 postinstall 在 pnpm 下被跳过（不在
+> `onlyBuiltDependencies`），且 workflow 里 `ELECTRON_SKIP_BINARY_DOWNLOAD=1`。
+> `pnpm exec puppeteer browsers install chrome --install-deps` 会连带补 Linux 上 Chromium 缺的系统库。
+
+## 这条守的语义（为什么不能只靠静态检查）
+
+**插话带的图不能因为回合被停 / 队友点了撤回就凭空消失。**
+
+用户贴那张图花的力气不比打字少，丢了只能重新截一次。这条是二开 `50e2868` 的验收点，
+也是全套检查里**唯一**覆盖它的地方：
+
+- `check-insert-attachments.cjs` 是**形状检查**——看签名有没有 `attachments`、函数体里有没有
+  调 `mergePicked` / `mergeDraftAttachments`。**在 `restoreToComposer` 开头写一句
+  `if (attachments) { return }`，它照样 19 PASS / 0 FAIL 全绿**，而功能已经废了。
+- 本目录的第 6 条用例从 **DOM** 断言（附件 chip 真的回来了），短路后必然红。
+
+实测（破坏验证）：加那句短路 → `5/6`，只有第 6 条红；复原 → `6/6`。
 
 ## 用例（6 条）
 
@@ -24,7 +49,7 @@ node .deva/qa/insert-attach/build.cjs     # 产出 page.html（bundle.js + deva-
 | 3 | 只有附件、没有正文也能插话，且 `insert` 的入参里带上了附件路径 |
 | 4 | 点「附加文件」也能加图（不只粘贴） |
 | 5 | 插话成功后输入框与附件条清空（不残留、不重复发） |
-| 6 | 插话失败（回合恰好结束）→ 正文与附件一起放回输入框 |
+| 6 | **插话失败（回合恰好结束）→ 正文与附件一起放回输入框** ← 见上一节，唯一能抓短路的一条 |
 
 ## 反向验证（改坏哪一处会让哪条红）
 

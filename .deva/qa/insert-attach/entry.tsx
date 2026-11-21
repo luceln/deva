@@ -1,7 +1,11 @@
 import { createRoot } from 'react-dom/client'
-import { Composer } from 'E:/deva/apps/desktop/src/renderer/src/redesign/Composer'
-import { I18nProvider } from 'E:/deva/apps/desktop/src/renderer/src/i18n/i18n'
-import { ToastProvider } from 'E:/deva/apps/desktop/src/renderer/src/components/ToastProvider'
+// 用相对路径，不要写死盘符：这份 entry 会被 build.cjs 从**任意工作区**（或 CI 的 checkout 目录）打包，
+// 写成 `E:/deva/...` 会从另一个 checkout 加载 Composer，而 react/react-dom 仍来自当前工作区 →
+// 页面里出现两份 React，`ReactCurrentDispatcher` 没初始化，渲染必崩
+// （报 "Cannot read properties of null (reading 'useState')"）。
+import { Composer } from '../../../apps/desktop/src/renderer/src/redesign/Composer'
+import { I18nProvider } from '../../../apps/desktop/src/renderer/src/i18n/i18n'
+import { ToastProvider } from '../../../apps/desktop/src/renderer/src/components/ToastProvider'
 
 let root = null
 let host = null
