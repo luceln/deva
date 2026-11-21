@@ -36,8 +36,30 @@ import { onSessionsChanged } from '../../apps/desktop/src/main/services/chat-bus
 import { sweepMedia } from '../../apps/desktop/src/main/services/media-store'
 import { sweepCheckpoints } from '../../apps/desktop/src/main/services/checkpoints'
 import { sweepSubagents } from '../../apps/desktop/src/main/services/subagent-store'
-import { writeMemory, listMemories, GLOBAL_SCOPE } from '../../apps/desktop/src/main/services/memory'
+import { writeMemory as writeMemoryV2, listMemories, formatMemoryLine, GLOBAL_SCOPE } from '../../apps/desktop/src/main/services/memory'
 import { readSecret } from '../../apps/desktop/src/main/services/secrets'
+
+/**
+ * 记忆写入的测试适配层，把「一句话正文」映成 v2 的 `MemoryInput`。
+ *
+ * 上游把记忆条目从「一条 content」改成「type + title + body」，索引预算只算标题那一行。测试里大量
+ * 「`writeMemory('xxx'.padEnd(120,'x'))` 先铺满」的写法是按 v1 语义写的（正文越长越占预算），
+ * 在 v2 下 title 超 60 字会被直接拒（`tooLong`），于是「先有 6 条」变成「0 条」，后续断言全错位。
+ *
+ * 这里保留各用例原本想表达的意图（铺 N 条、每条尽量占预算），只是把正文挪进 body、标题截到上限内：
+ * `title` 是正文的第一句（同 memory.ts 的 firstSentence），所以仍能按标题认出条目。
+ */
+function writeMemory(
+  content: string,
+  id?: string,
+  scope: Parameters<typeof writeMemoryV2>[2] = GLOBAL_SCOPE
+): ReturnType<typeof writeMemoryV2> {
+  const text = content.trim()
+  const first = text.match(/^.+?[。！？；!?;](?=\s|$|[^\d])/)?.[0] ?? text
+  const raw = first.replace(/[。；;，,、：:]+$/, '')
+  const title = raw.length <= 60 ? raw : `${raw.slice(0, 59)}…`
+  return writeMemoryV2({ type: 'user', title, body: text }, id, scope)
+}
 
 const HOME = process.env.TEST_HOME as string
 const APPDATA = process.env.TEST_APPDATA as string
@@ -840,25 +862,31 @@ async function scenarioMemIdem(): Promise<void> {
 
 async function scenarioBudget(): Promise<void> {
   fs.mkdirSync(SRC, { recursive: true })
-  // 目标先填到接近上限：全局 4000 字预算（含格式 "- [id] content"）
+  /*
+   * 目标先填到接近上限。
+   *
+   * v2 的预算是**索引**口径：每条只算 `- [id] 类型 · 标题` 那一行（正文不计，见 memory.ts 的
+   * memoryUsage / MEMORY_INDEX_BUDGET）。所以「铺满」要靠近 60 字上限的长标题，而不是长正文——
+   * 旧的 `.padEnd(250)` 正文在 v2 下根本不占预算，还会先被 MEMORY_TITLE_MAX 拒掉。
+   */
   const filler: string[] = []
-  for (let i = 0; i < 60; i++) {
-    const content = `既有记忆第${i}条-`.padEnd(250, 'x')
-    const r = writeMemory(content, undefined, GLOBAL_SCOPE)
+  for (let i = 0; i < 100; i++) {
+    const title = `既有记忆第${i}条-`.padEnd(58, 'x')
+    const r = writeMemoryV2({ type: 'user', title, body: '正文不占索引预算' }, undefined, GLOBAL_SCOPE)
     if (!r.ok) {
       info('预填到上限', `第 ${i} 条被拒：${r.code}`)
       break
     }
     filler.push(r.entry.id)
   }
-  const used = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+  const used = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
   info('预填后用量', `${used} / 4000`)
 
   writeJson(path.join(SRC, 'memory.json'), {
     version: 1,
     entries: [
-      { id: 'm_11111111', content: '这条应该被预算挡住-'.padEnd(250, 'y') },
-      { id: 'm_22222222', content: '这条也应被挡住-'.padEnd(250, 'z') }
+      { id: 'm_11111111', type: 'user', title: '这条应该被预算挡住-'.padEnd(58, 'y'), body: '' },
+      { id: 'm_22222222', type: 'user', title: '这条也应被挡住-'.padEnd(58, 'z'), body: '' }
     ]
   })
   const r = (await runOnce()) as Report
@@ -3001,14 +3029,16 @@ async function scenarioWorktreeBrief(): Promise<void> {
   check('A36-13：null 时不出现「手动合回 <branch>」的具体分支指引', !/手动合回 `/.test(nullTargetText), '')
 
   // ── 三段提示词都真的带上它（不是只有一处）──
-  const sys = P.systemPrompt(wt, [], [], [], brief)
+  // 上游把首参从工作区路径改成 dir: { root, home }（默认工作区）。这里只给 root。
+  const sys = P.systemPrompt({ root: wt, home: null }, [], [], [], brief)
   check('A36-14：systemPrompt 带上了边界说明', /独立工作区/.test(sys), '')
-  const sealed = P.sealedSystemPrompt(wt, [], [], [], undefined, brief)
+  const sealed = P.sealedSystemPrompt({ root: wt, home: null }, [], [], [], undefined, brief)
   check('A36-15：sealedSystemPrompt 带上了边界说明', /独立工作区/.test(sealed), '')
   const member = P.memberSystemPrompt({
     member: { sessionId: 's', name: 'm', origin: 'created', personaId: 'general', root: null, duty: '', addedAt: 0 },
     owner: 'Deva',
-    workspaceRoot: wt,
+    // 上游把 workspaceRoot 换成 dir: { root, home }（默认工作区功能）。这里只给 root。
+    dir: { root: wt, home: null },
     folder: 'x',
     personas: [],
     memory: [],
@@ -3017,7 +3047,7 @@ async function scenarioWorktreeBrief(): Promise<void> {
   })
   check('A36-16：memberSystemPrompt 带上了边界说明', /独立工作区/.test(member), '')
   // 不传 worktree 时不该出现（普通目录行为不变）
-  const plain = P.systemPrompt(wt, [], [], [])
+  const plain = P.systemPrompt({ root: wt, home: null }, [], [], [])
   check('A36-17：普通目录（不传 worktree）不含边界说明', !/独立工作区/.test(plain), '')
   // 既有那句仍在（spec：保留在前，追加在后）
   check('A36-18：既有「历史目录作废」那句仍在', /历史消息里出现过的其它目录一律作废/.test(sys), '')
@@ -3339,24 +3369,25 @@ async function scenarioWorktree(): Promise<void> {
   eq('A35：null 透传 null', SCOPE.projectMemoryRootOf(null), null)
 
   const marker = `A35-${Date.now()}`
-  const wrote = M.writeMemory(`${marker} 在 worktree 里写下的记忆`, undefined, {
-    kind: 'project',
-    root: memoryRoot!
-  })
+  const wrote = M.writeMemory(
+    { type: 'user', title: '在 worktree 里写下的记忆', body: `${marker} 在 worktree 里写下的记忆` },
+    undefined,
+    { kind: 'project', root: memoryRoot! }
+  )
   eq('A35 前置：写入成功', wrote.ok, true)
   // 主仓库会话读：必须立刻看到同一条（listMemories 每次读盘，无缓存）
   const fromPrimary = M.listMemories({ kind: 'project', root: repo })
   check(
     'A35：worktree 写入 → 主仓库立即可读',
-    fromPrimary.some((e) => e.content.includes(marker)),
-    JSON.stringify(fromPrimary.map((e) => e.content))
+    fromPrimary.some((e) => e.body.includes(marker)),
+    JSON.stringify(fromPrimary.map((e) => e.body))
   )
   // 反向：如果记忆根错用 workspaceRoot，读到的会是另一份（空）
   const wrongRoot = M.listMemories({ kind: 'project', root: wt })
   check(
     'A35 反向：直接用 worktree 路径当记忆根读不到（证明共享靠 memoryScopeRoot 而非路径巧合）',
-    !wrongRoot.some((e) => e.content.includes(marker)),
-    JSON.stringify(wrongRoot.map((e) => e.content))
+    !wrongRoot.some((e) => e.body.includes(marker)),
+    JSON.stringify(wrongRoot.map((e) => e.body))
   )
   // 清理：别把测试数据留在真实记忆里
   M.clearMemories({ kind: 'project', root: memoryRoot! })
@@ -4279,6 +4310,13 @@ async function scenarioInsertAttachments(): Promise<void> {
   const r2 = A.stageUploadedFile(img2, fs.statSync(img2).size)
   eq('前置：附件被判定为可读的图片', [r1.supported, r1.kind], [true, 'image'])
   eq('前置：第二张同样可读', [r2.supported, r2.kind], [true, 'image'])
+  /*
+   * 上游把插入消息的附件从「路径字符串」升级成结构化 `InsertAttachment`（path/name/kind/size，
+   * 见 shared/chat-protocol.ts 与 chat-inserts.ts）。渲染层因此不必再猜类型/大小——撤回与退回时
+   * 放回输入框的附件条能直接显示正确的图标与体积。这里的夹具跟着换成结构化形状。
+   */
+  const att1 = { path: img1, name: 'shot1.png', kind: 'image' as const, size: fs.statSync(img1).size }
+  const att2 = { path: img2, name: 'shot2.png', kind: 'image' as const, size: fs.statSync(img2).size }
 
   /*
    * 用 `markInsertableForTest` 直接摆出「有一轮在接受插入」的状态，而不是真跑一轮：
@@ -4292,12 +4330,12 @@ async function scenarioInsertAttachments(): Promise<void> {
   T.markInsertableForTest(sid, turnId)
 
   // ── ① 带附件插话能入队（协议有 attachments，insertMessage 接受）──
-  const ins = T.insertMessage({ sessionId: sid, text: '看这张截图', model, attachments: [img1] })
+  const ins = T.insertMessage({ sessionId: sid, text: '看这张截图', model, attachments: [att1] })
   info('插入结果', JSON.stringify(ins))
   eq('插话：带附件可以插入（不再因为只认正文而丢掉附件）', ins, { ok: true })
 
   // ── ② 无正文只有附件也可插入 ──
-  const ins2 = T.insertMessage({ sessionId: sid, text: '', model, attachments: [img2] })
+  const ins2 = T.insertMessage({ sessionId: sid, text: '', model, attachments: [att2] })
   eq('插话：只有附件、没有正文也能插入（截图 + 不打字是常见用法）', ins2, { ok: true })
 
   // 空 + 无附件仍拒
@@ -4310,11 +4348,11 @@ async function scenarioInsertAttachments(): Promise<void> {
 
   // ── ③ 待送达列表只列正文（附件不出现在文本里）──
   const pendingEv = events.filter((e) => e.event?.type === 'inserts')
-  const lastPending = pendingEv[pendingEv.length - 1]?.event as { pending?: string[] } | undefined
+  const lastPending = pendingEv[pendingEv.length - 1]?.event as { pending?: Array<{ text: string; attachments: string[] }> } | undefined
   info('inserts 事件', JSON.stringify(lastPending))
   eq(
-    '插话：inserts 事件的 pending 仍是纯正文数组（界面按它显示待送达，附件走另一条路）',
-    lastPending?.pending,
+    '插话：inserts 事件的 pending 仍是正文列表（附件另走一条路，界面按它显示待送达）',
+    lastPending?.pending?.map((p) => p.text),
     ['看这张截图', '']
   )
 
@@ -4326,15 +4364,16 @@ async function scenarioInsertAttachments(): Promise<void> {
     taken !== null && typeof taken.text === 'string' && Array.isArray(taken.attachments),
     JSON.stringify(taken)
   )
-  eq('插话：两条插话的正文合并', taken?.text, '看这张截图' + String.fromCharCode(10,10))
-  eq('插话：两条插话的附件都在', taken?.attachments, [img1, img2])
+  // 上游的 takeInserts 用 filter(Boolean) 跳过空正文：只有附件的那条不产生空段落
+  eq('插话：两条插话的正文合并', taken?.text, '看这张截图')
+  eq('插话：两条插话的附件都在', taken?.attachments?.map((a) => a.path), [img1, img2])
   eq('插话：取走后再取为 null', T.takeInserts(sid), null)
 
   // ── ⑤ 同一附件插两次只喂一次 ──
-  T.insertMessage({ sessionId: sid, text: 'a', model, attachments: [img1] })
-  T.insertMessage({ sessionId: sid, text: 'b', model, attachments: [img1] })
+  T.insertMessage({ sessionId: sid, text: 'a', model, attachments: [att1] })
+  T.insertMessage({ sessionId: sid, text: 'b', model, attachments: [att1] })
   const dedup = T.takeInserts(sid)
-  eq('插话：同一张图插两次只保留一份（重复喂给模型只是多花钱）', dedup?.attachments, [img1])
+  eq('插话：同一张图插两次只保留一份（重复喂给模型只是多花钱）', dedup?.attachments?.map((a) => a.path), [img1])
 
   // ── ⑥ 附件真的变成模型输入的一部分（复用普通发送那条链路）──
   const { part } = await A.buildAttachmentPart(img1, 'openai')
@@ -4346,10 +4385,10 @@ async function scenarioInsertAttachments(): Promise<void> {
   )
 
   // ── ⑦ 撤回：正文与附件一起退回 ──
-  T.insertMessage({ sessionId: sid, text: '撤回我', model, attachments: [img2] })
+  T.insertMessage({ sessionId: sid, text: '撤回我', model, attachments: [att2] })
   const withdrawn = T.takeInserts(sid)
   eq('撤回：正文回来了', withdrawn?.text, '撤回我')
-  eq('撤回：附件也回来了（不能只回正文）', withdrawn?.attachments, [img2])
+  eq('撤回：附件也回来了（不能只回正文）', withdrawn?.attachments?.map((a) => a.path), [img2])
 
   unsub()
   T.clearInsertableForTest(sid, turnId)
@@ -4367,10 +4406,10 @@ async function scenarioInsertAttachments(): Promise<void> {
   const ev2: Array<{ turnId: string; event: Record<string, unknown> }> = []
   const unsub2 = chatBus.onChatEvent((p) => ev2.push(p as never))
   T.markInsertableForTest(sid2, turnId2)
-  T.insertMessage({ sessionId: sid2, text: '带图的插话', model, attachments: [img1] })
+  T.insertMessage({ sessionId: sid2, text: '带图的插话', model, attachments: [att1] })
   // 撤回（等价于回合被停止时的 giveBack 载荷）：正文与附件都要在
   const back = T.takeInserts(sid2)
-  eq('中止/撤回：正文随附件一起退回', back, { text: '带图的插话', attachments: [img1] })
+  eq('中止/撤回：正文随附件一起退回', { text: back.text, attachments: back.attachments?.map((a) => a.path) }, { text: '带图的插话', attachments: [img1] })
   unsub2()
   T.clearInsertableForTest(sid2, turnId2)
 }
@@ -5348,9 +5387,7 @@ async function scenarioMemCondense(): Promise<void> {
   const { registerMemoryCondenseIpc } = await import(
     '../../apps/desktop/src/main/services/memory-condense-ipc'
   )
-  const { writeMemory, listMemories, GLOBAL_SCOPE, deleteMemory, replaceMemories } = await import(
-    '../../apps/desktop/src/main/services/memory'
-  )
+  const { deleteMemory, replaceMemories } = await import('../../apps/desktop/src/main/services/memory')
   const SEC = await import('../../apps/desktop/src/main/services/secrets')
   const T = require('./stub-electron.cjs')
   registerMemoryCondenseIpc()
@@ -5453,9 +5490,13 @@ async function scenarioMemCondense(): Promise<void> {
 
     // ── ② 模型不可用（三种原因各一条），且记忆一动不动 ──
     {
-      for (let i = 0; i < 6; i++) writeMemory(`第${i}条-`.padEnd(120, 'x'), undefined, GLOBAL_SCOPE)
+      for (let i = 0; i < 6; i++) {
+        const wr = writeMemory(`第${i}条-`.padEnd(120, 'x'), undefined, GLOBAL_SCOPE)
+        if (!wr.ok) info('PRELOAD-FAIL', `${i}:${(wr as { code?: string }).code}`)
+      }
       const n0 = listMemories(GLOBAL_SCOPE).length
-      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      info('PRELOAD', `n0=${n0}`)
+      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
 
       // (a) 没有默认模型
       setConfig({ models: { activeModelId: '', providers: [] } })
@@ -5501,14 +5542,14 @@ async function scenarioMemCondense(): Promise<void> {
        */
       await SEC.deleteSecret('qa-cond')
       replyJson = JSON.stringify({
-        entries: listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, content: e.content }))
+        entries: listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, type: e.type, title: e.title, body: e.body }))
       })
       r = (await invokeCondense()) as { ok: boolean; code?: string; freedSpace?: boolean }
       eq('不可用(e)：密钥 absent 不拦（本地无钥模型要走得通）', r.code === 'model-unavailable', false)
       eq('不可用(e)：确实跑进去了（ok=true）', r.ok, true)
       eq('不可用(e)：模型原样返回 → 没腾出空间', r.freedSpace, false)
 
-      const used1 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      const used1 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
       eq('不可用的几种都没改记忆（条数）', listMemories(GLOBAL_SCOPE).length, n0)
       eq('不可用的几种都没改记忆（字数）', used1, used0)
     }
@@ -5523,15 +5564,15 @@ async function scenarioMemCondense(): Promise<void> {
         if (r.ok) ids.push(r.entry.id)
       }
       const beforeEntries = listMemories(GLOBAL_SCOPE)
-      const usedBefore = beforeEntries.reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      const usedBefore = beforeEntries.reduce((n, e) => n + formatMemoryLine(e).length, 0)
       eq('成功：先有 6 条', beforeEntries.length, 6)
 
       useModel()
       await SEC.deleteSecret('qa-cond')
       replyJson = JSON.stringify({
         entries: [
-          { id: beforeEntries[0].id, content: '同主题要点一（已合并前三条）' },
-          { id: beforeEntries[3].id, content: '同主题要点二（已合并后三条）' }
+          { id: beforeEntries[0].id, type: 'user', title: '同主题要点一（已合并前三条）', body: '' },
+          { id: beforeEntries[3].id, type: 'user', title: '同主题要点二（已合并后三条）', body: '' }
         ]
       })
       const r = (await invokeCondense()) as {
@@ -5584,7 +5625,7 @@ async function scenarioMemCondense(): Promise<void> {
       useModel()
       await SEC.deleteSecret('qa-cond')
       // 原样返回（同 id 同内容）
-      replyJson = JSON.stringify({ entries: entries.map((e) => ({ id: e.id, content: e.content })) })
+      replyJson = JSON.stringify({ entries: entries.map((e) => ({ id: e.id, type: e.type, title: e.title, body: e.body })) })
       const r = (await invokeCondense()) as {
         ok: boolean
         freed?: number
@@ -5601,7 +5642,7 @@ async function scenarioMemCondense(): Promise<void> {
     // ── ⑤ 模型返回不可解析 → failed，且记忆不变 ──
     {
       const n0 = listMemories(GLOBAL_SCOPE).length
-      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
       useModel()
       replyJson = '这不是 JSON'
       const r = (await invokeCondense()) as { ok: boolean; code?: string; reason?: string }
@@ -5611,7 +5652,7 @@ async function scenarioMemCondense(): Promise<void> {
       eq('不可解析：记忆条数没变', listMemories(GLOBAL_SCOPE).length, n0)
       eq(
         '不可解析：记忆字数没变',
-        listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0),
+        listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0),
         used0
       )
     }
@@ -5630,9 +5671,9 @@ async function scenarioMemCondense(): Promise<void> {
        */
       replyJson = JSON.stringify({
         entries: [
-          { id: entries[0].id, content: '第 0 条已被模型精简' },
-          { id: target.id, content: '模型版本（不该出现在盘上）' },
-          { id: entries[2].id, content: '第 2 条已被模型精简' }
+          { id: entries[0].id, type: 'user', title: '第 0 条已被模型精简', body: '' },
+          { id: target.id, type: 'user', title: '模型版本（不该出现在盘上）', body: '' },
+          { id: entries[2].id, type: 'user', title: '第 2 条已被模型精简', body: '' }
         ]
       })
       // 请求到达、模型还没回结果的那段时间里，用户改了 target 的值
@@ -5648,8 +5689,8 @@ async function scenarioMemCondense(): Promise<void> {
       info('并发改值结果', JSON.stringify(r))
       const after = listMemories(GLOBAL_SCOPE)
       const kept = after.find((e) => e.id === target.id)
-      eq('并发改值：用户的值仍在（归纳结果不得覆盖）', kept?.content, userValue)
-      eq('并发改值：没有出现模型版本', after.some((e) => e.content === '模型版本（不该出现在盘上）'), false)
+      eq('并发改值：用户的值仍在（归纳结果不得覆盖）', kept?.body, userValue)
+      eq('并发改值：没有出现模型版本', after.some((e) => e.body === '模型版本（不该出现在盘上）'), false)
       /*
        * 第二批按契约改为**整轮拒绝**：不做「其余照常」的局部保全。
        * 局部保全要求写出的集合恰好等于「模型结果 ∪ 用户改动」，任何一处漏算都会静默丢条目
@@ -5658,7 +5699,7 @@ async function scenarioMemCondense(): Promise<void> {
       eq('并发改值：整轮拒绝（ok=false）', r.ok, false)
       eq('并发改值：原因码与超限/模型失败分开', (r as { code?: string }).code, 'concurrent-change')
       eq('并发改值：改动过的 id 被报出', (r as { changed?: string[] }).changed, [target.id])
-      eq('并发改值：其余两条也没被这次归纳改写', after.filter((e) => e.content.startsWith('第')).length, 0)
+      eq('并发改值：其余两条也没被这次归纳改写', after.filter((e) => e.body.startsWith('第')).length, 0)
     }
 
     // ── ⑦ P1-⑤：归纳等待期间用户删了某条 → 归纳结束后它仍是删除状态 ──
@@ -5673,20 +5714,20 @@ async function scenarioMemCondense(): Promise<void> {
        * 模型在用户删除**之前**读到了它，结果里仍带着这条。
        *
        * 两种回法都要覆盖，因为它们是两条不同的复活路径：
-       *  a) 原 id 回（`{ id: doomed.id, content: doomed.content }`）—— 旧代码的 id 集合过滤恰好挡住了；
+       *  a) 原 id 回（`{ id: doomed.id, title, body }`）—— 旧代码的 id 集合过滤恰好挡住了；
        *  b) **id 填 null**（模型把它当新条目 / 合并产物吐出，`parseEntries` 会分配新 id）——
        *     旧代码挡不住，已删除的内容会换个 id 复活。这是真正会漏的那条。
        */
       replyJson = JSON.stringify({
         entries: [
-          { id: entries[0].id, content: '第 0 条已被模型精简' },
-          { id: null, content: doomed.content },
-          { id: entries[2].id, content: '第 2 条已被模型精简' }
+          { id: entries[0].id, type: 'user', title: '第 0 条已被模型精简', body: '' },
+          { id: null, type: doomed.type, title: '复活：被删条目的内容', body: doomed.body },
+          { id: entries[2].id, type: 'user', title: '第 2 条已被模型精简', body: '' }
         ]
       })
       beforeReply = () => {
         const d = deleteMemory(doomed.id, GLOBAL_SCOPE)
-        info('并发删除：等待期间的用户删除', JSON.stringify({ removed: !!d.removed, written: d.written }))
+        info('并发删除：等待期间的用户删除', JSON.stringify({ removed: !!d.deleted, written: d.written }))
       }
       const r = (await invokeCondense()) as {
         ok: boolean
@@ -5697,13 +5738,13 @@ async function scenarioMemCondense(): Promise<void> {
       eq('并发删除：该条目仍是删除状态（不复活）', after.some((e) => e.id === doomed.id), false)
       eq(
         '并发删除：被删的内容没以任何 id 回到盘上（模型换新 id 吐回也不复活）',
-        after.some((e) => e.content === doomed.content),
+        after.some((e) => e.body === doomed.body),
         false
       )
       eq('并发删除：整轮拒绝（ok=false）', r.ok, false)
       eq('并发删除：原因码为 concurrent-change', (r as { code?: string }).code, 'concurrent-change')
       eq('并发删除：被删的 id 被报出', (r as { changed?: string[] }).changed, [doomed.id])
-      eq('并发删除：其余两条也没被这次归纳改写', after.filter((e) => e.content.startsWith('第')).length, 0)
+      eq('并发删除：其余两条也没被这次归纳改写', after.filter((e) => e.body.startsWith('第')).length, 0)
     }
 
     // ── ⑦b 同上，但模型按**原 id** 回那条已删除的条目 ──
@@ -5716,9 +5757,9 @@ async function scenarioMemCondense(): Promise<void> {
       await SEC.deleteSecret('qa-cond')
       replyJson = JSON.stringify({
         entries: [
-          { id: entries[0].id, content: '第 0 条已被模型精简' },
-          { id: doomed.id, content: doomed.content },
-          { id: entries[2].id, content: '第 2 条已被模型精简' }
+          { id: entries[0].id, type: 'user', title: '第 0 条已被模型精简', body: '' },
+          { id: doomed.id, type: doomed.type, title: doomed.title, body: doomed.body },
+          { id: entries[2].id, type: 'user', title: '第 2 条已被模型精简', body: '' }
         ]
       })
       beforeReply = () => {
@@ -5742,16 +5783,18 @@ async function scenarioMemCondense(): Promise<void> {
         clear: () => {
           for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
         },
+        // v2 的条目是 type + title + body：把这些用例里的一句「content」放进**正文**，
+        // 标题取整句（并发用例的句子都远短于 60 字上限），断言因此仍按 content 那一列比。
         write: (content: string) => {
-          const r = writeMemory(content, undefined, GLOBAL_SCOPE)
+          const r = writeMemoryV2({ type: 'user', title: content, body: content }, undefined, GLOBAL_SCOPE)
           if (!r.ok) throw new Error(`writeMemory failed: ${r.error}`)
           return r.entry.id
         },
         update: (id: string, content: string) => {
-          const r = writeMemory(content, id, GLOBAL_SCOPE)
+          const r = writeMemoryV2({ type: 'user', title: content, body: content }, id, GLOBAL_SCOPE)
           if (!r.ok) throw new Error(`updateMemory failed: ${r.error}`)
         },
-        list: () => listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, content: e.content })),
+        list: () => listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, content: e.body })),
         setReply: (json: string) => {
           replyJson = json
         },
@@ -5763,7 +5806,16 @@ async function scenarioMemCondense(): Promise<void> {
           deleteMemory(id, GLOBAL_SCOPE)
         },
         seed: (entries) => {
-          if (!replaceMemories(GLOBAL_SCOPE, entries)) throw new Error('seed failed')
+          // v1 形状（id + content）→ v2；标题取 content 前 60 字，正文原样
+          const v2 = entries.map((e) => ({
+            id: e.id,
+            type: 'user' as const,
+            title: e.content.length <= 60 ? e.content : `${e.content.slice(0, 59)}…`,
+            body: e.content,
+            createdAt: e.createdAt,
+            updatedAt: e.updatedAt
+          }))
+          if (!replaceMemories(GLOBAL_SCOPE, v2)) throw new Error('seed failed')
         },
         eq
       })

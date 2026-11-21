@@ -43,7 +43,7 @@ export async function memoryConcurrency(h: MemCondenseHooks): Promise<void> {
     h.clear()
     const a = h.write('A：用户原本写的内容')
     const b = h.write('B：另一条要点')
-    h.setReply(JSON.stringify({ entries: [{ id: a, content: 'A+B 合并后的版本' }] }))
+    h.setReply(JSON.stringify({ entries: [{ id: a, type: 'user', title: 'A+B 合并后的版本', body: '' }] }))
     h.setBeforeReply(() => {
       // 用户在这条上继续编辑
       h.update(a, 'A：用户刚改过的新内容')
@@ -69,7 +69,7 @@ export async function memoryConcurrency(h: MemCondenseHooks): Promise<void> {
     h.write('C：第一条')
     const doomed = h.write('D：将被用户删掉')
     h.write('E：第三条')
-    h.setReply(JSON.stringify({ entries: [{ id: null, content: 'D：将被用户删掉' }] }))
+    h.setReply(JSON.stringify({ entries: [{ id: null, type: 'user', title: 'D：将被用户删掉', body: 'D：将被用户删掉' }] }))
     h.setBeforeReply(() => h.remove(doomed))
     const r = await h.condense()
     h.setBeforeReply(null)
@@ -105,7 +105,7 @@ export async function memoryConcurrency(h: MemCondenseHooks): Promise<void> {
     h.write('I：同主题要点一')
     h.write('J：同主题要点二')
     h.write('K：同主题要点三')
-    h.setReply(JSON.stringify({ entries: [{ id: null, content: 'IJK：合并成一条同主题要点' }] }))
+    h.setReply(JSON.stringify({ entries: [{ id: null, type: 'user', title: 'IJK：合并成一条同主题要点', body: 'IJK：合并成一条同主题要点' }] }))
     const r = await h.condense()
     eq('memory clean: round succeeds', r.ok, true)
     const after = h.list()
@@ -120,18 +120,22 @@ export async function memoryConcurrency(h: MemCondenseHooks): Promise<void> {
      * 手改文件、旧版本数据、预算被调小，都会得到这种状态。所以这里直接落一份超限文件。
      */
     h.clear()
-    const entries = Array.from({ length: 15 }, (_, i) => ({
+    /*
+     * v2 的预算口径是**索引**（每条只算标题那一行，正文不计），所以「用长正文撑爆预算」这招在 v2 下
+     * 无效：15 条 × 约 80 字 ≈ 1200 字，离 4000 差得远。改用**条数**越过上限（MEMORY_MAX_ENTRIES = 100）：
+     * 盘上落 110 条，这正是「旧版本数据 / 手改文件」会产生的真实状态。
+     */
+    const entries = Array.from({ length: 110 }, (_, i) => ({
       id: `m_${String(i).padStart(8, '0')}`,
-      // 每条 290 字：15 条 ≈ 4500 字，越过 4000 的全局预算
-      content: `条目${i}：`.padEnd(290, 'w'),
+      content: `条目${i}：`.padEnd(40, 'w'),
       createdAt: i + 1,
       updatedAt: i + 1
     }))
     h.seed(entries)
-    h.setReply(JSON.stringify({ entries: entries.map((e) => ({ id: e.id, content: e.content })) }))
+    h.setReply(JSON.stringify({ entries: entries.map((e) => ({ id: e.id, type: 'user', title: e.content.slice(0, 60), body: e.content })) }))
     const r = await h.condense()
     eq('memory over limit: not committed', r.ok, false)
     eq('memory over limit: reason code is over-limit', r.ok ? null : r.code, 'over-limit')
-    eq('memory over limit: entries unchanged', h.list().length, 15)
+    eq('memory over limit: entries unchanged', h.list().length, 110)
   }
 }
