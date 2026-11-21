@@ -104,6 +104,15 @@ async function main() {
     reportEnv(`没有 ${path.relative(REPO, PAGE)}——先跑 node .deva/qa/insert-attach/build.cjs`)
   }
 
+  /*
+   * 界面语言：默认 zh-CN。
+   *
+   * 断言本身不依赖具体文案（test.ts 从词条表取当前 locale 的期望值），所以这个值只决定
+   * 「这次跑哪个语言」。设 DEVA_TEST_LOCALE=en 可以验证英文环境也过——CI 上专门跑一遍，
+   * 因为 GitHub runner 的系统语言是 en-US，历史 bug 正是「只在中文系统成立」。
+   */
+  const testLocale = process.env.DEVA_TEST_LOCALE || 'zh-CN'
+
   const puppeteer = require('puppeteer')
   const found = await findBrowser()
   if (!found) {
@@ -114,6 +123,7 @@ async function main() {
     )
   }
   console.log(`  browser: ${found.exe}（来自 ${found.from}）`)
+  console.log(`  locale: ${testLocale}`)
 
   let browser
   try {
@@ -121,7 +131,7 @@ async function main() {
       executablePath: found.exe,
       headless: true,
       // --no-sandbox 是 CI（容器内 root）跑 Chromium 必需的；--disable-dev-shm-usage 防 /dev/shm 太小
-      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+      args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu', `--lang=${testLocale}`]
     })
   } catch (e) {
     // 启动不了 = 环境问题（缺系统库、沙箱、权限），不是用例失败
@@ -132,13 +142,19 @@ async function main() {
   let envIssue = null
   try {
     const page = await browser.newPage()
+    // 浏览器 locale 的两层都设：--lang 影响 Chrome 自身（含 navigator.language），
+    // Accept-Language 影响 file:// 之外的内容协商。页面里还会再桩一次（deva-stub.js），
+    // 因为 --lang 依赖 Chrome 装了对应语言包，不保证生效。
+    await page.setExtraHTTPHeaders({ 'Accept-Language': testLocale })
     const pageErrors = []
     page.on('pageerror', (e) => pageErrors.push(String(e.message || e).slice(0, 300)))
     page.on('console', (m) => {
       if (m.type() === 'error') pageErrors.push('console: ' + m.text().slice(0, 300))
     })
 
-    await page.goto('file:///' + PAGE.split(path.sep).join('/'), { waitUntil: 'load', timeout: 60000 })
+    const url =
+      'file:///' + PAGE.split(path.sep).join('/') + `?locale=${encodeURIComponent(testLocale)}`
+    await page.goto(url, { waitUntil: 'load', timeout: 60000 })
 
     /*
      * 等 title 变成 `DONE x/y`。用例本身是异步的（挂载 → 粘贴 → 等附件条），

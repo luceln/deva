@@ -5,7 +5,17 @@ import { createRoot } from 'react-dom/client'
 // （报 "Cannot read properties of null (reading 'useState')"）。
 import { Composer } from '../../../apps/desktop/src/renderer/src/redesign/Composer'
 import { I18nProvider } from '../../../apps/desktop/src/renderer/src/i18n/i18n'
+import { messages } from '../../../apps/desktop/src/renderer/src/i18n/messages'
 import { ToastProvider } from '../../../apps/desktop/src/renderer/src/components/ToastProvider'
+
+/**
+ * 把词条表交给 `test.ts`：断言按**当前 locale** 取期望文案，不再写死中文字面量。
+ *
+ * 写死中文会让整套用例只在中文系统成立——GitHub runner 的 `navigator.language` 是
+ * en-US，界面渲染英文，断言全挂（`1 attachments go with it`、找不到「附加文件」按钮）。
+ * 这不是环境问题，是断言本身脆。
+ */
+window.__messages = messages
 
 let root = null
 let host = null

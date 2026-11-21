@@ -158,7 +158,7 @@ jobs:
       # 不用手写 apt 包名列表——deb 的依赖由 apt 自动解析，正好绕开 Ubuntu 24.04 的 t64 改名坑：
       # `apt-get install libasound2` 在 24.04 上会失败（它已变成 virtual package，只有 libasound2t64
       # 提供实现），但作为 deb 的依赖时 apt 会自动挑到 libasound2t64，所以不用管包名。
-      # 也不用 `chromium-browser`：24.04 上那是 snap 过渡包，装完也用不了。
+      # 也不用 `chromium-browser`：24.04 上是 snap 过渡包，装完也用不了。
       - name: 插话带附件（运行时，兜底装浏览器）
         id: insert-attach-fallback
         if: steps.insert-attach.outputs.code == '2'
@@ -169,10 +169,29 @@ jobs:
           sudo apt-get install -y /tmp/google-chrome.deb
           DEVA_CHROME_PATH=/usr/bin/google-chrome node .deva/qa/insert-attach/run.cjs
 
+      # 英文环境再跑一遍（排在兜底之后：主步骤万一因环境没跑成，等兜底把浏览器装好再跑这条）。
+      #
+      # 这条不是重复劳动：这套用例曾经**只在中文系统成立**——断言写死了「附加文件」
+      # 和含「附件」二字的说明文案，而 GitHub runner 的 navigator.language 是 en-US，
+      # 界面渲染英文（"Attach file" / "1 attachments go with it"），两条用例必红。
+      # 现在断言改成从词条表取当前 locale 的期望值，中英文都能跑；这一步就是守那个性质：
+      # 谁再把文案写死回断言里，这里立刻红。
+      - name: 插话带附件（运行时，英文环境）
+        run: |
+          set +e
+          DEVA_TEST_LOCALE=en node .deva/qa/insert-attach/run.cjs
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            echo "::error::插话带附件用例在英文环境未执行——环境里没有可用浏览器，这不代表代码有问题"
+            exit 1
+          fi
+          exit "$code"
+
       # 兜底也救不回来时，必须明确说「用例没跑」，不能让它看起来像「用例失败」。
-      # 条件是「主步骤报了环境问题」且「兜底步骤真的失败了」——兜底成功就不该再报错。
+      # 条件是「主步骤报了环境问题」且「兜底步骤确实没成功」——兜底成功就不该再报错。
       - name: 插话带附件（环境问题汇总）
-        if: steps.insert-attach.outputs.code == '2' && failure()
+        if: steps.insert-attach.outputs.code == '2' && steps.insert-attach-fallback.outcome != 'success'
         run: |
           echo "::error::插话带附件用例未执行——连兜底装浏览器都失败，这不是代码问题，请检查 CI 环境"
           exit 1

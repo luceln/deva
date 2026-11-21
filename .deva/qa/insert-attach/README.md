@@ -27,11 +27,42 @@ node .deva/qa/insert-attach/run.cjs     # 用真 Chromium 加载它，跑完 6 �
 
 退出码 2 的输出全部以 `ENV` 开头，并明确写「这是环境问题，不是代码问题」。CI 里会被转成 `::error::` / `::warning::`，不会伪装成用例失败。
 
+### 语言：断言不写死文案
+
+**这套用例曾经只在中文系统成立。** 断言里写死了 `'附加文件'` 和「说明文案里含『附件』二字」，而 GitHub runner 的 `navigator.language` 是 `en-US`，`I18nProvider` 会渲染英文，于是 CI 上：
+
+```
+FAIL 回合进行中：附件条上出现「随这条插话带进去」的说明 → 说明文案不对：1 attachments go with it
+FAIL 回合进行中：点「附加文件」也能加图（不只粘贴） → 找不到「附加文件」按钮
+```
+
+现在断言改成**从词条表取当前 locale 的期望值**再比（`test.ts` 的 `t()` 读 `window.__messages`，locale 取 `document.documentElement.lang`）。不再依赖任何具体文案，中英文都能跑，也不会因为改文案而静默失效。
+
+`deva-stub.js` 把语言钉成 `zh-CN`（config 桩 + `navigator.language` + 清 localStorage 三层），让本地与 CI 跑同一个界面语言；`?locale=en` 可切到英文。
+
+`run.cjs` 支持 `DEVA_TEST_LOCALE`，CI 上中英文各跑一遍：
+
+```bash
+node .deva/qa/insert-attach/run.cjs                    # zh-CN（默认）
+DEVA_TEST_LOCALE=en node .deva/qa/insert-attach/run.cjs # 英文环境
+```
+
+英文那一步是**守「断言不依赖文案」这个性质**的：谁再把中文写死回断言里，它立刻红。
+
+实测两种语言都 6/6，且界面确实渲染成了对应语言（不是碰巧）：
+
+| locale | `cf.attach` 实际渲染 | 说明文案实际渲染 |
+|---|---|---|
+| `zh-CN` | `附加文件` | `1 个附件也会一起带进去` |
+| `en` | `Attach file` | `1 attachments go with it` |
+
 ### 浏览器从哪来
 
 `run.cjs` 依次找：`DEVA_CHROME_PATH` 环境变量 → puppeteer 自带的 Chromium → 常见系统路径（Linux `/usr/bin/google-chrome` 等 / Windows / macOS）。都没有就 exit 2 并说明怎么装。
 
 CI **不需要装浏览器**：`ubuntu-latest`（24.04）镜像预装 Google Chrome 157.0.8103.78（与 puppeteer 25.18.1 要求的版本一致）和 Chromium 157，候选链会命中 `/usr/bin/google-chrome`。若哪天真没有，workflow 有一步兜底：装 Google 官方 deb 再用 `DEVA_CHROME_PATH` 指过去重跑。
+
+**`/usr/bin/google-chrome` 已在 CI 实测可用**：日志显示 `browser: /usr/bin/google-chrome（来自 系统安装）`，Chrome 正常启动、用例正常跑完——不需要额外装系统库。runner-images 的 `install-google-chrome.sh` 里也设了 `CHROME_BIN=/usr/bin/google-chrome`，这个路径是它自己保证的。
 
 > 曾经这里跑 `puppeteer browsers install chrome --install-deps`，在 CI 上必红：
 > `--install-deps` 要装系统库、需要 root，而 runner 默认不是 root，报
