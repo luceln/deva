@@ -6,6 +6,7 @@ import { historyLocked } from './services/chat-state'
 import { backupBroken, inspectTarget } from './importer-target'
 import { decideExisting, sourceTail, type ExistingDecision } from './importer-session-merge'
 import { writeFileAtomic } from './services/atomic-write'
+import { readImportSession, readImportHistory } from './importer-session-history'
 import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, writeFailureReason } from './importer-source-dir'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
@@ -193,7 +194,8 @@ export function importSessions(
      * 行数与 pointer.count 对不上，加载缺段；报告里还是「compacted 成功、零失败」。
      * 主文件没更新时，它引用的历史必须原样不动；要不要替换历史由主文件的决策统一决定（见 D2/D3）。
      */
-    if (stat.copied.includes(id) || stat.updated.includes(id)) copyCompacted(srcDir, dstDir, safe, stat, names)
+    // Existing sessions own their compacted bytes; never copy source JSONL over a retained target pointer.
+    if (stat.copied.includes(id)) copyCompacted(srcDir, dstDir, safe, stat, names)
   }
   return stat
 }
@@ -210,31 +212,10 @@ export function importSessions(
  * 用户看到的是「跳过」，而真相是「这条根本没比对过」。
  */
 function decideExistingByFile(from: string, to: string): ExistingDecision | 'read-failed' {
-  let targetRaw: string
   try {
-    targetRaw = readFileSync(to, 'utf8')
-  } catch {
-    return 'read-failed'
-  }
-  let sourceRaw: string
-  try {
-    sourceRaw = readFileSync(from, 'utf8')
-  } catch {
-    return 'read-failed'
-  }
-  let target: { messages?: unknown }
-  let source: { messages?: unknown }
-  try {
-    target = JSON.parse(targetRaw) as { messages?: unknown }
-  } catch {
-    return 'read-failed'
-  }
-  try {
-    source = JSON.parse(sourceRaw) as { messages?: unknown }
-  } catch {
-    return 'read-failed'
-  }
-  return decideExisting(target, source)
+    const t = readImportSession(to), s = readImportSession(from)
+    return decideExisting({ messages: readImportHistory(to, t) }, { messages: readImportHistory(from, s) })
+  } catch { return 'read-failed' }
 }
 
 /**
@@ -253,34 +234,12 @@ function decideExistingByFile(from: string, to: string): ExistingDecision | 'rea
  * 避免的事，这里同样不能回退。
  */
 function appendSourceTail(from: string, to: string): boolean {
-  let targetRaw: string
-  try {
-    targetRaw = readFileSync(to, 'utf8')
-  } catch {
-    return false
-  }
-  let sourceRaw: string
-  try {
-    sourceRaw = readFileSync(from, 'utf8')
-  } catch {
-    return false
-  }
-  let target: { messages?: unknown; [key: string]: unknown }
-  let source: { messages?: unknown }
-  try {
-    target = JSON.parse(targetRaw) as { messages?: unknown; [key: string]: unknown }
-  } catch {
-    return false
-  }
-  try {
-    source = JSON.parse(sourceRaw) as { messages?: unknown }
-  } catch {
-    return false
-  }
-  const tail = sourceTail(target, source)
+  const t = readImportSession(to), s = readImportSession(from)
+  const tail = sourceTail({ messages: readImportHistory(to, t) }, { messages: readImportHistory(from, s) })
   if (!tail || !tail.length) return false
-  const merged = [...(Array.isArray(target.messages) ? target.messages : []), ...tail]
-  writeFileAtomic(to, JSON.stringify({ ...target, messages: merged }, null, 2))
+  // Keep the target's compacted bytes and pointer. Only append beyond its complete history.
+  const merged = [...t.messages, ...tail]
+  writeFileAtomic(to, JSON.stringify({ ...t, messages: merged }, null, 2))
   return true
 }
 

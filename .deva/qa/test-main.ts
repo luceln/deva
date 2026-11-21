@@ -18,7 +18,7 @@ import { runImport } from '../../apps/desktop/src/main/importer'
 import { canImport, upstreamHome } from '../../apps/desktop/src/main/importer-gate'
 import { acquireLock, isLockLive, readLockPid, releaseLock, LOCK_FILE } from '../../apps/desktop/src/main/importer-lock'
 import { importSessions } from '../../apps/desktop/src/main/importer-sessions'
-import { importActive } from './import-history-tests'
+import { importActive, importHistoryConflict } from './import-history-tests'
 import { importSkills } from '../../apps/desktop/src/main/importer-skills'
 import { importMemories } from '../../apps/desktop/src/main/importer-memory'
 import { importPersonas } from '../../apps/desktop/src/main/importer-personas'
@@ -5246,6 +5246,8 @@ async function scenarioSessionSync(): Promise<void> {
     const early = [msg('user', '很早的一句'), msg('assistant', '很早的回')]
     const summary = msg('user', '⟦deva:compaction⟧ 之前的对话摘要')
     fs.writeFileSync(path.join(dstChats, jsonl), `${early.map((m) => JSON.stringify(m)).join('\n')}\n`)
+    // Both pointers must reference real history; the old tail-only comparison masked this missing source fixture.
+    fs.writeFileSync(path.join(srcChats, jsonl), `${early.map((m) => JSON.stringify(m)).join('\n')}\n`)
     const shared = [msg('user', '共同第一句'), msg('assistant', '共同回一')]
     const cut = early.length
     // 目标：本地改过标题与模型，且带着自己的压缩边界
@@ -6252,6 +6254,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   plugmgr: scenarioPluginManaged,
   sessync: scenarioSessionSync,
   importactive: () => importActive(eq),
+  importhistory: () => importHistoryConflict(eq),
   wtmerge: scenarioWorktreeMerge,
   memcond: scenarioMemCondense,
   dangclass: scenarioDanglingClassify,
