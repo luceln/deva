@@ -189,6 +189,7 @@ comm -23 <(git ls-tree -r dev --name-only | sort) <(git ls-files | sort)
 | 12 | **跨应用密钥重加密** | `secret-rekey.ts`、`resources/secret-rekey-helper.cjs` | ❌ | 用真 Electron 二进制（`DEVA_ELECTRON_BIN`） |
 | 13 | **插入消息带附件** | `chat-inserts.ts`、`shared/chat-protocol.ts` 的 `InsertAttachment` | ✅ 上游本轮新增 | 保住 50e2868 验收点：**回合被停/撤回时附件跟着回输入框** |
 | 14 | **品牌串整体** | 全仓 139 行（`git grep -c` 逐文件计数之和） | ❌ | 见「自己发版前必须改的」；`~/.deva-plus`、`appId`、`productName` 三处**不可参数化** |
+| 15 | **preload 形状护栏的覆盖范围** | `.deva/qa/check-preload-shape.cjs` 的 `BASELINE` | ❌ | 24 个命名空间里只有 `import` / `worktree` / `window` 三个给了**具体方法清单**，其余 21 个是 `null`（只守「命名空间存在」）。**新增二开独有方法时必须把该命名空间从 `null` 改成清单**，否则该方法将来被删不会有人发现。详见脚本头部「覆盖盲区」一段 |
 
 **核对结论记在提交信息里**：哪几项核对过、哪几项不适用、哪几项有变化。下次合并的人（可能是未来的你）靠它判断有没有漏。
 

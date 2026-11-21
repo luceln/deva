@@ -126,6 +126,10 @@ export function guardSnapshot(scope: MemoryScope, before: MemoryEntry[]): Snapsh
  *
  * `incoming` 是「这一轮还要写进去的新条目标题」（纯压缩时为空）。预留给它是因为：不给它留位置，
  * 「归纳成功」之后紧跟的那次写入必然再撞一次上限，白花一轮模型调用。
+ *
+ * ⚠️ **预算算的是索引行（`id` / `type` / `title`），不含 `body`。** 这是上游 v2 沿用下来的口径
+ *（`memoryUsage` → `formatMemoryLine`）：4000 字指的是「下发给模型的那份索引」的体积，不是正文总字数。
+ * 别误按正文体积去估或去调阈值——那样调下来要么永远用不满、要么一写入就超，且看不出是口径问题。
  */
 export function finalSetFits(
   scope: MemoryScope,
