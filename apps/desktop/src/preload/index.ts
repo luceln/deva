@@ -10,6 +10,7 @@ import type {
   ChatSendRequest,
   ChatInsertRequest,
   ChatInsertResult,
+  TakenInserts,
   ChatCompactRequest,
   ChatCreateSessionRequest,
   ChatSetModelRequest,
@@ -69,6 +70,7 @@ export type {
   ChatSendRequest,
   ChatInsertRequest,
   ChatInsertResult,
+  TakenInserts,
   ChatCompactRequest,
   ChatCreateSessionRequest,
   ChatSetModelRequest,
@@ -297,6 +299,8 @@ export interface PersonaRecord {
   avatarImage: string
   /** 偏好模型引用 `"providerId:modelId"`；空串 = 跟随主对话默认。 */
   model: string
+  /** 工作区（绝对路径；空串 = 用角色的默认工作区）。设了则绑定此角色的新对话一开始就挂载它。 */
+  workspace: string
   /** 正文 = 追加进主智能体系统提示词的内容。 */
   prompt: string
   enabled: boolean
@@ -312,28 +316,42 @@ export interface UserProfile {
   avatarImage: string
 }
 
-/** 记忆条目（全局 / 项目私有共用，与 services/memory.ts 对齐）。 */
+/** 记忆类型：user 用户 / feedback 做事方式 / project 进展 / reference 资料（与 services/memory.ts 对齐）。 */
+export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
+/** 记忆条目（全局 / 角色 / 项目共用，与 services/memory.ts 对齐）。 */
 export interface MemoryEntry {
   id: string
-  content: string
+  type: MemoryType
+  /** 一句话标题（进索引）。 */
+  title: string
+  /** 正文，可为空。 */
+  body: string
   createdAt: number
   updatedAt: number
 }
 export interface MemorySnapshot {
   entries: MemoryEntry[]
-  /** 当前总字数（与注入系统提示词同一口径）。 */
+  /** 当前索引总字数（与随消息下发同一口径）。 */
   used: number
-  /** 总字数上限：写入后超出即拒写。 */
+  /** 索引总字数上限：写入后超出即拒写。 */
   budget: number
   maxEntries: number
-  maxChars: number
+  maxTitle: number
+  maxBody: number
 }
+/** 记忆作用域：省略 = 全局；字符串 = 该工作区的项目记忆；`{ personaId }` = 该角色的记忆。 */
+export type MemoryScopeArg = string | { personaId: string }
 /**
  * 记忆写入的失败码（主进程 `services/memory.ts` 的 `MemoryErrorCode` 必须与这里一致）。
  *
  * `writeFailed` = 输入没问题但**没落盘**（磁盘满 / 无权限 / 文件被占）。与其余几个码性质不同：那些是
  * 「改一改输入就能写」，这个是「稍后重试」。界面要给它单独文案——漏了它会显示成 `cf.profile.err.writeFailed`
  * 原文（渲染层对未知码直接 `t(code)`）。
+ *
+ * `readFailed` = **读取**失败（文件被占用 / 无权限 / 半截 JSON）→ 为免覆盖盘上原有内容，主进程拒绝了本次写入。
+ * 与 `writeFailed` 分开：那条是「重试即可」，这条是「盘上有什么都不知道」，要用户先检查文件。
+ *
+ * `memory-changed` = 归纳期间这条记忆被改 / 被删，本次写入作废（与 `notFound` 分开：它曾经存在）。
  */
 export type MemoryErrorCode =
   | 'empty'
@@ -342,12 +360,10 @@ export type MemoryErrorCode =
   | 'budget'
   | 'notFound'
   | 'duplicate'
+  | 'badType'
   | 'writeFailed'
-  /**
-   * **读取**失败（文件被占用 / 无权限 / 半截 JSON）→ 为免覆盖盘上原有内容，主进程拒绝了本次写入。
-   * 与 `writeFailed` 分开：那条是「重试即可」，这条是「盘上有什么都不知道」，要用户先检查文件。
-   */
   | 'readFailed'
+  | 'memory-changed'
 export type MemoryIpcResult = { ok: true; snapshot: MemorySnapshot } | { ok: false; code: MemoryErrorCode }
 
 /**
@@ -409,6 +425,8 @@ export interface PersonaUpsertInput {
   description?: string
   avatar?: string
   model?: string
+  /** 工作区（空串 = 改回默认工作区；缺省 = 保持原值）。 */
+  workspace?: string
   prompt?: string
   enabled?: boolean
 }
@@ -831,22 +849,27 @@ const api = {
   },
   /**
    * 记忆：查看 / 增改删 / 清空，与模型的 memory_* 工具同一套校验。
-   * 末位可选 root：省略 = 全局记忆（~/.deva-plus/memory.json）；给出 = 该工作区的项目私有记忆（~/.deva-plus/projects/<key>/）。
+   * 末位可选 scope：省略 = 全局记忆（~/.deva-plus/memory.json）；字符串 = 该工作区的项目记忆（~/.deva-plus/projects/<key>/）；
+   * `{ personaId }` = 该角色的记忆（~/.deva-plus/personas/memory/<id>.json）。
    */
   memory: {
-    list: (root?: string): Promise<MemorySnapshot> => ipcRenderer.invoke('memory:list', root),
-    /** 无 id 新增，有 id 覆盖更新。 */
-    write: (content: string, id?: string, root?: string): Promise<MemoryIpcResult> =>
-      ipcRenderer.invoke('memory:write', content, id, root),
-    remove: (id: string, root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:delete', id, root),
-    clear: (root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', root),
+    list: (scope?: MemoryScopeArg): Promise<MemorySnapshot> => ipcRenderer.invoke('memory:list', scope),
+    /** 无 id 新增（type、title 必填），有 id 更新（省略的字段保持原值）。 */
+    write: (
+      input: { type?: MemoryType; title?: string; body?: string },
+      id?: string,
+      scope?: MemoryScopeArg
+    ): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:write', input, id, scope),
+    remove: (id: string, scope?: MemoryScopeArg): Promise<MemoryIpcResult> =>
+      ipcRenderer.invoke('memory:delete', id, scope),
+    clear: (scope?: MemoryScopeArg): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', scope),
     /**
-     * 用当前默认模型把已有条目精简一遍腾空间，**不新增任何内容**。
+     * 用当前默认模型把已有条目精简一遍腾空间，**不新增任何内容**（二开独有，上游没有这个入口）。
      *
      * 破坏性（会改 / 删条目，归纳前自动备份）。模型不可用时**不会跑一半**——点下去就返回
      * `code: 'model-unavailable'` 并说明原因。
      */
-    condense: (root?: string): Promise<MemoryCondenseResult> => ipcRenderer.invoke('memory:condense', root)
+    condense: (scope?: MemoryScopeArg): Promise<MemoryCondenseResult> => ipcRenderer.invoke('memory:condense', scope)
   },
   /** Agent 提示词（全局 ~/.deva-plus/personas）：列出 / 读取 / 新建更新 / 删除 / 启停。 */
   personas: {
@@ -927,11 +950,11 @@ const api = {
     /** 回合进行中插入一条消息（见 ChatInsertRequest）。 */
     insert: (req: ChatInsertRequest): Promise<ChatInsertResult> => ipcRenderer.invoke('chat:insert', req),
     /**
-     * 撤回某对话全部待送达的插入消息，返回合并后的原文 + 附件（没有则为空串 / 空数组）。
+     * 撤回某对话全部待送达的插入消息，返回合并后的原文（没有则为空串）与附件（结构化，带 name / kind / size）。
      *
      * 附件必须一起回：用户插话发的截图不能因为点「撤回」就凭空消失。
      */
-    withdrawInserts: (sessionId: string): Promise<{ text: string; attachments: string[] }> =>
+    withdrawInserts: (sessionId: string): Promise<TakenInserts> =>
       ipcRenderer.invoke('chat:withdraw-inserts', sessionId),
     /** 手动压缩历史（/compact）：无后续模型轮，只回发 compacted + done 事件。 */
     compact: (req: ChatCompactRequest): Promise<{ turnId: string }> =>
@@ -1353,6 +1376,12 @@ const api = {
     /** 在系统文件管理器中显示并选中该文件。 */
     reveal: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('deliverables:reveal', sessionId, toolUseId, index)
+  },
+  /** 角色的默认工作区（没挂载工作区时的落点，见 main/services/role-home.ts）：角色编辑页用。 */
+  workspace: {
+    /** 角色的默认工作区路径（还没写过文件时 exists 为 false）。 */
+    roleHome: (personaId: string): Promise<{ path: string; exists: boolean }> =>
+      ipcRenderer.invoke('workspace:role-home', personaId)
   },
   /**
    * 检查更新（设置 → 关于）。状态由主进程持有，经 onState 推送；check / download / install 只负责触发。

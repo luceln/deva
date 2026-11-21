@@ -147,7 +147,7 @@ function prepareNewSubagent(
       originToolId: tc.id,
       toolIds: [tc.id],
       workspaceRoot: ctx.workspaceRoot,
-      system: fork ? system : buildSubagentSystem(def, ctx.workspaceRoot),
+      system: fork ? system : buildSubagentSystem(def, { root: ctx.workspaceRoot, home: ctx.homeDir ?? null }),
       tools: fork ? tools : buildSubagentTools(def, personaId),
       // 普通子智能体只带本次任务描述，不继承父对话（避免上下文串味与预算膨胀）。
       // fork 继承的是父对话里模型看到的那部分（压缩过就从摘要起），不是完整记录。
@@ -195,7 +195,7 @@ function prepareContinueSubagent(
   rec.messages.push({
     role: 'user',
     content: moved
-      ? `（提示：当前工作目录已变为 ${ctx.workspaceRoot ?? '（未挂载工作区）'}，相对路径以此为准。）\n${message}`
+      ? `（提示：当前工作目录已变为 ${ctx.workspaceRoot ?? `${ctx.homeDir ?? ''}（未挂载工作区，主对话角色的默认工作区）`}，相对路径以此为准。）\n${message}`
       : message
   })
   rec.workspaceRoot = ctx.workspaceRoot
@@ -233,8 +233,17 @@ async function runSubagentLoop(
        * 后台子智能体换了一个精简 ctx（signal 换成 bg 的，其余不传）。`memoryScopeRoot` 必须原样继承：
        * 子智能体与父会话在同一个工作区里干活，记忆根也该是同一个；漏掉它，子智能体读不到项目记忆，
        * 而且不会有任何报错——正是这个字段设成必填的原因（见 ToolContext.memoryScopeRoot 的注释）。
+       * `homeDir` / `memoryAccess` 同样要继承（上游 v2）：少了 memoryAccess，子智能体调记忆工具会直接报「不可用」。
        */
-      ctx: bg ? { workspaceRoot: ctx.workspaceRoot, memoryScopeRoot: ctx.memoryScopeRoot, signal: bg.signal } : ctx,
+      ctx: bg
+        ? {
+            workspaceRoot: ctx.workspaceRoot,
+            memoryScopeRoot: ctx.memoryScopeRoot,
+            homeDir: ctx.homeDir,
+            memoryAccess: ctx.memoryAccess,
+            signal: bg.signal
+          }
+        : ctx,
       controller: bg ?? controller,
       // 定时任务里派出的子智能体同受步数上限（主对话里为 undefined = 不限）。
       maxSteps,

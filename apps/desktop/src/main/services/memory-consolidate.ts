@@ -4,18 +4,24 @@ import { streamChat } from '../providers'
 import { writeFileAtomic } from './atomic-write'
 import type { CompactModelConfig } from './compaction'
 import {
+  MEMORY_BODY_MAX,
+  MEMORY_TITLE_MAX,
   formatMemoryLine,
+  isMemoryType,
   listMemories,
   memoryLimits,
   memoryPath,
+  memoryTypeLabel,
   memoryUsage,
   newMemoryId,
-  normalizeMemory,
+normalizeBody,
+  normalizeTitle,
   readMemories,
   replaceMemories,
   scopeLabel,
   writeMemory,
   type MemoryEntry,
+  type MemoryInput,
   type MemoryScope,
   type MemoryWriteResult
 } from './memory'
@@ -23,13 +29,12 @@ import {
 /**
  * 记忆写满后的自动归纳（issue #61：原先写满只会拒写，旧条目永远不会消失）。
  *
- * 模型经 memory_write 写入、撞上条数或总字数上限时，不再直接拒写：先用当前对话的模型把已有条目归纳一遍
+ * 模型经 memory_write 写入、撞上条数或索引总字数上限时，不再直接拒写：先用当前对话的模型把已有条目归纳一遍
  *（规则借鉴 Claude Code 后台整理记忆的做法：同主题合并、新的取代矛盾的旧的、删过时与一次性的、相对日期换成
  * 具体日期），压到上限的七成左右，再照常写入新条目。新条目原文由 writeMemory 保存，不经模型改写。
  *
  * 安全：归纳前把当时的全部条目备份到记忆文件同目录的 memory-backups/（保留最近 5 份）；模型输出解析不了、
  * 有条目超长、或归纳后仍放不下新条目，一律放弃归纳、退回原来的拒写，记忆文件不动。
- * 用户在面板里手动添加不走这里（仍直接拒写，由用户自己删改）。
  */
 
 /** 归纳后的目标用量：上限的七成，留出余量，免得之后每写一条都要再归纳一次。 */
@@ -67,6 +72,11 @@ export interface SkippedEntry {
   current: string | null
 }
 
+/** 一条记忆的「内容快照」，用于并发改动比较与报告（v2 结构：类型 + 标题 + 正文）。 */
+function contentOf(e: MemoryEntry): string {
+  return `${e.type}\u0000${e.title}\u0000${e.body}`
+}
+
 /**
  * 归纳被拒绝提交的原因码（与「模型跑失败」「写盘失败」分开）。
  *
@@ -98,8 +108,8 @@ function detectConcurrentChange(before: MemoryEntry[], current: MemoryEntry[]): 
   for (const old of before) {
     const cur = now.get(old.id)
     if (!cur) changed.push({ id: old.id, reason: 'deleted', content: null, current: null })
-    else if (cur.content !== old.content)
-      changed.push({ id: old.id, reason: 'modified', content: null, current: cur.content })
+    else if (contentOf(cur) !== contentOf(old))
+      changed.push({ id: old.id, reason: 'modified', content: null, current: contentOf(cur) })
   }
   const added = current.filter((e) => !was.has(e.id)).map((e) => e.id)
   return { changed, added }
@@ -114,11 +124,15 @@ function finalSetFits(
   const lim = memoryLimits(scope)
   if (entries.length > lim.maxEntries)
     return { ok: false, reason: `归纳后仍有 ${entries.length} 条，超过上限 ${lim.maxEntries} 条` }
-  const tooLong = entries.find((e) => e.content.length > lim.maxChars)
-  if (tooLong) return { ok: false, reason: `归纳后有条目超过 ${lim.maxChars} 字（${tooLong.id}）` }
+  const tooLong = entries.find((e) => e.title.length > MEMORY_TITLE_MAX || e.body.length > MEMORY_BODY_MAX)
+  if (tooLong)
+    return {
+      ok: false,
+      reason: `归纳后有条目超过上限（${tooLong.id}：标题 ${tooLong.title.length}/${MEMORY_TITLE_MAX} 字、正文 ${tooLong.body.length}/${MEMORY_BODY_MAX} 字）`
+    }
   // incoming 若还要写进去，得给它留出位置：否则「归纳成功」之后紧跟的写入必然再撞一次上限。
   const room = incoming
-    ? formatMemoryLine({ id: 'x_00000000', content: incoming, createdAt: 0, updatedAt: 0 }).length
+    ? formatMemoryLine({ id: 'x_00000000', type: 'user', title: incoming }).length
     : 0
   const used = memoryUsage(entries) + room
   if (used > lim.budget)
@@ -213,20 +227,20 @@ const inflight = new Map<string, Promise<ConsolidateResult | CondenseResult>>()
  * 逐字相同即幂等成功，那是既有行为。
  */
 export async function writeMemoryWithConsolidation(
-  content: string,
+  input: MemoryInput,
   id: string | undefined,
   scope: MemoryScope,
   model: CompactModelConfig | undefined,
   signal?: AbortSignal
 ): Promise<{ result: MemoryWriteResult; consolidated?: ConsolidateStats; failure?: string }> {
-  const first = writeMemory(content, id, scope)
+  const first = writeMemory(input, id, scope)
   if (first.ok || (first.code !== 'full' && first.code !== 'budget') || !model) return { result: first }
-  /*
+/*
    * 归纳前记下「要更新的那条当时是什么样」。`first` 只可能是 full / budget，说明 id 对应的条目**存在**
    * （不存在会走 notFound 提前返回），所以这里能读到一份确定的旧版本。
    */
   const idBefore = id ? listMemories(scope).find((e) => e.id === id) : undefined
-  const c = await consolidate(scope, content, id, model, signal)
+  const c = await consolidate(scope, input, id, model, signal)
   if (!c.ok) return { result: first, failure: c.reason }
   if (id) {
     const now = listMemories(scope).find((e) => e.id === id)
@@ -241,7 +255,7 @@ export async function writeMemoryWithConsolidation(
         consolidated: c
       }
     }
-    if (now.content !== idBefore.content) {
+    if (entryChanged(idBefore, now)) {
       // 归纳期间被用户改过：他的新内容优先，本次写入作废（不覆盖、也不另存一条）。
       return {
         result: {
@@ -253,7 +267,11 @@ export async function writeMemoryWithConsolidation(
       }
     }
   }
-  return { result: writeMemory(content, id, scope), consolidated: c }
+  /*
+   * ⚠️ **不退化成新增**（上游写法是「id 没了就按新增写入」）：会在记忆里留下一条用户从没见过的
+   * 条目并占预算，而这里的场景是「归纳期间被删」，用户的意图恰恰是让它消失。上面已按 `memory-changed` 返回。
+   */
+  return { result: writeMemory(input, id, scope), consolidated: c }
 }
 
 /**
@@ -325,17 +343,17 @@ async function runCondense(
 ): Promise<CondenseResult> {
   const { system, user } = buildCondensePrompt(scope, before)
   let reason = ''
-  let code: CondenseFailCode = 'failed'
+  const code: CondenseFailCode = 'failed'
   for (let i = 0; i < ATTEMPTS; i++) {
     if (signal?.aborted) return { ok: false, code: 'aborted', reason: '已中止' }
     let text: string
     try {
-      text = await ask(model, system, user, signal)
+      text = await askMemoryModel(model, system, user, signal)
     } catch (e) {
       reason = (e as Error)?.message ?? String(e)
       continue
     }
-    const parsed = parseEntries(text, scope, before, '')
+    const parsed = parseEntries(text, scope, before, {})
     if (!parsed.ok) {
       /*
        * 「归纳后仍接近上限」不是模型跑歪了，而是它给出的集合本身就放不下——重试大概率得到同样结果，
@@ -347,8 +365,8 @@ async function runCondense(
       continue
     }
     /*
-     * 并进「跑的过程中又被写进来的条目」，与 consolidate 同口径：
-     * 归纳期间别的写入不能被我这次 replaceMemories 抹掉；期间被改 / 被删的条目按当前状态跳过。
+     * 写回前重新读一次当前状态，逐条校验（见 detectConcurrentChange）：
+     * 归纳期间被用户改过 / 删掉的条目不拿归纳结果顶掉，也不复活。
      */
     const cur = readMemories(scope)
     if (cur.kind === 'unreadable') {
@@ -398,21 +416,34 @@ async function runCondense(
  *
  * `skipped` 里的条目不算：那些是**用户**在归纳等待期间改 / 删的，不是这次归纳的功劳。
  * 算进去的话，`changed === 0 && freed <= 0` 这个「什么都没做」的判据会被用户的并发操作污染。
+ *
+ * 内容比较走 `contentOf`（v2 的 type + title + body）：只比标题会漏掉「正文被改」，反之亦然。
  */
 function countChanged(before: MemoryEntry[], after: MemoryEntry[], skipped: SkippedEntry[] = []): number {
-  const now = new Map(after.map((e) => [e.id, e.content]))
+  const now = new Map(after.map((e) => [e.id, contentOf(e)]))
   const mine = new Set(skipped.map((s) => s.id))
   let n = 0
   for (const e of before) {
     if (mine.has(e.id)) continue
-    if (!now.has(e.id) || now.get(e.id) !== e.content) n++
+    if (!now.has(e.id) || now.get(e.id) !== contentOf(e)) n++
   }
   return n
 }
 
+/**
+ * 两条记忆是否「同一版本」。
+ *
+ * 旧结构只有 `content`，直接比字符串；新结构是 `type + title + body` 三段，**三段都要比**：
+ * 只比 title 会漏掉「正文被改」、只比 body 会漏掉「标题被改」，而两者都会让「以用户版本优先」失效。
+ * (id / createdAt 不变，updatedAt 比了反而会把「归纳自身造成的更新」误判成用户改动。)
+ */
+function entryChanged(a: MemoryEntry, b: MemoryEntry): boolean {
+  return a.title !== b.title || a.body !== b.body || a.type !== b.type
+}
+
 function consolidate(
   scope: MemoryScope,
-  incoming: string,
+  incoming: MemoryInput,
   replacing: string | undefined,
   model: CompactModelConfig,
   signal?: AbortSignal
@@ -434,7 +465,7 @@ function consolidate(
 
 async function run(
   scope: MemoryScope,
-  incoming: string,
+  incoming: MemoryInput,
   replacing: string | undefined,
   model: CompactModelConfig,
   signal?: AbortSignal
@@ -444,18 +475,18 @@ async function run(
     return { ok: false, reason: `${scopeLabel(scope)}文件读不出来（${read.error}），为避免覆盖原有内容，本次没有归纳` }
   const before = read.entries
   if (before.length === 0) return { ok: false, reason: '没有可归纳的条目' }
-  const { system, user } = buildPrompt(scope, before, normalizeMemory(incoming), replacing)
+  const { system, user } = buildPrompt(scope, before, incoming, replacing)
   let reason = ''
   for (let i = 0; i < ATTEMPTS; i++) {
     if (signal?.aborted) return { ok: false, reason: '已中止' }
     let text: string
     try {
-      text = await ask(model, system, user, signal)
+      text = await askMemoryModel(model, system, user, signal)
     } catch (e) {
       reason = (e as Error)?.message ?? String(e)
       continue
     }
-    const parsed = parseEntries(text, scope, before, normalizeMemory(incoming))
+    const parsed = parseEntries(text, scope, before, incoming)
     if (!parsed.ok) {
       if (/仍接近上限/.test(parsed.reason)) return { ok: false, code: 'over-limit', reason: parsed.reason }
       reason = parsed.reason
@@ -478,7 +509,7 @@ async function run(
         reason: `归纳期间记忆被改动或新增（${[...drift.changed.map((c) => `${c.id}:${c.reason}`), ...drift.added.map((id) => `${id}:added`)].join('、')}），这一轮结果没有提交，请再试一次`,
         changed: [...drift.changed.map((c) => c.id), ...drift.added]
       }
-    const fits = finalSetFits(scope, parsed.entries, normalizeMemory(incoming))
+    const fits = finalSetFits(scope, parsed.entries, normalizeTitle(incoming.title ?? ''))
     if (!fits.ok) return { ok: false, reason: fits.reason }
     const backup = backupMemories(scope, cur.entries)
     // 写盘成败必须回传：返回 ok:true 而实际没落盘，用户看到的是「旧条目删了、新条目也没进来」，
@@ -514,23 +545,23 @@ function buildCondensePrompt(scope: MemoryScope, entries: MemoryEntry[]): { syst
     `你负责整理用户的长期${scopeLabel(scope)}。它已经写满（条数或总字数超限），需要在不丢失有用信息的前提下精简，腾出后续写入的空间。`,
     '',
     '规则：',
-    `1. 同一主题的多条合并成一条。每条一句话，不超过 ${lim.maxChars} 字。`,
+    `1. 同一主题的多条合并成一条。标题一句话，不超过 ${MEMORY_TITLE_MAX} 字；正文不超过 ${MEMORY_BODY_MAX} 字。`,
     '2. 前后矛盾的以更新日期较新的为准，删掉被取代的旧条目。',
     '3. 删除一次性的任务细节、已经结束的进行中事项和明显过时的内容。',
     '4. 用户纠正过的做法（「做法 + 原因」）和明确表达过的偏好优先保留，其中的原因不要删。',
     '5. **不要为了压缩而删掉仍然有用的信息**。这次没有任何新内容要写进来，你的唯一目标是让同样的信息占更少空间。',
     '6. 只能合并、精简、删除，不得编造原文没有的信息。「昨天」「上周」这类相对时间，按该条的更新日期换成具体日期。',
     '7. 保持原条目的语言。',
-    `8. 结果总长不超过 ${targetChars} 字、不超过 ${targetCount} 条（每条按「- [id] 内容」一行计）。`,
+    `8. 结果索引总长不超过 ${targetChars} 字、不超过 ${targetCount} 条（每条按「- [id] 类型 · 标题」一行计，正文不计）。`,
     '',
     '只输出 JSON，不要任何其他文字：',
-    '{"entries":[{"id":"原条目 id 或 null","content":"…"}]}',
+    '{"entries":[{"id":"原条目 id 或 null","type":"user|feedback|project|reference","title":"…","body":"…"}]}',
     '保留或由旧条目改写、合并而来的条目，id 填它所来自的旧条目 id（合并时填其中更新日期最早的那条）；无法对应到旧条目的填 null。'
   ].join('\n')
   const day = (t: number): string => (t > 0 ? new Date(t).toISOString().slice(0, 10) : '日期不详')
   const user = [
-    `当前${scopeLabel(scope)}（${entries.length} 条，${memoryUsage(entries)} 字，上限 ${lim.budget} 字 / ${lim.maxEntries} 条）：`,
-    ...entries.map((e) => `- [${e.id}]（更新于 ${day(e.updatedAt)}）${e.content}`)
+    `当前${scopeLabel(scope)}（${entries.length} 条，索引 ${memoryUsage(entries)} 字，上限 ${lim.budget} 字 / ${lim.maxEntries} 条）：`,
+    ...entries.map((e) => `- [${e.id}]（更新于 ${day(e.updatedAt)}）${memoryTypeLabel(e.type)} · ${e.title}${e.body ? `\n  正文：${e.body.replace(/\n/g, '\n  ')}` : ''}`)
   ].join('\n')
   return { system, user }
 }
@@ -538,7 +569,7 @@ function buildCondensePrompt(scope: MemoryScope, entries: MemoryEntry[]): { syst
 function buildPrompt(
   scope: MemoryScope,
   entries: MemoryEntry[],
-  incoming: string,
+  incoming: MemoryInput,
   replacing: string | undefined
 ): { system: string; user: string } {
   const lim = memoryLimits(scope)
@@ -546,33 +577,42 @@ function buildPrompt(
   const targetCount = Math.floor(lim.maxEntries * TARGET_RATIO)
   const system = [
     '你负责整理用户的长期记忆。记忆已经写满，请在不丢失有用信息的前提下把它归纳精简，给即将写入的新记忆腾出空间。',
+    '每条记忆有类型（user 用户 / feedback 做事方式 / project 进展 / reference 资料）、一句话标题和正文。',
     '',
     '规则：',
-    `1. 同一主题的多条合并成一条。每条一句话，不超过 ${lim.maxChars} 字。`,
+    `1. 同一主题的多条合并成一条。标题一句话，不超过 ${MEMORY_TITLE_MAX} 字；正文不超过 ${MEMORY_BODY_MAX} 字。`,
     '2. 前后矛盾的以更新日期较新的为准，删掉被取代的旧条目。',
     '3. 与「即将写入的新记忆」重复、或被它取代的旧条目直接删除。新记忆会另行原样保存，不要把它写进结果。',
-    '4. 删除一次性的任务细节、已经结束的进行中事项和明显过时的内容。',
-    '5. 用户纠正过的做法（「做法 + 原因」）和明确表达过的偏好优先保留，其中的原因不要删。',
+    '4. 删除一次性的任务细节、已经结束的进展和明显过时的内容。',
+    '5. 做事方式类（用户纠正过、确认过的做法）和明确表达过的偏好优先保留，正文里的「原因」「何时适用」不要删。',
     '6. 只能合并、精简、删除，不得编造原文没有的信息。「昨天」「上周」这类相对时间，按该条的更新日期换成具体日期。',
     '7. 保持原条目的语言。',
-    `8. 结果总长不超过 ${targetChars} 字、不超过 ${targetCount} 条（每条按「- [id] 内容」一行计）。`,
+    `8. 结果的索引总长不超过 ${targetChars} 字、不超过 ${targetCount} 条（每条按「- [id] 类型 · 标题」一行计，正文不计）。`,
     '',
     '只输出 JSON，不要任何其他文字：',
-    '{"entries":[{"id":"原条目 id 或 null","content":"…"}]}',
+    '{"entries":[{"id":"原条目 id 或 null","type":"user|feedback|project|reference","title":"…","body":"…"}]}',
     '保留或由旧条目改写、合并而来的条目，id 填它所来自的旧条目 id（合并时填其中更新日期最早的那条）；无法对应到旧条目的填 null。'
   ].join('\n')
   const day = (t: number): string => (t > 0 ? new Date(t).toISOString().slice(0, 10) : '日期不详')
+  const show = (e: { type?: string; title?: string; body?: string }): string =>
+    `${e.type && isMemoryType(e.type) ? memoryTypeLabel(e.type) : '类型不变'} · ${e.title ?? '（标题不变）'}${e.body ? `\n  正文：${e.body.replace(/\n/g, '\n  ')}` : ''}`
   const user = [
-    `当前${scopeLabel(scope)}（${entries.length} 条，${memoryUsage(entries)} 字）：`,
-    ...entries.map((e) => `- [${e.id}]（更新于 ${day(e.updatedAt)}）${e.content}`),
+    `当前${scopeLabel(scope)}（${entries.length} 条，索引 ${memoryUsage(entries)} 字）：`,
+    ...entries.map((e) => `- [${e.id}]（更新于 ${day(e.updatedAt)}）${show(e)}`),
     '',
     replacing ? `即将写入的新记忆（将改写 [${replacing}] 的原内容）：` : '即将写入的新记忆：',
-    incoming
+    show(incoming)
   ].join('\n')
   return { system, user }
 }
 
-async function ask(model: CompactModelConfig, system: string, user: string, signal?: AbortSignal): Promise<string> {
+/** 单次调用对话模型，取完整文字输出（归纳与旧记忆整理共用）。 */
+export async function askMemoryModel(
+  model: CompactModelConfig,
+  system: string,
+  user: string,
+  signal?: AbortSignal
+): Promise<string> {
   const ctrl = new AbortController()
   const onAbort = (): void => ctrl.abort()
   signal?.addEventListener('abort', onAbort, { once: true })
@@ -600,9 +640,22 @@ async function ask(model: CompactModelConfig, system: string, user: string, sign
     signal?.removeEventListener('abort', onAbort)
   }
   if (error) throw new Error(error)
-  if (ctrl.signal.aborted) throw new Error(signal?.aborted ? '已中止' : '归纳请求超时')
-  if (broken) throw new Error('归纳输出不完整')
+  if (ctrl.signal.aborted) throw new Error(signal?.aborted ? '已中止' : '请求超时')
+  if (broken) throw new Error('输出不完整')
   return text
+}
+
+/** 从模型输出里取出 JSON 对象的 entries 数组；取不到返回 null。 */
+export function parseJsonEntries(text: string): unknown[] | null {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  try {
+    const raw = start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : null
+    const list = (raw as { entries?: unknown } | null)?.entries
+    return Array.isArray(list) ? list : null
+  } catch {
+    return null
+  }
 }
 
 /** 解析并校验模型给出的条目；不合格（解析不了、有条目超长、写入新条目后仍接近上限）一律不用。 */
@@ -610,39 +663,37 @@ function parseEntries(
   text: string,
   scope: MemoryScope,
   before: MemoryEntry[],
-  incoming: string
+  incoming: MemoryInput
 ): { ok: true; entries: MemoryEntry[] } | { ok: false; reason: string } {
   const lim = memoryLimits(scope)
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  let raw: unknown
-  try {
-    raw = start >= 0 && end > start ? JSON.parse(text.slice(start, end + 1)) : null
-  } catch {
-    raw = null
-  }
-  const list = (raw as { entries?: unknown } | null)?.entries
-  if (!Array.isArray(list)) return { ok: false, reason: '归纳结果不是有效的 JSON' }
+  const list = parseJsonEntries(text)
+  if (!list) return { ok: false, reason: '归纳结果不是有效的 JSON' }
 
   const byId = new Map(before.map((e) => [e.id, e]))
   const used = new Set<string>()
   const out: MemoryEntry[] = []
   const now = Date.now()
+  const incomingTitle = normalizeTitle(incoming.title ?? '').toLowerCase()
   for (const item of list) {
-    const content = normalizeMemory(typeof item?.content === 'string' ? item.content : '')
-    if (!content || content === incoming) continue
-    if (content.length > lim.maxChars) return { ok: false, reason: `归纳后有条目超过 ${lim.maxChars} 字` }
-    if (out.some((e) => e.content === content)) continue
-    const old = typeof item?.id === 'string' && !used.has(item.id) ? byId.get(item.id) : undefined
+    const o = (item ?? {}) as Record<string, unknown>
+    const title = normalizeTitle(typeof o.title === 'string' ? o.title : '')
+    const body = normalizeBody(typeof o.body === 'string' ? o.body : '')
+    if (!title || title.toLowerCase() === incomingTitle) continue
+    if (title.length > MEMORY_TITLE_MAX || body.length > MEMORY_BODY_MAX)
+      return { ok: false, reason: '归纳后有条目超长' }
+    if (out.some((e) => e.title.toLowerCase() === title.toLowerCase())) continue
+    const old = typeof o.id === 'string' && !used.has(o.id) ? byId.get(o.id) : undefined
+    const type = isMemoryType(o.type) ? o.type : (old?.type ?? 'user')
     if (old) {
       used.add(old.id)
-      out.push(old.content === content ? old : { ...old, content, updatedAt: now })
+      const same = old.title === title && old.body === body && old.type === type
+      out.push(same ? old : { ...old, type, title, body, updatedAt: now })
     } else {
-      out.push({ id: newMemoryId(scope, [...before, ...out]), content, createdAt: now, updatedAt: now })
+      out.push({ id: newMemoryId(scope, [...before, ...out]), type, title, body, createdAt: now, updatedAt: now })
     }
   }
   // 写入新条目后仍须低于上限的九成：只删一两条就交差，下一次写入马上又要归纳，白花调用。
-  const room = formatMemoryLine({ id: 'x_00000000', content: incoming, createdAt: 0, updatedAt: 0 }).length
+  const room = formatMemoryLine({ id: 'x_00000000', type: incoming.type ?? 'user', title: incoming.title ?? '' }).length
   if (out.length + 1 > lim.maxEntries * ACCEPT_RATIO || memoryUsage(out) + room > lim.budget * ACCEPT_RATIO)
     return { ok: false, reason: '归纳后仍接近上限' }
   return { ok: true, entries: out }
@@ -653,10 +704,14 @@ function backupMemories(scope: MemoryScope, entries: MemoryEntry[]): string {
   const dir = join(dirname(memoryPath(scope)), 'memory-backups')
   mkdirSync(dir, { recursive: true })
   const file = join(dir, `memory-${new Date().toISOString().replace(/[:.]/g, '-')}.json`)
-  const body = scope.kind === 'project' ? { version: 1, root: scope.root, entries } : { version: 1, entries }
+  const body = {
+    version: 2,
+    ...(scope.kind === 'project' ? { root: scope.root } : scope.kind === 'role' ? { personaId: scope.personaId } : {}),
+    entries
+  }
   writeFileAtomic(file, JSON.stringify(body, null, 2))
   const all = readdirSync(dir)
-    .filter((f) => /^memory-.+\.json$/.test(f))
+    .filter((f) => /^memory-\d.+\.json$/.test(f))
     .sort()
   for (const f of all.slice(0, Math.max(0, all.length - KEEP_BACKUPS))) rmSync(join(dir, f), { force: true })
   return file

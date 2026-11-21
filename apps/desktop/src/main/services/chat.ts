@@ -25,7 +25,8 @@ import type {
   ModelSwapResult,
   MountResponse,
   PlanResponse,
-  ResolveAutotaskResult
+  ResolveAutotaskResult,
+  TakenInserts
 } from '../../shared/chat-protocol'
 import { ipcMain, type BrowserWindow } from 'electron'
 import { onChatEvent, onSessionsChanged, publishRemoteChange, publishSessionsChanged } from './chat-bus'
@@ -53,6 +54,7 @@ import {
 } from './tasks'
 import type { TaskCreateInput, TaskRecord } from './tasks-types'
 import { trustRoot } from './fs-guard'
+import { personaWorkspace } from './role-home'
 import { activeTodoList, todoUserCancelNote, todoState, type TodoState } from './todos'
 import {
   deriveTitle,
@@ -486,13 +488,13 @@ export function registerChatIpc(getWin: () => BrowserWindow | null): void {
 
   ipcMain.handle('chat:send', (_e, payload: ChatSendRequest) => sendMessage(payload))
 
-  // 回合进行中插入消息（见 insertMessage）；撤回全部待送达的，返回合并后的原文 + 附件供放回输入框。
+// 回合进行中插入消息（见 insertMessage）；撤回全部待送达的，返回合并后的原文与附件供放回输入框。
+  // 附件一起退：用户插话发的截图不能因为点「撤回」就没了（TakenInserts 带 name / kind / size，渲染层直接还原）。
   ipcMain.handle('chat:insert', (_e, payload: ChatInsertRequest): ChatInsertResult => insertMessage(payload))
-  ipcMain.handle('chat:withdraw-inserts', (_e, sessionId: string): { text: string; attachments: string[] } => {
-    const taken = takeInserts(sessionId)
-    // 附件一起退：用户插话发的截图不能因为点「撤回」就没了
-    return { text: taken?.text ?? '', attachments: taken?.attachments ?? [] }
-  })
+  ipcMain.handle(
+    'chat:withdraw-inserts',
+    (_e, sessionId: string): TakenInserts => takeInserts(sessionId) ?? { text: '', attachments: [] }
+  )
 
   /* 说明：persona 绑定与聚焦工作区都已由 ensureSession 落在 session 上，runTurn 内直接读取 —— 见其实现。 */
 
@@ -558,7 +560,8 @@ export function registerChatIpc(getWin: () => BrowserWindow | null): void {
     'chat:create-session',
     (_e, payload: ChatCreateSessionRequest): { ok: true } => {
       const { sessionId, personaId, focusRoot, modelRef } = payload
-      ensureSession(sessionId, { personaId, focusRoot, model: modelRef })
+      // 角色设了工作区（见 role-home.ts personaWorkspace）且调用方没指定：新对话一开始就挂载它。
+      ensureSession(sessionId, { personaId, focusRoot: focusRoot ?? personaWorkspace(personaId), model: modelRef })
       saveProject(sessionId)
       return { ok: true }
     }

@@ -1,6 +1,16 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { GLOBAL_SCOPE, listMemories, writeMemory } from './services/memory'
+import {
+  GLOBAL_SCOPE,
+  MEMORY_TITLE_MAX,
+  isMemoryType,
+  listMemories,
+  normalizeBody,
+  normalizeTitle,
+  writeMemory,
+  type MemoryInput,
+  type MemoryScope
+} from './services/memory'
 import { readSourceDir, SOURCE_DIR_UNREADABLE } from './importer-source-dir'
 import type { MergeStat } from '../shared/import-protocol'
 
@@ -36,6 +46,11 @@ import type { MergeStat } from '../shared/import-protocol'
 
 interface RawEntry {
   id?: unknown
+  /** v2：type / title / body。 */
+  type?: unknown
+  title?: unknown
+  body?: unknown
+  /** v1：一句话正文（旧版文件，读到时按 v2 转换，同 memory.ts 的 parseEntry）。 */
   content?: unknown
 }
 
@@ -82,43 +97,69 @@ function readMemoryFile(file: string): MemoryFileRead {
 }
 
 /**
- * 合并一个作用域的记忆。entries 逐条走 writeMemory；三级判据在这里做，配额由 writeMemory 把关。
- * 返回的 added / skipped / failed 里都带正文摘要，界面能看出「哪一条没进来」。
+ * 把一条源记忆规整成 v2 的写入入参（type / title / body）。
+ *
+ * 源可能来自新版（已有 type / title / body），也可能来自旧版（只有一句话 content）。旧版按
+ * `memory.ts` 里同一套规则就地转换：标题取原文第一句、正文保留原文、类型暂记 user——
+ * 这样「导入」与「本机读旧文件」得到的是同一份结果，不会出现「导入后标题和本机自动转换的不一样」。
  */
-function mergeInto(entries: RawEntry[], scope: { kind: 'global' } | { kind: 'project'; root: string }): MergeStat {
+function toInput(raw: RawEntry): { input: MemoryInput; title: string } | null {
+  if (typeof raw?.title === 'string' && raw.title.trim()) {
+    const title = normalizeTitle(raw.title)
+    const body = normalizeBody(typeof raw.body === 'string' ? raw.body : '')
+    return { input: { type: isMemoryType(raw.type) ? raw.type : 'user', title, body }, title }
+  }
+  const content = typeof raw?.content === 'string' ? raw.content : ''
+  if (!content.trim()) return null
+  const first = normalizeTitle(content)
+  const m = first.match(/^.+?[。！？；!?;](?=\s|$|[^\d])/)
+  const s = (m && m[0].length <= MEMORY_TITLE_MAX ? m[0] : first).replace(/[。；;，,、：:]+$/, '')
+  const title = s.length <= MEMORY_TITLE_MAX ? s : `${s.slice(0, MEMORY_TITLE_MAX - 1)}…`
+  return { input: { type: 'user', title, body: normalizeBody(content) }, title }
+}
+
+/**
+ * 合并一个作用域的记忆。entries 逐条走 writeMemory；三级判据在这里做，配额由 writeMemory 把关。
+ * 返回的 added / skipped / failed 里都带标题摘要，界面能看出「哪一条没进来」。
+ *
+ * 判据按 **v2 的标题**比（旧版是比正文）：同层里标题相同 = 同一主题，那是 `writeMemory` 的去重口径，
+ * 这里先拦一遍只是让报告能说明「为什么跳过」，免得白跑一次写入再拿到 duplicate。
+ */
+function mergeInto(entries: RawEntry[], scope: MemoryScope): MergeStat {
   const stat: MergeStat = { added: [], skipped: [], failed: [] }
   const existing = listMemories(scope)
   const ids = new Set(existing.map((e) => e.id))
-  const contents = new Set(existing.map((e) => e.content))
+  const titles = new Set(existing.map((e) => e.title.toLowerCase()))
   for (const raw of entries) {
-    const content = typeof raw?.content === 'string' ? raw.content : ''
-    if (!content.trim()) continue
+    const conv = toInput(raw)
+    if (!conv) continue
+    const { input, title } = conv
     const id = typeof raw?.id === 'string' ? raw.id : ''
-    const label = content.length > 40 ? `${content.slice(0, 40)}…` : content
+    const label = title.length > 40 ? `${title.slice(0, 40)}…` : title
     // ① id 相同 → 留本地的
     if (id && ids.has(id)) {
       stat.skipped.push(label)
       continue
     }
-    // ② 正文逐字相同 → 已有这条，不重复
-    if (contents.has(content)) {
+    // ② 标题相同（同层即同一主题）→ 已有这条，不重复
+    if (titles.has(title.toLowerCase())) {
       stat.skipped.push(label)
       continue
     }
-    const r = writeMemory(content, undefined, scope)
+    const r = writeMemory(input, undefined, scope)
     if (!r.ok) {
-      // 配额满了 / 单条过长：writeMemory 没写盘，如实记失败（不吞掉，界面必须显示）
+      // 配额满了 / 单条过长 / 文件读不出来：writeMemory 没写盘，如实记失败（不吞掉，界面必须显示）
       stat.failed.push({ step: 'memories', id, reason: r.code })
       continue
     }
     if (!r.created) {
-      // 规整后与已有条目逐字相同 → 同样没写盘。既不是新增也不是失败，记跳过（口径与 ② 一致）。
+      // 规整后与已有条目相同 → 同样没写盘。既不是新增也不是失败，记跳过（口径与 ② 一致）。
       stat.skipped.push(label)
       continue
     }
     stat.added.push(label)
     ids.add(r.entry.id)
-    contents.add(r.entry.content)
+    titles.add(r.entry.title.toLowerCase())
   }
   return stat
 }

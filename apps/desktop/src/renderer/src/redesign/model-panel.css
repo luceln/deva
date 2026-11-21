@@ -1,53 +1,51 @@
 /*
- * 输入框模型面板（ModelPanel.tsx / ModelMenu.tsx）。贴片沿用 app.css 的 .chip，菜单项沿用 .model-pick__item /
- * __group-head / __dot / __name / __check。外壳 .cf-mp__pop 只负责定位、不裁切：二级菜单从它向左弹出，
- * 放在会滚动（overflow）的容器里会被裁掉；需要滚动的只是二级菜单里的列表 .cf-mp__list。
+ * 输入框工具条右侧的模型区（ModelPanel.tsx / ContextRing.tsx / ModelMenu.tsx / EffortPicker.tsx）：
+ * 上下文圆环、模型、思考等级三个贴片。贴片沿用 app.css 的 .chip；模型与思考等级的菜单外壳沿用 .model-pick__menu，
+ * 菜单项沿用 .model-pick__item / __name / __check。整组靠右的 margin-left 见 redesign.css 的 .cf-composer .cf-mp。
  */
+.cf-mp {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+/* 模型与思考等级挨得近一些：相邻两侧的内边距各收到 4px（图标自带留白，看上去约 14px，与圆环到模型的间距一致） */
+.chip.cf-mp__model {
+  padding-right: 4px;
+}
+.chip.cf-mp__effort {
+  padding-left: 4px;
+}
 
-/* ---------- 贴片 ---------- */
+/* ---------- 上下文圆环：只有图标的方形贴片，灰色、不带数字 ---------- */
+.cf-mp__ringbtn {
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+}
 .cf-mp__ring {
   flex-shrink: 0;
 }
 .cf-mp__ring-track {
   stroke: var(--border-strong);
 }
-/* 模型名后的「灯泡 + 档位」：只在选了档位（非「默认」）时出现 */
-.cf-mp__eff {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 3px;
-  margin-left: 3px;
+.cf-mp__ring-arc {
+  stroke: var(--fg-muted);
 }
 
-/* ---------- 面板 ---------- */
-.cf-mp__pop {
+/* 点开圆环的小卡片：一行「上下文容量 …… 已用/窗口 (百分比)」+ 进度条。
+   以圆环为中心（left 50% + translateX(-50%)，超出窗口时 ContextRing 在 transform 里补偏移） */
+.cf-mp__card {
   position: absolute;
-  right: 0;
+  left: 50%;
   bottom: calc(100% + 8px);
   z-index: 50;
-  text-align: left;
-}
-.cf-mp__panel,
-.cf-mp__sub {
-  padding: 5px;
+  width: 260px;
+  padding: 10px 12px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-elevated);
   box-shadow: var(--shadow);
-}
-.cf-mp__panel {
-  width: 280px;
-}
-
-/* 上半部分：上下文占用 */
-.cf-mp__usage {
-  padding: 8px 9px 10px;
-}
-.cf-mp__empty {
-  padding: 10px 9px;
-  font-size: 12.5px;
-  color: var(--fg-subtle);
+  text-align: left;
 }
 .cf-mp__top {
   display: flex;
@@ -61,9 +59,9 @@
   color: var(--fg-muted);
 }
 .cf-mp__big {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--fg);
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--fg-subtle);
   font-variant-numeric: tabular-nums;
 }
 .cf-mp__bar {
@@ -74,11 +72,13 @@
   background: var(--bg-inset);
   box-shadow: inset 0 0 0 1px var(--border);
 }
+/* 已用部分：与圆环的弧同色（灰），不用服务商色 */
 .cf-mp__fill {
   height: 100%;
   border-radius: inherit;
+  background: var(--fg-muted);
 }
-/* 自动压缩的位置：一道竖线，下方标注（文字右缘对齐竖线） */
+/* 自动压缩的位置：一道竖线，悬停提示写「自动压缩」（::before 把可悬停范围左右各放宽 5px） */
 .cf-mp__tick {
   position: absolute;
   top: -3px;
@@ -88,155 +88,58 @@
   border-radius: 1px;
   background: var(--fg-subtle);
 }
-.cf-mp__ticklabel {
-  position: relative;
-  height: 15px;
-  margin-top: 3px;
-  font-size: 11px;
-  color: var(--fg-subtle);
-}
-.cf-mp__ticklabel span {
+.cf-mp__tick::before {
+  content: '';
   position: absolute;
-  top: 0;
-  transform: translateX(-100%);
-  padding-right: 4px;
-  white-space: nowrap;
-}
-.cf-mp__line {
-  margin-top: 4px;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--fg);
-  font-variant-numeric: tabular-nums;
-}
-.cf-mp__note {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--fg-subtle);
+  inset: -2px -5px;
 }
 
-/* 下半部分：「模型」「思考等级」两行入口 */
-.cf-mp__rows {
-  padding-top: 4px;
-  border-top: 1px solid var(--border);
+/* ---------- 模型菜单：只有中间的列表滚动，服务商名吸顶 ---------- */
+.model-pick__menu.cf-mp__menu {
+  display: flex;
+  flex-direction: column;
+  max-height: min(460px, 70vh);
+  overflow: hidden;
 }
-.cf-mp__row.is-on {
-  background: var(--bg-hover);
-}
-.cf-mp__row.is-disabled {
-  color: var(--fg-subtle);
-  cursor: default;
-}
-.cf-mp__row.is-disabled:hover {
-  background: transparent;
-}
-.cf-mp__icon {
-  flex-shrink: 0;
-  color: var(--fg-muted);
-}
-.cf-mp__key {
-  flex-shrink: 0;
-}
-.cf-mp__val {
+/* position 供 ModelMenu 按 offsetTop 定位当前模型 */
+.cf-mp__list {
+  position: relative;
   flex: 1;
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  font-size: 12.5px;
-  font-weight: 400;
-  color: var(--fg-subtle);
+  min-height: 0;
+  overflow-y: auto;
 }
-.cf-mp__valtext {
+.cf-mp__ghead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 9px 8px 3px;
+  background: var(--bg-elevated);
+  font-size: 11.5px;
+  color: var(--fg-subtle);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-/* ---------- 二级菜单：贴着面板左侧、与面板底边对齐（两行入口在面板底部），向左弹出 ---------- */
-.cf-mp__sub {
-  position: absolute;
-  right: calc(100% + 6px);
-  bottom: 0;
-  display: flex;
-  flex-direction: column;
-  width: 272px;
-  max-height: min(380px, 70vh);
+.cf-mp__group:first-child .cf-mp__ghead {
+  padding-top: 4px;
 }
-/* 面板左侧放不下（窗口太窄）：盖在面板上 */
-.cf-mp__pop.is-narrow .cf-mp__sub {
-  right: 0;
-  z-index: 1;
-}
-.cf-mp__list {
-  min-height: 0;
-  overflow-y: auto;
-}
-.cf-mp__subtitle {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--fg-subtle);
-}
-.cf-mp__back {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 4px;
-  width: 100%;
-  padding: 6px 8px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg-muted);
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-}
-.cf-mp__back:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-.cf-mp__sep {
-  flex-shrink: 0;
-  height: 1px;
-  margin: 4px 0;
-  background: var(--border);
-}
-/* 服务商行：当前模型所在的服务商名用主题色 */
-.cf-mp__prov.has-cur .model-pick__name {
-  color: var(--accent);
-  font-weight: 600;
-}
-.cf-mp__count,
-.cf-mp__win {
-  flex-shrink: 0;
-  font-size: 11.5px;
-  font-weight: 400;
-  color: var(--fg-subtle);
-  font-variant-numeric: tabular-nums;
-}
-.cf-mp__chev {
-  flex-shrink: 0;
-  color: var(--fg-subtle);
-}
-/* 勾选位固定宽度，未选中的行窗口数字也对齐 */
+/* 勾选位固定宽度，选中与未选中的行宽度一致 */
 .cf-mp__check {
   display: inline-flex;
   flex-shrink: 0;
   width: 14px;
 }
-/* 思考等级菜单项：档位名 + 一行说明 */
-.cf-mp__lv {
+
+/* ---------- 思考等级菜单：每档一行名字 + 一行说明 ---------- */
+.cf-mp__eftext {
   display: flex;
   flex-direction: column;
   gap: 1px;
 }
-.cf-mp__hint {
+.cf-mp__efhint {
   font-size: 11.5px;
   font-weight: 400;
   color: var(--fg-subtle);
-  white-space: normal;
 }
 
 /* ---------- 失效与「密钥用不了」 ---------- */
