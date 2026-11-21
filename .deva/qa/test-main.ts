@@ -4919,21 +4919,26 @@ async function scenarioPluginManaged(): Promise<void> {
   }
 
   /*
-   * ── ⑤ MCP：插件托管的 mcpServers 条目必须主动排除（P2 magpie 死条目）──
+   * ── ⑤ MCP：插件**显式声明**托管的 mcpServers 条目必须主动排除（P2-13 后的判据）──
    *
    * magpie 插件会往原版 `mcp.json` 写一条指向本机网关的服务（`127.0.0.1:3425/mcp/magpie/hub`）。
    * 二开版没装插件时把它搬过来就是一条永远连不上的死条目，而报告还显示「MCP 已导入 1 个」。
    *
-   * 判据必须与 provider 一致：读插件状态文件里的 `providerId`，不硬编码 magpie 字面量。
+   * ⚠️ 判据是**插件对 MCP 条目的显式声明**（状态文件的 `mcpServers` 数组），不是 provider id。
+   * 旧夹具只写 `providerId` 就期望排除同名 MCP 条目，等于断言「provider id 同名即所有权」——那个契约
+   * 已被 P2-13 证明没有依据（插件状态文件里根本没有 MCP 字段）。契约变了，夹具跟着改；
+   * 四条断言的语义（显式声明 → 排除）不变。
+   *
+   * 「同名但没有 mcpServers 声明 → 正常导入」由 `mcpown` 场景专门覆盖，这里不重复造同一份夹具。
    */
   const { importMcp } = await import('../../apps/desktop/src/main/importer-mcp')
   {
     const mcpSrc = path.join(DST, 'plug-mcp-src')
     fs.mkdirSync(mcpSrc, { recursive: true })
-    // 源侧声明插件托管 gw-relay-7（故意不用 'magpie' 这个字面量）
+    // 源侧显式声明 mcpServers 由插件写入（故意不用 'magpie' 这个字面量，证明不硬编码）
     fs.writeFileSync(
       path.join(mcpSrc, '.magpie-agent.state.json'),
-      JSON.stringify({ providerId: 'gw-relay-7', ownedSecret: true })
+      JSON.stringify({ providerId: 'gw-relay-7', ownedSecret: true, mcpServers: ['gw-relay-7'] })
     )
     fs.writeFileSync(
       path.join(mcpSrc, 'mcp.json'),
@@ -4963,7 +4968,13 @@ async function scenarioPluginManaged(): Promise<void> {
     )
   }
 
-  // ⑥ 反向：抹掉插件声明 → 同一份源会被当普通条目导入（证明排除由判定驱动，不是无条件过滤）
+  /*
+   * ⑥ 反向：源侧状态文件整体缺失 → 同一份源会被当普通条目导入。
+   *
+   * 这验的是新判据的**另一半**：「没有任何 MCP 所有权声明 → 不排除」。
+   * （⑤ 验「显式声明 → 排除」，⑥ 验「没有声明 → 放行」，两者合起来才说明排除是由声明驱动的，
+   *  而不是无条件过滤、也不是靠 provider id 同名。）
+   */
   {
     const mcpSrc = path.join(DST, 'plug-mcp-src')
     fs.rmSync(path.join(mcpSrc, '.magpie-agent.state.json'), { force: true })

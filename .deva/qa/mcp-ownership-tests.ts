@@ -33,9 +33,10 @@ export async function mcpOwnership(eq: Eq): Promise<void> {
 
   // ① 插件只声明了 provider 叫 relay，没声明任何 MCP 所有权
   fs.writeFileSync(path.join(src, '.magpie-agent.state.json'), JSON.stringify({ providerId: 'relay', ownedSecret: true }))
-  eq('ownership: provider 集合里有 relay', PL.pluginManagedProviderIds([src]).has('relay'), true)
-  eq('ownership: MCP 集合为空（插件没有声明）', [...PL.pluginOwnedMcpIds([src])], [])
-
+  /*
+   * 行为断言放在 API 断言之前：这样在**旧实现**（没有 `pluginOwnedMcpIds`、用 provider id 猜 MCP 归属）上，
+   * 红的是「同名用户服务被误排」这个真实行为，而不是「新函数不存在」这种同义反复。
+   */
   const st = importMcp(src)
   eq('ownership: 同名但实为用户自配的 MCP 必须正常导入', st.copied.includes('relay'), true)
   eq('ownership: 不带进 pluginManaged', st.pluginManaged ?? [], [])
@@ -44,6 +45,9 @@ export async function mcpOwnership(eq: Eq): Promise<void> {
   }
   eq('ownership: 目标里确实有这条 MCP', 'relay' in (dstMcp.mcpServers ?? {}), true)
   eq('ownership: URL 原样搬过来', (dstMcp.mcpServers?.relay as { url?: string })?.url, 'https://relay.example/mcp')
+
+  eq('ownership: provider 集合里有 relay', PL.pluginManagedProviderIds([src]).has('relay'), true)
+  eq('ownership: MCP 集合为空（插件没有声明）', [...PL.pluginOwnedMcpIds([src])], [])
 
   // ② 插件显式声明 MCP 所有权时，仍要排除（判据由声明驱动，不是无条件放行）
   fs.writeFileSync(
