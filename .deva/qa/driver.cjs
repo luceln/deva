@@ -22,7 +22,59 @@ const ELECTRON_BIN = path.join(REPO, 'node_modules', 'electron', 'dist', 'electr
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'swapindex', 'swapstale', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtremove', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'sessync', 'memcond', 'wtmerge', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['shape', 'full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'swapindex', 'swapstale', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtremove', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'sessync', 'memcond', 'wtmerge', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+
+/**
+ * 不跑导入夹具、直接调仓库校验脚本的场景：`shape`。
+ *
+ * 为什么放进 driver：`check-preload-shape.cjs`（拆 preload）与 `check-i18n-keys.cjs`（拆 i18n）都是
+ * 「编译不报、跑起来才炸」的静默失效判据——删一个方法、丢一个词条，tsc 与 build 全绿。它们以前只靠人
+ * 记得单独跑，等于白写。挂进 driver 之后，本地跑一次全量就覆盖到，CI 也顺着 `driver.cjs` 一起守住。
+ *
+ * 两个脚本各自带退出码，这里串行跑、任一非 0 即本场景失败。
+ */
+const SCRIPT_SCENARIOS = {
+  shape: [
+    { name: 'preload 形状', script: path.join(QA, 'check-preload-shape.cjs') },
+    { name: 'i18n 结构', script: path.join(QA, 'check-i18n-keys.cjs') }
+  ]
+}
+
+/** 跑一个仓库校验脚本，把输出按 driver 的 PASS/FAIL 口径回放，便于汇总行统计。 */
+function runScript(name, script) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', (d) => {
+      process.stdout.write(String(d))
+      out += String(d)
+    })
+    child.stderr.on('data', (d) => {
+      process.stderr.write(String(d))
+      out += String(d)
+    })
+    child.on('close', (code) => {
+      // 汇总只认行首 PASS / FAIL：脚本自己的 PASS 行保留，失败则以本场景名义补一条，确保汇总里点名。
+      const body = out
+        .split('\n')
+        .map((l) => (l.startsWith('  PASS ') ? `PASS ${name} · ${l.slice(7)}` : l.startsWith('  FAIL ') ? `FAIL ${name} · ${l.slice(7)}` : l))
+        .join('\n')
+      const tail = code === 0 ? '' : `\nFAIL ${name} :: 脚本退出码 ${code}（${path.relative(path.resolve(QA, '..', '..'), script)}）\n`
+      resolve({ name, code, out: body + tail })
+    })
+  })
+}
+
+async function runScriptScenario(name) {
+  let code = 0
+  let out = ''
+  for (const item of SCRIPT_SCENARIOS[name]) {
+    const r = await runScript(item.name, item.script)
+    out += r.out
+    if (r.code !== 0) code = r.code
+  }
+  return { name, code, out }
+}
 
 /**
  * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
@@ -169,7 +221,8 @@ async function main() {
       skipped.push({ name, why })
       continue
     }
-    results.push(await runOne(name))
+    // shape 不跑导入夹具、不需要 bundle：直接调仓库校验脚本（见 SCRIPT_SCENARIOS）。
+    results.push(SCRIPT_SCENARIOS[name] ? await runScriptScenario(name) : await runOne(name))
   }
 
   console.log('\n================ 汇总 ================')

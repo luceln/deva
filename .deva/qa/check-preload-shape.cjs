@@ -1,14 +1,18 @@
 /**
- * preload 形状校验：`window.deva` 的对外形状必须与拆分前**完全一致**。
+ * preload 形状校验：我们二开在 `window.deva` 上暴露的东西必须**都还在**。
  *
  * 背景：`preload/index.ts` 曾把二开独有通道（导入、worktree）就地写进同一个文件，与上游改动
  * 频繁冲突。把这些块搬进 `preload/import.ts`、`preload/worktree.ts` 后，唯一的风险是**漏搬一个
  * 方法**或**键名/通道名漂移**——编译能过、界面点下去却报 `undefined is not a function`。
  *
- * 判据：
- *  1. 顶层键集合等于基线（拆分当时的快照），不增不减；
- *  2. 每个对象型命名空间的方法名集合等于基线；
+ * 判据（**单向**：只守「我们二开该有的还在」，不限制上游新增）：
+ *  1. 基线里的每个顶层键都必须存在；
+ *  2. 基线里列出的命名空间，其每个方法名都必须还在；
  *  3. 二开通道字符串仍在——抓「方法还在、但通道名被改」这种更隐蔽的漂移。
+ *
+ * 为什么不双向比：上游加一个新 IPC 通道、新命名空间方法是**正常演进**，不该让我们的 CI 变红。
+ * 早期版本用集合相等（`eqSet`）双向比对，上游一加通道就报「多」，等于把上游演进当成我们的回归。
+ * 现在顶层键、方法名、通道名三处都只查「缺」，多出来的一律放过，只在输出里报个数便于观察。
  *
  * 截获方式与真实暴露路径一致：给 electron 一个桩，`contextBridge.exposeInMainWorld` 记下传进来的对象。
  * 因此**不需要**在产品代码里挂任何只供测试用的导出。
@@ -89,13 +93,19 @@ function fail(name, detail) {
   fails++
   console.log(`  FAIL ${name} :: ${detail}`)
 }
-function eqSet(name, actual, expected) {
-  const a = [...actual].sort()
-  const b = [...expected].sort()
-  const missing = b.filter((x) => !a.includes(x))
-  const extra = a.filter((x) => !b.includes(x))
-  if (!missing.length && !extra.length) pass(name, `${a.length} 项`)
-  else fail(name, `缺=${JSON.stringify(missing)} 多=${JSON.stringify(extra)}`)
+/**
+ * 单向包含：基线的每一项都必须在实际里。多出来的（上游新增）不算失败，只在 detail 里报个数。
+ * 这是本脚本所有判据的统一口径——见文件头的「为什么不双向比」。
+ */
+function includesAll(name, actual, expected) {
+  const a = new Set(actual)
+  const missing = [...expected].filter((x) => !a.has(x))
+  const extra = [...a].filter((x) => !new Set(expected).has(x))
+  if (!missing.length) {
+    pass(name, `${expected.length} 项齐全${extra.length ? `，另有 ${extra.length} 项上游新增（不拦截）` : ''}`)
+  } else {
+    fail(name, `缺=${JSON.stringify(missing)}${extra.length ? `；另有 ${extra.length} 项上游新增（不拦截）` : ''}`)
+  }
 }
 
 async function main() {
@@ -147,7 +157,7 @@ async function main() {
 
   if (api) {
     pass('preload 经 contextBridge 暴露 api', `顶层 ${Object.keys(api).length} 键`)
-    eqSet('顶层键集合与基线一致', Object.keys(api), Object.keys(BASELINE))
+    includesAll('基线顶层键都还在', Object.keys(api), Object.keys(BASELINE))
     for (const [k, expected] of Object.entries(BASELINE)) {
       if (!Array.isArray(expected)) continue
       const v = api[k]
@@ -155,7 +165,7 @@ async function main() {
         fail(`命名空间 ${k} 存在且是对象`, String(v))
         continue
       }
-      eqSet(`${k} 的方法集合与基线一致`, Object.keys(v), expected)
+      includesAll(`${k} 的方法都还在`, Object.keys(v), expected)
     }
   } else {
     fail('preload 经 contextBridge 暴露 api', '未截获到 exposeInMainWorld 调用')
@@ -199,7 +209,7 @@ async function main() {
     console.log(`\npreload 形状校验失败：${fails} 项`)
     process.exitCode = 1
   } else {
-    console.log('\npreload 形状校验通过：顶层键 / 命名空间方法名 / 二开通道名与基线一致。')
+    console.log('\npreload 形状校验通过：基线里的顶层键、命名空间方法、二开通道名都还在（上游新增不拦截）。')
   }
 }
 
