@@ -26,6 +26,31 @@ export function readImportSession(file: string): ImportSession {
 }
 
 /**
+ * 同一个解析，但**不抛**：`ok` 拿到会话对象，`corrupt` 表示源文件不是一份能用的会话。
+ *
+ * ## 为什么需要这个「不抛」的版本
+ *
+ * 源会话文件坏了（半截 JSON / `{ not json`）时，导入器原来的做法是**按文件名原样复制过去**——
+ * 解析不了不等于这份数据该消失，用户可能在原版里还能看到它，也可能想自己去修。
+ *
+ * 但 `f787c72` 之后这里改成先 `readImportSession(from)` 解析再重写，于是坏源一抛就落进外层统一兜底，
+ * 被记成 **`target-write-failed`（「写目标失败」）**，而且一个字节都没搬。两处都错：
+ *  - 方向：坏的是**源**，用户拿着「写失败」去查磁盘权限，永远查不到；
+ *  - 数据：原样复制过去本来能保住的东西，因为解析不了就没了。
+ *
+ * 所以解析与写入必须分开捕获：能解析 → 走正常的三态 / 合并流程；解析不了 → 由调用方原样复制并如实标注。
+ */
+export type SessionRead = { kind: 'ok'; session: ImportSession } | { kind: 'corrupt' }
+
+export function tryReadImportSession(file: string): SessionRead {
+  try {
+    return { kind: 'ok', session: readImportSession(file) }
+  } catch {
+    return { kind: 'corrupt' }
+  }
+}
+
+/**
  * 拆分历史（`compacted.file` 指向的 JSONL）的读取结果。**三态**，与 `readSourceDir` / `readMemoryFile`
  * 同一套语义：
  *  - `ok`      ：读到了；

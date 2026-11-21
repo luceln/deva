@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync } from 'fs'
+import { copyFileSync, mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { adoptSessionFile } from './services/chat-store'
@@ -6,8 +6,8 @@ import { historyLocked } from './services/chat-locks'
 import { backupBroken, inspectTarget } from './importer-target'
 import { decideExisting, sourceTail, type ExistingDecision } from './importer-session-merge'
 import { writeFileAtomic } from './services/atomic-write'
-import { readImportSession, readImportHistory, prepareImportHistory } from './importer-session-history'
-import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, writeFailureReason } from './importer-source-dir'
+import { readImportSession, tryReadImportSession, readImportHistory, prepareImportHistory } from './importer-session-history'
+import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, SOURCE_SESSION_BROKEN, inspectSourceFile, sourceFileFailureReason, writeFailureReason } from './importer-source-dir'
 import { SESSION_HISTORY_LOCKED, SESSION_MEDIA_MISSING, type Failure, type StepStat } from '../shared/import-protocol'
 import { missingSourceMedia } from './services/media-store'
 import type { Message } from './providers/types'
@@ -141,7 +141,16 @@ export function importSessions(
          * 判据见 importer-session-merge.ts：只有「目标的每条消息都能在源开头按序找到、且源更长」时
          * 才覆盖，此时目标里的内容一条都不会丢。其余一律保留本应用这份。
          */
-        const source = readImportSession(from), target = readImportSession(to)
+        const readSrc = tryReadImportSession(from)
+        /*
+         * 目标是一份有效会话、而**源**坏了：目标那份是好的，绝不能拿坏源去顶它。
+         * 原样复制也不行——目标位置已有更好的一份。只如实上报「源那条坏了，没覆盖本地」。
+         */
+        if (readSrc.kind === 'corrupt') {
+          stat.failed.push({ step: 'sessions', id, reason: SOURCE_SESSION_BROKEN })
+          continue
+        }
+        const source = readSrc.session, target = readImportSession(to)
         if (missingMedia(srcHome, from, source)) {
           stat.failed.push({ step: 'sessions', id, reason: SESSION_MEDIA_MISSING })
           continue
@@ -199,7 +208,26 @@ export function importSessions(
          *
          * 备份名不以 `.json` 结尾（见 backupBroken）：否则 `data/chats` 的索引重建会把它当成一个会话读进来。
          */
-        const source = readImportSession(from)
+        const read = tryReadImportSession(from)
+        /*
+         * 源解析不了：**原样复制过去**，并把原因如实标成源侧问题。
+         *
+         * 数据不能因为解析不了就被丢掉（父提交 `d45468b` 就是 `copyFileSync`，行为是对的）；
+         * 但也不能像 `f787c72` 之后那样落进外层兜底记成 `target-write-failed`——那是源坏了，
+         * 用户该去看源文件，不是去查磁盘写权限。
+         *
+         * 计进 `copied`（文件确实到了目标，会话列表里能看到它）**同时**进 `failed`（原因说清：
+         * 内容是坏的、已原样保留）。两处都写是刻意的：只进 copied 等于静默，只进 failed 会让人
+         * 以为没导进来、去重导一遍；分开写才是「东西在，但它是坏的，你别以为能用」。
+         */
+        if (read.kind === 'corrupt') {
+          copyFileSync(from, to)
+          const note: Failure = { step: 'sessions', id, reason: SOURCE_SESSION_BROKEN }
+          stat.failed.push(note)
+          stat.copied.push(id)
+          continue
+        }
+        const source = read.session
         /*
          * ⚠️ 顺序：**先**判拆分历史，**再**判附件。
          *
@@ -232,8 +260,78 @@ export function importSessions(
       stat.failed.push({ step: 'sessions', id, reason: writeFailureReason(e) })
       continue
     }
+    /*
+     * ⚠️ 只有主文件**这次真的写了**（copied / updated）才连带搬它的拆分历史（P1-③）。
+     *
+     * 以前这行在循环里无条件执行：主 JSON 因分叉判定 skipped 保留本地版本时，源里同名但尺寸不同的
+     * compacted 仍会被备份并覆盖——主文件还指向本地 count，拆分文件却成了源那份，行数与 pointer.count
+     * 对不上，加载缺段；报告里还是「compacted 成功、零失败」。
+     * 主文件没更新时，它引用的历史必须原样不动；要不要替换历史由主文件的决策统一决定。
+     *
+     * 但「不覆盖」不等于「不搬」：源里有 `sess_ok.compacted-123.jsonl` 这种**没被 compacted 指针引用**的
+     * 拆分文件时（历史遗留 / 指针已被合并掉），目标完全没有它，搬过去不会顶掉任何东西。
+     * `f787c72` 把整个函数删掉后，这类文件一条都过不来了——`prepareImportHistory` 只补**被引用**的那一份。
+     */
+    if (stat.copied.includes(id) || stat.updated.includes(id)) copyCompacted(srcDir, dstDir, safe, stat, names)
   }
   return stat
+}
+
+/**
+ * 复制某个会话的拆分文件（`<id>.compacted-<ts>.jsonl`），**仅当目标没有同名文件时**。
+ * 文件名里含 id，所以用 `${safe}.compacted-` 前缀匹配即可，不必解析主 JSON 的 compacted 字段。
+ *
+ * 源侧静默第 2 处（历史）：以前是 `try { names = readdirSync(srcDir) } catch { return }`——读不出源目录
+ * 就直接返回，主会话文件照样复制过去，但它引用的那段早期历史一个都没搬。现在复用主文件那次
+ * readdir 的结果（`srcNames`）：同一个目录读两次没有意义，而且每个会话都调一次本函数，
+ * 重复报同一条失败只会把失败清单刷成噪声（目录读失败已在 `importSessions` 开头统一报过）。
+ */
+function copyCompacted(
+  srcDir: string,
+  dstDir: string,
+  safe: string,
+  stat: { compacted: string[]; failed: Failure[] },
+  srcNames: string[]
+): void {
+  const prefix = `${safe}.compacted-`
+  for (const name of srcNames) {
+    if (!name.startsWith(prefix) || !name.endsWith('.jsonl')) continue
+    const to = join(dstDir, name)
+    const probe = inspectTarget(to)
+    if (probe.kind === 'blocked') {
+      stat.failed.push({ step: 'sessions', id: name, reason: 'target-blocked' })
+      continue
+    }
+    if (probe.kind === 'unreadable') {
+      stat.failed.push({ step: 'sessions', id: name, reason: 'target-unreadable' })
+      continue
+    }
+    if (probe.kind === 'usable') {
+      /*
+       * 目标已有同名 JSONL。**默认原样保留**：主文件没被源覆盖时，它引用的历史也不该被换掉。
+       *
+       * 例外是「上次写到一半」：尺寸与源不一致说明那份是残骸（写这段历史时被中断）。
+       * 挪开再重写——以前裸 existsSync 会把它当成「已存在」，那段历史此后永远读不全，
+       * 而当初的失败只在第一次导入时出现过一次。
+       */
+      const srcSize = inspectSourceFile(join(srcDir, name))
+      if (srcSize.kind !== 'ok') {
+        // 源那份此刻读不出来：不知道尺寸，就不动目标已有字节（读失败不代表源更新）
+        stat.failed.push({ step: 'sessions', id: name, reason: sourceFileFailureReason(srcSize) ?? SOURCE_FILE_UNREADABLE })
+        continue
+      }
+      if (probe.size === srcSize.size) continue
+      const bak = backupBroken(to)
+      console.warn(`[import] compacted/${name} 是半截文件（${probe.size}≠${srcSize.size}），已备份为 ${bak} 并重新复制`)
+    }
+    try {
+      copyFileSync(join(srcDir, name), to)
+      stat.compacted.push(name)
+    } catch (e) {
+      // 主文件已在，那段早期历史仍读不出来——属于真失败，别静默吞掉
+      stat.failed.push({ step: 'sessions', id: name, reason: writeFailureReason(e) })
+    }
+  }
 }
 
 /**
