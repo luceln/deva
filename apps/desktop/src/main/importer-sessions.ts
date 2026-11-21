@@ -8,7 +8,7 @@ import { decideExisting, sourceTail, type ExistingDecision } from './importer-se
 import { writeFileAtomic } from './services/atomic-write'
 import { readImportSession, readImportHistory, prepareImportHistory } from './importer-session-history'
 import { readSourceDir, SOURCE_DIR_UNREADABLE, SOURCE_FILE_UNREADABLE, writeFailureReason } from './importer-source-dir'
-import type { Failure, StepStat } from '../shared/import-protocol'
+import { SESSION_HISTORY_LOCKED, SESSION_MEDIA_MISSING, type Failure, type StepStat } from '../shared/import-protocol'
 import { missingSourceMedia } from './services/media-store'
 import type { Message } from './providers/types'
 
@@ -109,7 +109,7 @@ export function importSessions(
     const to = join(dstDir, `${safe}.json`)
     // Active turns hold the history array across awaits. Defer the entire session, not just cache adoption.
     if (historyLocked(safe)) {
-      stat.failed.push({ step: 'sessions', id, reason: 'session-history-locked' })
+      stat.failed.push({ step: 'sessions', id, reason: SESSION_HISTORY_LOCKED })
       continue
     }
     try {
@@ -129,8 +129,8 @@ export function importSessions(
          * 才覆盖，此时目标里的内容一条都不会丢。其余一律保留本应用这份。
          */
         const source = readImportSession(from), target = readImportSession(to)
-        if (!sourceDependenciesAvailable(srcHome, from, source)) {
-          stat.failed.push({ step: 'sessions', id, reason: SOURCE_FILE_UNREADABLE })
+        if (missingMedia(srcHome, from, source)) {
+          stat.failed.push({ step: 'sessions', id, reason: SESSION_MEDIA_MISSING })
           continue
         }
         const repaired = prepareImportHistory(from, to, source, target)
@@ -183,8 +183,8 @@ export function importSessions(
          * 备份名不以 `.json` 结尾（见 backupBroken）：否则 `data/chats` 的索引重建会把它当成一个会话读进来。
          */
         const source = readImportSession(from)
-        if (!sourceDependenciesAvailable(srcHome, from, source)) {
-          stat.failed.push({ step: 'sessions', id, reason: SOURCE_FILE_UNREADABLE })
+        if (missingMedia(srcHome, from, source)) {
+          stat.failed.push({ step: 'sessions', id, reason: SESSION_MEDIA_MISSING })
           continue
         }
         if (prepareImportHistory(from, to, source, source) && source.compacted)
@@ -217,13 +217,15 @@ export function importSessions(
  * 这一点很要紧：`JSON.parse` 对半截文件抛错时，若被 catch 成「内容不一样 → 不覆盖」，
  * 用户看到的是「跳过」，而真相是「这条根本没比对过」。
  */
-function sourceDependenciesAvailable(
-  srcHome: string,
-  file: string,
-  session: ReturnType<typeof readImportSession>
-): boolean {
-  try { return !missingSourceMedia(readImportHistory(file, session) as Message[], srcHome) }
-  catch { return false }
+/**
+ * 源侧这条会话引用的附件里，有没有「源里有、目标没有」的。
+ *
+ * 有就说明附件步骤还没备好（或失败），此时**不能**先写主档、更不能 hydrate：否则图片会被降级成
+ * 「数据已丢失」的说明文字，而它其实在源里好好躺着。源里本来就没有的 blob 不算——正常载入同样降级。
+ */
+function missingMedia(srcHome: string, file: string, session: ReturnType<typeof readImportSession>): boolean {
+  try { return missingSourceMedia(readImportHistory(file, session) as Message[], srcHome) }
+  catch { return true }
 }
 
 function decideExistingByFile(from: string, to: string): ExistingDecision | 'read-failed' {
