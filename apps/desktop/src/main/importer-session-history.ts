@@ -1,8 +1,8 @@
 import { readFileSync } from 'fs'
+import { basename, dirname, join } from 'path'
+import { decideExisting } from './importer-session-merge'
 import { inspectTarget } from './importer-target'
 import { writeFileAtomic } from './services/atomic-write'
-import { decideExisting } from './importer-session-merge'
-import { basename, dirname, join } from 'path'
 
 export interface ImportSession {
   id: string
@@ -40,6 +40,15 @@ export function prepareImportHistory(sourceFile: string, targetFile: string,
   const dest = join(dirname(targetFile), target.compacted.file)
   const probe = inspectTarget(dest)
   if (probe.kind === 'usable') {
+    if (inspectTarget(targetFile).kind === 'absent') {
+      if (!source.compacted || source.compacted.file !== target.compacted.file ||
+          source.compacted.count !== target.compacted.count)
+        throw new Error('Cannot establish ownership of orphaned history')
+      readImportHistory(sourceFile, source)
+      if (readFileSync(dest, 'utf8') !== readFileSync(join(dirname(sourceFile), source.compacted.file), 'utf8'))
+        throw new Error('Orphaned history conflicts with source')
+      return false
+    }
     readImportHistory(targetFile, target)
     return false
   }
@@ -52,6 +61,5 @@ export function prepareImportHistory(sourceFile: string, targetFile: string,
   readImportHistory(sourceFile, source) // validate JSONL/count before any destination write
   const bytes = readFileSync(join(dirname(sourceFile), source.compacted.file), 'utf8')
   writeFileAtomic(dest, bytes)
-  readImportHistory(targetFile, target)
   return true
 }

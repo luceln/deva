@@ -4,6 +4,7 @@ import { createHash } from 'crypto'
 import { importSessions } from '../../apps/desktop/src/main/importer-sessions'
 import { ensureSession, getSession, save, adoptSessionFile } from '../../apps/desktop/src/main/services/chat-store'
 import { busySessions, compacting, rewinding } from '../../apps/desktop/src/main/services/chat-locks'
+import { runImport } from '../../apps/desktop/src/main/importer'
 
 type Eq = (name: string, actual: unknown, expected: unknown) => unknown
 const home = () => process.env.DEVA_HOME!
@@ -82,6 +83,29 @@ export async function importHistoryConflict(eq: Eq): Promise<void> {
 }
 
 export async function importDependencyRetry(eq: Eq): Promise<void> {
+  const freshId = 'new-compacted', fresh = fixture(freshId), freshFile = `${freshId}.compacted-old.jsonl`
+  const freshBody = JSON.stringify(msg('fresh early'))+'\n'
+  write(fresh.from, { ...shell(freshId, [msg('fresh tail')]), compacted: { file: freshFile, count: 1 } })
+  fs.writeFileSync(path.join(chats(fresh.src), freshFile), freshBody)
+  const freshResult = importSessions(fresh.src)
+  eq('new compacted session: dependency and main both publish', freshResult.copied.includes(freshId), true)
+  eq('new compacted session: dependency exact', fs.readFileSync(path.join(chats(home()), freshFile), 'utf8'), freshBody)
+  eq('new compacted session: full history reloads', ensureSession(freshId).messages.length, 2)
+
+  const orphanId = 'orphan-compacted', orphan = fixture(orphanId), orphanFile = `${orphanId}.compacted-old.jsonl`
+  const orphanBody = JSON.stringify(msg('orphan early'))+'\n'
+  write(orphan.from, { ...shell(orphanId, [msg('orphan tail')]), compacted: { file: orphanFile, count: 1 } })
+  fs.writeFileSync(path.join(chats(orphan.src), orphanFile), orphanBody)
+  fs.writeFileSync(path.join(chats(home()), orphanFile), orphanBody)
+  eq('orphan compacted: matching dependency permits retry', importSessions(orphan.src).copied.includes(orphanId), true)
+  const conflictId = 'orphan-conflict', conflict = fixture(conflictId), conflictFile = `${conflictId}.compacted-old.jsonl`
+  write(conflict.from, { ...shell(conflictId, [msg('tail')]), compacted: { file: conflictFile, count: 1 } })
+  fs.writeFileSync(path.join(chats(conflict.src), conflictFile), JSON.stringify(msg('source early'))+'\n')
+  fs.writeFileSync(path.join(chats(home()), conflictFile), JSON.stringify(msg('local early'))+'\n')
+  const conflictBytes = fs.readFileSync(path.join(chats(home()), conflictFile), 'utf8')
+  eq('orphan compacted: conflicting bytes are not overwritten', importSessions(conflict.src).copied.includes(conflictId), false)
+  eq('orphan compacted: local bytes survive', fs.readFileSync(path.join(chats(home()), conflictFile), 'utf8'), conflictBytes)
+
   const id = 'dependency-retry', f = fixture(id), file = `${id}.compacted-old.jsonl`
   const body = JSON.stringify(msg('early'))+'\n'
   const main = { ...shell(id, [msg('⟦deva:compaction⟧ summary'), msg('tail')]), compacted: { file, count: 1 } }
@@ -102,7 +126,7 @@ export async function importDependencyRetry(eq: Eq): Promise<void> {
   eq('legacy partial retry: complete history reloads', ensureSession(id).messages.length, 3)
   // Existing nonidentical bytes are not proven crash debris. Never overwrite them on a repeated import.
   fs.writeFileSync(targetDependency, JSON.stringify(msg('user-owned changed early'))+'\n')
-  const conflict = fs.readFileSync(targetDependency, 'utf8')
+  const retainedBytes = fs.readFileSync(targetDependency, 'utf8')
   importSessions(f.src)
-  eq('retry: local JSONL conflict never overwritten', fs.readFileSync(targetDependency, 'utf8'), conflict)
+  eq('retry: local JSONL conflict never overwritten', fs.readFileSync(targetDependency, 'utf8'), retainedBytes)
 }
