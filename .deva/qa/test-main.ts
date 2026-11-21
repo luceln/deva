@@ -21,6 +21,7 @@ import { importSessions } from '../../apps/desktop/src/main/importer-sessions'
 import { importActive, importHistoryConflict, importDependencyRetry, importMedia } from './import-history-tests'
 import { configWriteGuard } from './config-memory-index-tests'
 import { indexRecovery } from './index-recovery-tests'
+import { swapIdentity } from './swap-identity-tests'
 import { importSkills } from '../../apps/desktop/src/main/importer-skills'
 import { importMemories } from '../../apps/desktop/src/main/importer-memory'
 import { importPersonas } from '../../apps/desktop/src/main/importer-personas'
@@ -6299,6 +6300,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   importmedia: () => importMedia(eq),
   cfgwrite: () => configWriteGuard(eq),
   idxrecover: () => indexRecovery(eq),
+  swapidentity: () => swapIdentity(eq),
   wtmerge: scenarioWorktreeMerge,
   memcond: scenarioMemCondense,
   dangclass: scenarioDanglingClassify,

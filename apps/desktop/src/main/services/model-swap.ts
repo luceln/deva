@@ -1,6 +1,6 @@
 import { activeMembers } from './members'
 import { markMemberSetting } from './chat-members'
-import { getSession, saveOutcome } from './chat-store'
+import { getSession, saveOutcome, type StoredSession } from './chat-store'
 import { syncTaskModel } from './tasks'
 import { resolveAvailability, isUsableRef } from './model-availability'
 import type {
@@ -34,6 +34,14 @@ interface Candidate {
   ref: string
   /** 成员会话所属的主对话 id；主对话本身为 undefined。提交前据此复核成员是否仍未移除。 */
   memberOf?: string
+  /**
+   * 拍快照时**那个会话对象本身**（P2-9）。提交前用它验「还是同一个会话」，而不只是「有个会话叫这个名字」。
+   *
+   * 为什么必须有它：`sessionId` 不是身份。任务对话的 id 由任务决定（`task-<id>`），删掉后任务再触发会
+   * **用同一个 id 重建**，新会话的 model 引用也可能与旧的一模一样。此时只比 id 与 model 字符串，旧替换就会
+   * 恢复并作用到这个刚建出来的对话上——用户看到的是「我删了它，它却带着新模型又回来了」。
+   */
+  session: StoredSession
 }
 
 /**
@@ -56,11 +64,16 @@ function candidatesOf(mainId: string): Candidate[] {
   const main = getSession(mainId)
   if (!main) return []
   const list: Candidate[] = [
-    { id: main.id, name: main.title || (isEn() ? 'New chat' : '新对话'), ref: main.model ?? '' }
+    {
+      id: main.id,
+      name: main.title || (isEn() ? 'New chat' : '新对话'),
+      ref: main.model ?? '',
+      session: main
+    }
   ]
   for (const m of activeMembers(main.members)) {
     const sub = getSession(m.sessionId)
-    if (sub) list.push({ id: sub.id, name: m.name, ref: sub.model ?? '', memberOf: main.id })
+    if (sub) list.push({ id: sub.id, name: m.name, ref: sub.model ?? '', memberOf: main.id, session: sub })
   }
   return list
 }
@@ -170,6 +183,20 @@ export async function applyModelSwap(p: {
     const session = getSession(c.id)
     if (!session) {
       // 会话文件在提交前消失：没有可写的地方，也不算「用户换了模型」
+      continue
+    }
+    /*
+     * ⚠️ 必须是**同一个会话对象**（P2-9）。`getSession` 走 `loadSessionFile`，会话被删掉后重建会得到
+     * 一个新对象，即使 id 与 model 引用都与快照一模一样。那种情况下不能把 `to` 写进去——那等于让这次替换
+     * 作用到用户刚新建的对话上（典型：任务对话 `task-<id>` 删掉后任务再触发、以同 id 重建）。
+     */
+    if (session !== c.session) {
+      superseded.push({
+        sessionId: c.id,
+        name: c.name,
+        ref: session.model ?? '',
+        kind: fromKind ?? 'missing'
+      })
       continue
     }
     const currentRef = session.model ?? ''
