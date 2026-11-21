@@ -80,3 +80,29 @@ export async function importHistoryConflict(eq: Eq): Promise<void> {
   eq('complete prefix: cache includes history and tail', getSession(id)!.messages.length, 4)
   eq('complete prefix: do not copy unreferenced source JSONL', fs.existsSync(path.join(chats(home()), srcFile)), false)
 }
+
+export async function importDependencyRetry(eq: Eq): Promise<void> {
+  const id = 'dependency-retry', f = fixture(id), file = `${id}.compacted-old.jsonl`
+  const body = JSON.stringify(msg('early'))+'\n'
+  const main = { ...shell(id, [msg('⟦deva:compaction⟧ summary'), msg('tail')]), compacted: { file, count: 1 } }
+  write(f.from, main); fs.writeFileSync(path.join(chats(f.src), file), body)
+  const targetDependency = path.join(chats(home()), file)
+  fs.mkdirSync(targetDependency)
+  const first = importSessions(f.src)
+  eq('dependency failure: reported', first.failed.length > 0, true)
+  eq('dependency failure: do not publish broken main', fs.existsSync(f.to), false)
+  // Real persisted legacy partial import: main exists but referenced JSONL failed. Repeated retries must stay red.
+  write(f.to, main)
+  for (let i=0; i<2; i++) eq('legacy partial retry: failure remains visible', importSessions(f.src).failed.length > 0, true)
+  fs.rmdirSync(targetDependency)
+  const repaired = importSessions(f.src)
+  eq('legacy partial retry: reference actually restored', fs.existsSync(targetDependency), true)
+  eq('legacy partial retry: correct bytes', fs.existsSync(targetDependency) ? fs.readFileSync(targetDependency, 'utf8') : '', body)
+  eq('legacy partial retry: no failure after repair', repaired.failed, [])
+  eq('legacy partial retry: complete history reloads', ensureSession(id).messages.length, 3)
+  // Existing nonidentical bytes are not proven crash debris. Never overwrite them on a repeated import.
+  fs.writeFileSync(targetDependency, JSON.stringify(msg('user-owned changed early'))+'\n')
+  const conflict = fs.readFileSync(targetDependency, 'utf8')
+  importSessions(f.src)
+  eq('retry: local JSONL conflict never overwritten', fs.readFileSync(targetDependency, 'utf8'), conflict)
+}

@@ -18,7 +18,7 @@ import { runImport } from '../../apps/desktop/src/main/importer'
 import { canImport, upstreamHome } from '../../apps/desktop/src/main/importer-gate'
 import { acquireLock, isLockLive, readLockPid, releaseLock, LOCK_FILE } from '../../apps/desktop/src/main/importer-lock'
 import { importSessions } from '../../apps/desktop/src/main/importer-sessions'
-import { importActive, importHistoryConflict } from './import-history-tests'
+import { importActive, importHistoryConflict, importDependencyRetry } from './import-history-tests'
 import { importSkills } from '../../apps/desktop/src/main/importer-skills'
 import { importMemories } from '../../apps/desktop/src/main/importer-memory'
 import { importPersonas } from '../../apps/desktop/src/main/importer-personas'
@@ -6255,6 +6255,7 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   sessync: scenarioSessionSync,
   importactive: () => importActive(eq),
   importhistory: () => importHistoryConflict(eq),
+  importretry: () => importDependencyRetry(eq),
   wtmerge: scenarioWorktreeMerge,
   memcond: scenarioMemCondense,
   dangclass: scenarioDanglingClassify,

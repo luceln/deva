@@ -1,4 +1,7 @@
 import { readFileSync } from 'fs'
+import { inspectTarget } from './importer-target'
+import { writeFileAtomic } from './services/atomic-write'
+import { decideExisting } from './importer-session-merge'
 import { basename, dirname, join } from 'path'
 
 export interface ImportSession {
@@ -28,4 +31,27 @@ export function readImportHistory(file: string, doc: ImportSession): unknown[] {
   if (older.length !== doc.compacted.count || older.some((m) => !m || typeof m !== 'object'))
     throw new Error('Incomplete compacted history')
   return [...older, ...doc.messages]
+}
+
+/** Prepare only the referenced JSONL. Never replace existing bytes, even if their size differs. */
+export function prepareImportHistory(sourceFile: string, targetFile: string,
+  source: ImportSession, target: ImportSession): boolean {
+  if (!target.compacted) return false
+  const dest = join(dirname(targetFile), target.compacted.file)
+  const probe = inspectTarget(dest)
+  if (probe.kind === 'usable') {
+    readImportHistory(targetFile, target)
+    return false
+  }
+  if (probe.kind !== 'absent') throw new Error('Target history blocked or unreadable')
+  // Legacy partial import: source must name the exact dependency and contain the target live tail.
+  if (!source.compacted || source.compacted.file !== target.compacted.file ||
+      source.compacted.count !== target.compacted.count ||
+      !['same', 'source-newer'].includes(decideExisting(target, source)))
+    throw new Error('Cannot establish ownership of missing history')
+  readImportHistory(sourceFile, source) // validate JSONL/count before any destination write
+  const bytes = readFileSync(join(dirname(sourceFile), source.compacted.file), 'utf8')
+  writeFileAtomic(dest, bytes)
+  readImportHistory(targetFile, target)
+  return true
 }
