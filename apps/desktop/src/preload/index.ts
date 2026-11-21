@@ -361,7 +361,9 @@ export type MemoryIpcResult = { ok: true; snapshot: MemorySnapshot } | { ok: fal
  *  - `model-unavailable`：没有可用的默认模型（不存在 / 被停用 / 密钥读不出来）。`reason` 已是一句
  *    可直接显示的话，`detail` 是技术定位。这类**没有修改任何记忆**；
  *  - `failed`：模型跑失败（网络 / 超时 / 返回不可解析 / 写盘失败）。同样没有修改记忆；
- *  - `aborted`：被中止。
+ *  - `aborted`：被中止；
+ *  - `concurrent-change`：等待模型期间记忆被改 / 删 / 新增，**整轮没提交**（记忆未动），可再点一次；
+ *  - `over-limit`：模型给出的集合仍超限，未提交（记忆未动），需要先删几条再整理。
  */
 export type MemoryCondenseResult =
   | {
@@ -393,9 +395,11 @@ export type MemoryCondenseResult =
     }
   | {
       ok: false
-      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted'
+      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit'
       reason: string
       detail?: string
+      /** 只有 `concurrent-change` 带：被改动 / 删除 / 新增的条目 id。 */
+      changed?: string[]
     }
 
 /** Agent 提示词新建/更新入参（有 id 覆盖，无 id 新建）。 */

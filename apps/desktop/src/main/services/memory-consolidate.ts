@@ -45,16 +45,15 @@ export interface ConsolidateStats {
   before: { count: number; used: number }
   after: { count: number; used: number }
   backup: string
-  /** 归纳结果里因「等待期间记忆已被改动」而没写回去的条目（见 `mergeConcurrent`）。 */
+  /**
+   * 因「等待期间记忆被改动」而整轮没提交时，被改动 / 删除 / 新增的条目。
+   *
+   * 与 `ok:false` 的 `reason` 一起回传：用户要知道是哪几条变了，否则「没提交」看起来像系统抽风。
+   */
   skipped: SkippedEntry[]
 }
 
-/**
- * 归纳结果里被**主动跳过**的条目：归纳在等模型返回的那段时间里，用户（或别的会话）动了这条记忆。
- *
- * 为什么要单独记一份并回传：跳过意味着「这次归纳对这条没生效」。静默吞掉的话，用户看到
- * 「已整理」却发现某条既没被压也没按用户的新值保留，无从判断是模型没做还是系统挡了。
- */
+/** 归纳结果里被**主动跳过**的条目：归纳在等模型返回的那段时间里，用户（或别的会话）动了这条记忆。 */
 export interface SkippedEntry {
   id: string
   /**
@@ -68,8 +67,69 @@ export interface SkippedEntry {
   current: string | null
 }
 
+/**
+ * 归纳被拒绝提交的原因码（与「模型跑失败」「写盘失败」分开）。
+ *
+ * 为什么必须是显式的：用户点「一键整理」时看到「已整理」却什么都没变，与看到「期间你改过记忆，
+ * 这一轮没提交」是完全不同的两件事——后者他知道该怎么办（再点一次）。
+ */
+export type ConsolidateRejectCode =
+  /** 等待模型期间，已有条目被改 / 被删，或出现了新条目：整轮拒绝（见 `detectConcurrentChange`）。 */
+  | 'concurrent-change'
+  /** 最终集合超限（条数 / 总预算含 incoming 预留 / 单条长度），不能提交。 */
+  | 'over-limit'
 
-type ConsolidateResult = ({ ok: true } & ConsolidateStats) | { ok: false; reason: string }
+/**
+ * 归纳期间的并发改动。
+ *
+ * 判据是「已有 id 被改 / 被删，或出现了 before 里没有的新 id」——**整轮拒绝**，不做局部保全。
+ *
+ * 为什么不像上游那样逐条跳过：跳过意味着「这一轮归纳仍然写回，只是某几条按用户版本保留」。
+ * 那要求调用方（`replaceMemories`）写出的集合恰好等于「模型结果 ∪ 用户改动」，而任何一处漏算
+ * 都会静默丢条目（实测：用户改 A、模型把 A+B 合并到 A，候选保留用户 A 却删了 B，ok:true）。
+ * 归纳本身是可重试的操作，整轮拒绝后重跑一次就得到「基于用户最新内容」的结果，语义上更干净。
+ *
+ * 返回值只用于报告（界面要说清是哪几条变了），不参与写入决策。
+ */
+function detectConcurrentChange(before: MemoryEntry[], current: MemoryEntry[]): { changed: SkippedEntry[]; added: string[] } {
+  const was = new Map(before.map((e) => [e.id, e]))
+  const now = new Map(current.map((e) => [e.id, e]))
+  const changed: SkippedEntry[] = []
+  for (const old of before) {
+    const cur = now.get(old.id)
+    if (!cur) changed.push({ id: old.id, reason: 'deleted', content: null, current: null })
+    else if (cur.content !== old.content)
+      changed.push({ id: old.id, reason: 'modified', content: null, current: cur.content })
+  }
+  const added = current.filter((e) => !was.has(e.id)).map((e) => e.id)
+  return { changed, added }
+}
+
+/** 最终集合能否提交：条数、总预算（含 incoming 预留）、单条长度。不通过就不写盘。 */
+function finalSetFits(
+  scope: MemoryScope,
+  entries: MemoryEntry[],
+  incoming: string
+): { ok: true } | { ok: false; reason: string } {
+  const lim = memoryLimits(scope)
+  if (entries.length > lim.maxEntries)
+    return { ok: false, reason: `归纳后仍有 ${entries.length} 条，超过上限 ${lim.maxEntries} 条` }
+  const tooLong = entries.find((e) => e.content.length > lim.maxChars)
+  if (tooLong) return { ok: false, reason: `归纳后有条目超过 ${lim.maxChars} 字（${tooLong.id}）` }
+  // incoming 若还要写进去，得给它留出位置：否则「归纳成功」之后紧跟的写入必然再撞一次上限。
+  const room = incoming
+    ? formatMemoryLine({ id: 'x_00000000', content: incoming, createdAt: 0, updatedAt: 0 }).length
+    : 0
+  const used = memoryUsage(entries) + room
+  if (used > lim.budget)
+    return { ok: false, reason: `归纳后仍有 ${used} 字${incoming ? '（已含将写入的新条目）' : ''}，超过预算 ${lim.budget} 字` }
+  return { ok: true }
+}
+
+
+type ConsolidateResult =
+  | ({ ok: true } & ConsolidateStats)
+  | { ok: false; code?: ConsolidateRejectCode; reason: string; changed?: string[] }
 
 /**
  * 一次「纯压缩」的结果——不带任何新增内容，只把现有条目精简。
@@ -93,7 +153,7 @@ export interface CondenseStats {
   /** 是否真的腾出了空间（`freed > 0`）。 */
   freedSpace: boolean
   backup: string
-  /** 归纳结果里因「等待期间记忆已被改动 / 删除」而没写回去的条目（见 `mergeConcurrent`）。 */
+  /** 见 `ConsolidateStats.skipped`：整轮未提交时被改动 / 删除的条目。 */
   skipped: SkippedEntry[]
 }
 
@@ -107,10 +167,20 @@ export type CondenseFailCode =
   | 'failed'
   /** 调用方主动中止。 */
   | 'aborted'
+  /** 等待模型期间记忆被改 / 删 / 新增：整轮拒绝，未写盘。 */
+  | 'concurrent-change'
+  /** 归纳后的集合仍超限（条数 / 预算 / 单条长度）：不提交。 */
+  | 'over-limit'
 
 export type CondenseResult =
   | ({ ok: true } & CondenseStats)
-  | { ok: false; code: CondenseFailCode; reason: string }
+  | {
+      ok: false
+      code: CondenseFailCode
+      reason: string
+      /** 只有 `concurrent-change` 带：被改动 / 删除 / 新增的条目 id。 */
+      changed?: string[]
+    }
 
 /**
  * 同一份记忆文件同时只跑一次整理：并发撞满的写入共用这一次的结果，之后各自重写。
@@ -123,6 +193,17 @@ const inflight = new Map<string, Promise<ConsolidateResult | CondenseResult>>()
 /**
  * 写入一条记忆；撞上限时先归纳再写（model 为空 = 不能调模型，按原样拒写）。
  * consolidated：发生过归纳（不论之后写没写成）；failure：归纳没成功的原因。
+ *
+ * ## 重试为什么要跟「第一次写入前的旧版本」比
+ *
+ * 归纳期间条目可能被用户改 / 删 / 合并。原实现是「归纳后 id 还在就按 id 更新」，判据只是 id 存在——
+ * 于是
+ *  - 用户把 A 改成了新内容，归纳结果重试仍按 A 的 id 写入 → **用户改动被覆盖**；
+ *  - A 被删掉、模型合并出一个同 id 的新条目 → 按 id 写回 = **把已删除的条目复活**。
+ *
+ * 现在的判据是「该 id 的内容仍等于第一次写入前的那份」。不等就不写，且**绝不退化成新增**
+ * （退化成新增会在记忆里留下一条用户从没见过的条目，还占预算）。无 id 的写入不受影响：
+ * 逐字相同即幂等成功，那是既有行为。
  */
 export async function writeMemoryWithConsolidation(
   content: string,
@@ -133,11 +214,39 @@ export async function writeMemoryWithConsolidation(
 ): Promise<{ result: MemoryWriteResult; consolidated?: ConsolidateStats; failure?: string }> {
   const first = writeMemory(content, id, scope)
   if (first.ok || (first.code !== 'full' && first.code !== 'budget') || !model) return { result: first }
+  /*
+   * 归纳前记下「要更新的那条当时是什么样」。`first` 只可能是 full / budget，说明 id 对应的条目**存在**
+   * （不存在会走 notFound 提前返回），所以这里能读到一份确定的旧版本。
+   */
+  const idBefore = id ? listMemories(scope).find((e) => e.id === id) : undefined
   const c = await consolidate(scope, content, id, model, signal)
   if (!c.ok) return { result: first, failure: c.reason }
-  // 要更新的那条可能已被并进别的条目：那就按新增写入。
-  const target = id && listMemories(scope).some((e) => e.id === id) ? id : undefined
-  return { result: writeMemory(content, target, scope), consolidated: c }
+  if (id) {
+    const now = listMemories(scope).find((e) => e.id === id)
+    if (!idBefore || !now) {
+      // 归纳期间被删 / 被合并掉：按 id 写回等于复活，退化成新增等于凭空造一条。两种都不做。
+      return {
+        result: {
+          ok: false,
+          code: 'memory-changed',
+          error: `${scopeLabel(scope)}中 id 为 ${id} 的记忆在归纳期间被删除或合并，本次没有写入（可用 memory_read 查看当前记忆后重试）`
+        },
+        consolidated: c
+      }
+    }
+    if (now.content !== idBefore.content) {
+      // 归纳期间被用户改过：他的新内容优先，本次写入作废（不覆盖、也不另存一条）。
+      return {
+        result: {
+          ok: false,
+          code: 'memory-changed',
+          error: `${scopeLabel(scope)}中 id 为 ${id} 的记忆在归纳期间被改动，本次没有写入以免覆盖你的修改（可重试一次）`
+        },
+        consolidated: c
+      }
+    }
+  }
+  return { result: writeMemory(content, id, scope), consolidated: c }
 }
 
 /**
@@ -211,6 +320,12 @@ async function runCondense(
     }
     const parsed = parseEntries(text, scope, before, '')
     if (!parsed.ok) {
+      /*
+       * 「归纳后仍接近上限」不是模型跑歪了，而是它给出的集合本身就放不下——重试大概率得到同样结果，
+       * 每轮还要多花一次调用。按 `over-limit` 直接返回，与并发冲突分开。
+       */
+      if (/仍接近上限/.test(parsed.reason))
+        return { ok: false, code: 'over-limit', reason: parsed.reason }
       reason = parsed.reason
       continue
     }
@@ -221,26 +336,38 @@ async function runCondense(
     const cur = readMemories(scope)
     if (cur.kind === 'unreadable') {
       // 读不出来就不知道现在有哪些条目，此时覆盖写等于拿归纳结果抹掉盘上原有内容。
-      reason = `记忆文件读不出来（${cur.error}），为避免覆盖原有内容，本次没有写回`
-      continue
+      return { ok: false, code: 'failed', reason: `记忆文件读不出来（${cur.error}），为避免覆盖原有内容，本次没有写回` }
     }
-    const merged = mergeConcurrent(before, parsed.entries, cur.entries)
+    // 等待模型期间有人动过记忆 → 整轮拒绝（见 detectConcurrentChange 的说明）。
+    const drift = detectConcurrentChange(before, cur.entries)
+    if (drift.changed.length || drift.added.length)
+      return {
+        ok: false,
+        code: 'concurrent-change',
+        reason: `整理期间记忆被改动或新增（${[...drift.changed.map((c) => `${c.id}:${c.reason}`), ...drift.added.map((id) => `${id}:added`)].join('、')}），这一轮结果没有提交，请再整理一次`,
+        changed: [...drift.changed.map((c) => c.id), ...drift.added]
+      }
+    /*
+     * 超限不重试：模型再跑一次也可能给出同样的集合，而且每轮都要付一次调用。
+     * 直接返回可区分的原因，让用户自己决定（删几条再整理）。
+     */
+    const fits = finalSetFits(scope, parsed.entries, '')
+    if (!fits.ok) return { ok: false, code: 'over-limit', reason: fits.reason }
     const backup = backupMemories(scope, cur.entries)
-    if (!replaceMemories(scope, merged.entries)) {
-      reason = '整理结果写入失败（磁盘不可写或空间不足）'
-      continue
+    if (!replaceMemories(scope, parsed.entries)) {
+      return { ok: false, code: 'failed', reason: '整理结果写入失败（磁盘不可写或空间不足）' }
     }
     const usedBefore = memoryUsage(before)
-    const usedAfter = memoryUsage(merged.entries)
+    const usedAfter = memoryUsage(parsed.entries)
     return {
       ok: true,
       before: { count: before.length, used: usedBefore },
-      after: { count: merged.entries.length, used: usedAfter },
+      after: { count: parsed.entries.length, used: usedAfter },
       freed: usedBefore - usedAfter,
-      changed: countChanged(before, merged.entries, merged.skipped),
+      changed: countChanged(before, parsed.entries, []),
       freedSpace: usedAfter < usedBefore,
       backup,
-      skipped: merged.skipped
+      skipped: []
     }
   }
   return { ok: false, code, reason: reason || '整理没有产出可用结果' }
@@ -310,33 +437,41 @@ async function run(
     }
     const parsed = parseEntries(text, scope, before, normalizeMemory(incoming))
     if (!parsed.ok) {
+      if (/仍接近上限/.test(parsed.reason)) return { ok: false, code: 'over-limit', reason: parsed.reason }
       reason = parsed.reason
       continue
     }
     /*
-     * 写回前重新读一次当前状态，逐条校验（见 mergeConcurrent）：
+     * 写回前重新读一次当前状态，逐条校验（见 detectConcurrentChange）：
      * 归纳期间被用户改过 / 删掉的条目不拿归纳结果顶掉，也不复活。
      */
     const cur = readMemories(scope)
     if (cur.kind === 'unreadable') {
       // 读不出来就不知道现在有哪些条目，此时覆盖写等于拿归纳结果抹掉盘上原有内容。
-      reason = `记忆文件读不出来（${cur.error}），为避免覆盖原有内容，本次没有写回`
-      continue
+      return { ok: false, reason: `记忆文件读不出来（${cur.error}），为避免覆盖原有内容，本次没有写回` }
     }
-    const merged = mergeConcurrent(before, parsed.entries, cur.entries)
+    // 等待模型期间有人动过记忆 → 整轮拒绝（见 detectConcurrentChange 的说明）。
+    const drift = detectConcurrentChange(before, cur.entries)
+    if (drift.changed.length || drift.added.length)
+      return {
+        ok: false,
+        reason: `归纳期间记忆被改动或新增（${[...drift.changed.map((c) => `${c.id}:${c.reason}`), ...drift.added.map((id) => `${id}:added`)].join('、')}），这一轮结果没有提交，请再试一次`,
+        changed: [...drift.changed.map((c) => c.id), ...drift.added]
+      }
+    const fits = finalSetFits(scope, parsed.entries, normalizeMemory(incoming))
+    if (!fits.ok) return { ok: false, reason: fits.reason }
     const backup = backupMemories(scope, cur.entries)
     // 写盘成败必须回传：返回 ok:true 而实际没落盘，用户看到的是「旧条目删了、新条目也没进来」，
     // 下一次归纳还会基于同一份满记忆再跑一遍。与 memory.ts 的 saveMemories 同一口径。
-    if (!replaceMemories(scope, merged.entries)) {
-      reason = '归纳结果写入失败（磁盘不可写或空间不足）'
-      continue
+    if (!replaceMemories(scope, parsed.entries)) {
+      return { ok: false, reason: '归纳结果写入失败（磁盘不可写或空间不足）' }
     }
     return {
       ok: true,
       before: { count: before.length, used: memoryUsage(before) },
-      after: { count: merged.entries.length, used: memoryUsage(merged.entries) },
+      after: { count: parsed.entries.length, used: memoryUsage(parsed.entries) },
       backup,
-      skipped: merged.skipped
+      skipped: []
     }
   }
   return { ok: false, reason: reason || '归纳没有产出可用结果' }
@@ -491,97 +626,6 @@ function parseEntries(
   if (out.length + 1 > lim.maxEntries * ACCEPT_RATIO || memoryUsage(out) + room > lim.budget * ACCEPT_RATIO)
     return { ok: false, reason: '归纳后仍接近上限' }
   return { ok: true, entries: out }
-}
-
-/**
- * 把归纳结果与「归纳期间存储里实际的样子」合并，**逐条校验当前状态**。
- *
- * 归纳的窗口是「读完 before → 等模型（最长 90 秒）→ 写回」。这段时间里用户完全可能在记忆面板里
- * 改掉或删掉某条。上游 `718908e` 的写法只看 id 集合：`result` 里的条目只要 id 还在 `current` 里就
- * 原样写回，于是
- *  - 用户改过的值被归纳结果顶掉（最后写入者胜）；
- *  - 用户删掉的条目（模型在删除前就读到了它）按 id 写回 → **已删除的条目复活**。
- *
- * 两种都是「用户刚做的操作被系统悄悄撤销」，所以这里改成：**归纳结果只对「和归纳开始时一模一样」的
- * 条目生效**。判据是 id 存在且内容与 `before` 逐字相同（内容就是这条记忆的全部数据；`updatedAt`
- * 单独变而内容不变时，用户看到的东西没变，按未改动处理）。
- *
- * 跳过的不静默吞：`skipped` 逐条说明是「已删除」还是「已被改动」，由调用方回传给界面 / 工具结果。
- *
- * @param before  归纳开始时读到的条目（判定「有没有被人动过」的基准）
- * @param result  模型给出的结果
- * @param current 模型返回后、写盘前重新读到的当前条目
- */
-function mergeConcurrent(
-  before: MemoryEntry[],
-  result: MemoryEntry[],
-  current: MemoryEntry[]
-): { entries: MemoryEntry[]; skipped: SkippedEntry[] } {
-  const was = new Map(before.map((e) => [e.id, e]))
-  const now = new Map(current.map((e) => [e.id, e]))
-  const skipped: SkippedEntry[] = []
-  const entries: MemoryEntry[] = []
-  /*
-   * 等待期间被删掉的那些条目的内容。模型可能不按 id 回（prompt 里允许填 null / 自己编 id，
-   * 常见于它把几条合并后的结果），`parseEntries` 会给这种条目一个新 id，于是 id 校验管不到它——
-   * 但它带着**已被用户删掉的内容**回来，写下去就是复活，只是换了个 id。
-   *
-   * 所以对新 id 的条目再按内容判一次：内容与某条「归纳开始时在、现在没了」的条目逐字相同 → 跳过。
-   * 只比逐字相同，不做语义猜测：合并成新内容的情况不在此列（那是模型的正常产出）。
-   */
-  const deletedContents = new Map<string, string>()
-  for (const old of before) if (!now.has(old.id)) deletedContents.set(old.content, old.id)
-  for (const e of result) {
-    const old = was.get(e.id)
-    // 模型新造的条目（id 不在 before 里）：没有「用户版本」可言，正常写入。
-    if (!old) {
-      const revivedFrom = deletedContents.get(e.content)
-      if (revivedFrom) {
-        // 归纳期间被删的条目，被模型换个 id 又吐了回来：不复活。
-        skipped.push({ id: revivedFrom, reason: 'deleted', content: e.content, current: null })
-        continue
-      }
-      entries.push(e)
-      continue
-    }
-    const cur = now.get(e.id)
-    if (!cur) {
-      // 等待期间被删：不复活。
-      skipped.push({ id: e.id, reason: 'deleted', content: e.content, current: null })
-      continue
-    }
-    if (cur.content !== old.content) {
-      /*
-       * 等待期间被用户改过：保留用户版本，归纳结果作废。
-       *
-       * ⚠️ 必须把 `cur`（用户的新版本）放进结果里：后面是整份 `replaceMemories`，漏掉这条等于
-       * 用户刚改的内容被这次整理删掉——比被覆盖更糟。
-       */
-      skipped.push({ id: e.id, reason: 'modified', content: e.content, current: cur.content })
-      entries.push(cur)
-      continue
-    }
-    entries.push(e)
-  }
-  // 归纳期间别的会话新增的条目：原样保留，不能被这次 replaceMemories 抹掉。
-  for (const e of current) if (!was.has(e.id)) entries.push(e)
-  /*
-   * 模型结果里**没有**这条（被合并或删除），但用户在等待期间改过它。
-   *
-   * 同样是「用户的改动被悄悄撤销」：整份 replaceMemories 一写，用户刚改的内容就没了。
-   * 按「保留用户版本」处理——留下用户改后的这条，并记一条 `modified`（`content: null`
-   * 表示归纳结果原本要删掉它）。
-   */
-  const inResult = new Set(result.map((e) => e.id))
-  for (const old of before) {
-    if (inResult.has(old.id)) continue
-    const cur = now.get(old.id)
-    if (!cur || cur.content === old.content) continue
-    if (entries.some((e) => e.id === cur.id)) continue
-    skipped.push({ id: old.id, reason: 'modified', content: null, current: cur.content })
-    entries.push(cur)
-  }
-  return { entries, skipped }
 }
 
 /** 归纳前的全部条目存一份到记忆文件同目录的 memory-backups/，只留最近几份；返回备份路径。 */

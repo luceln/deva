@@ -5326,7 +5326,7 @@ async function scenarioMemCondense(): Promise<void> {
   const { registerMemoryCondenseIpc } = await import(
     '../../apps/desktop/src/main/services/memory-condense-ipc'
   )
-  const { writeMemory, listMemories, GLOBAL_SCOPE, deleteMemory } = await import(
+  const { writeMemory, listMemories, GLOBAL_SCOPE, deleteMemory, replaceMemories } = await import(
     '../../apps/desktop/src/main/services/memory'
   )
   const SEC = await import('../../apps/desktop/src/main/services/secrets')
@@ -5628,10 +5628,15 @@ async function scenarioMemCondense(): Promise<void> {
       const kept = after.find((e) => e.id === target.id)
       eq('并发改值：用户的值仍在（归纳结果不得覆盖）', kept?.content, userValue)
       eq('并发改值：没有出现模型版本', after.some((e) => e.content === '模型版本（不该出现在盘上）'), false)
-      eq('并发改值：这一条被报为 modified（不静默）', r.skipped?.map((s) => `${s.id}:${s.reason}`), [
-        `${target.id}:modified`
-      ])
-      eq('并发改值：其余两条照常按归纳结果生效', after.filter((e) => e.content.startsWith('第')).length, 2)
+      /*
+       * 第二批按契约改为**整轮拒绝**：不做「其余照常」的局部保全。
+       * 局部保全要求写出的集合恰好等于「模型结果 ∪ 用户改动」，任何一处漏算都会静默丢条目
+       * （实证：用户改 A、模型把 A+B 合并到 A，结果保留用户 A 却删了 B，还报 ok:true）。
+       */
+      eq('并发改值：整轮拒绝（ok=false）', r.ok, false)
+      eq('并发改值：原因码与超限/模型失败分开', (r as { code?: string }).code, 'concurrent-change')
+      eq('并发改值：改动过的 id 被报出', (r as { changed?: string[] }).changed, [target.id])
+      eq('并发改值：其余两条也没被这次归纳改写', after.filter((e) => e.content.startsWith('第')).length, 0)
     }
 
     // ── ⑦ P1-⑤：归纳等待期间用户删了某条 → 归纳结束后它仍是删除状态 ──
@@ -5673,10 +5678,10 @@ async function scenarioMemCondense(): Promise<void> {
         after.some((e) => e.content === doomed.content),
         false
       )
-      eq('并发删除：这一条被报为 deleted（不静默）', r.skipped?.map((s) => `${s.id}:${s.reason}`), [
-        `${doomed.id}:deleted`
-      ])
-      eq('并发删除：其余两条照常按归纳结果生效', after.filter((e) => e.content.startsWith('第')).length, 2)
+      eq('并发删除：整轮拒绝（ok=false）', r.ok, false)
+      eq('并发删除：原因码为 concurrent-change', (r as { code?: string }).code, 'concurrent-change')
+      eq('并发删除：被删的 id 被报出', (r as { changed?: string[] }).changed, [doomed.id])
+      eq('并发删除：其余两条也没被这次归纳改写', after.filter((e) => e.content.startsWith('第')).length, 0)
     }
 
     // ── ⑦b 同上，但模型按**原 id** 回那条已删除的条目 ──
@@ -5704,9 +5709,42 @@ async function scenarioMemCondense(): Promise<void> {
       info('同 id 复活结果', JSON.stringify(r))
       const after = listMemories(GLOBAL_SCOPE)
       eq('同 id 复活：该条目仍是删除状态', after.some((e) => e.id === doomed.id), false)
-      eq('同 id 复活：被报为 deleted（不静默）', r.skipped?.map((s) => `${s.id}:${s.reason}`), [
-        `${doomed.id}:deleted`
-      ])
+      eq('同 id 复活：整轮拒绝（ok=false）', r.ok, false)
+      eq('同 id 复活：原因码为 concurrent-change', (r as { code?: string }).code, 'concurrent-change')
+    }
+
+    // ── ⑧ 第二批：整轮拒绝（改 / 删 / 新增），以及超限不提交 ──
+    {
+      const { memoryConcurrency } = await import('./memory-concurrency-tests')
+      await memoryConcurrency({
+        clear: () => {
+          for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+        },
+        write: (content: string) => {
+          const r = writeMemory(content, undefined, GLOBAL_SCOPE)
+          if (!r.ok) throw new Error(`writeMemory failed: ${r.error}`)
+          return r.entry.id
+        },
+        update: (id: string, content: string) => {
+          const r = writeMemory(content, id, GLOBAL_SCOPE)
+          if (!r.ok) throw new Error(`updateMemory failed: ${r.error}`)
+        },
+        list: () => listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, content: e.content })),
+        setReply: (json: string) => {
+          replyJson = json
+        },
+        setBeforeReply: (fn: (() => void) | null) => {
+          beforeReply = fn
+        },
+        condense: () => invokeCondense(),
+        remove: (id: string) => {
+          deleteMemory(id, GLOBAL_SCOPE)
+        },
+        seed: (entries) => {
+          if (!replaceMemories(GLOBAL_SCOPE, entries)) throw new Error('seed failed')
+        },
+        eq
+      })
     }
 
   } finally {

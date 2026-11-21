@@ -256,6 +256,13 @@ export type MemoryErrorCode =
    * 处置完全不同（要先检查文件，绝不能盲目重试——重试的后果是拿一条覆盖全量）。
    */
   | 'readFailed'
+  /**
+   * 归纳期间这条记忆被改动 / 删除 / 合并掉了，本次写入作废。
+   *
+   * 与 `notFound`（一开始就不存在）分开：这条**曾经存在**，是并发改动让它不再是本次要写的那份，
+   * 用户的处置也不同（前者去查 id，后者重试一次即可拿最新内容）。
+   */
+  | 'memory-changed'
 
 export type MemoryWriteResult =
   | { ok: true; entry: MemoryEntry; created: boolean }

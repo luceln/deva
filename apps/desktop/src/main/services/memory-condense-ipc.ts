@@ -56,11 +56,16 @@ export type CondenseIpcResult =
     }
   | {
       ok: false
-      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted'
+      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit'
       /** 给用户看的一句话（可直接显示；技术细节更全的说明放 detail）。 */
       reason: string
       /** 技术定位（provider id / 错误信息），供排查；界面可折叠显示。 */
       detail?: string
+      /**
+       * 只有 `concurrent-change` 会带：等待模型期间被改动 / 删除的条目 id。
+       * 用户要知道是哪几条变了，否则「没提交」看起来像系统抽风。
+       */
+      changed?: string[]
     }
 
 /**
@@ -179,7 +184,8 @@ export function registerMemoryCondenseIpc(): void {
         return {
           ok: false,
           code: r.code,
-          reason: r.code === 'empty' ? '这里还没有记忆条目，不需要整理' : r.reason
+          reason: r.code === 'empty' ? '这里还没有记忆条目，不需要整理' : r.reason,
+          ...(r.changed ? { changed: r.changed } : {})
         }
       }
       return {
