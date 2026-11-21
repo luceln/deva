@@ -47,6 +47,15 @@ interface PluginStateFile {
   idField: string
   /** 记录「我托管的密钥 key」的字段（可选）。有些插件会托管不止一个 key。 */
   keyField?: string
+  /**
+   * 记录「我在 MCP 配置里写入了哪些 server id」的字段（可选）。
+   *
+   * **必须由插件显式声明**：MCP server 的 id 与 provider id 是两套独立的命名空间，
+   * 拿 provider 名字去猜 MCP 条目归属会误排用户自己配的同名服务（审查 P2-13 的实例：两者都叫 `relay`）。
+   * 当前 magpie 插件没有这个字段——它只写 provider 与密钥，MCP 那条 hub 是用户装插件时由插件文档指导
+   * 手工加进 `mcp.json` 的，插件自己没有所有权记录。所以现在**不排除任何 MCP 条目**。
+   */
+  mcpField?: string
 }
 
 /**
@@ -56,8 +65,13 @@ interface PluginStateFile {
  * 加新条目时确认该文件由插件维护、且插件在解除托管时会删掉/清空对应字段——否则会长期误判。
  */
 const PLUGIN_STATE_FILES: PluginStateFile[] = [
-  // magpie-agent：{ providerId: 'magpie', ownedSecret: true, ... }
-  { file: '.magpie-agent.state.json', idField: 'providerId' }
+  /*
+   * magpie-agent：{ providerId: 'magpie', ownedSecret: true, ... }
+   *
+   * `mcpField: 'mcpServers'` 只是**接线**：当前插件不写这个字段，于是 `pluginOwnedMcpIds` 返回空集、
+   * 导入器不排除任何 MCP 条目（见 importer-mcp 的说明）。等插件真开始声明时无需再改代码。
+   */
+  { file: '.magpie-agent.state.json', idField: 'providerId', mcpField: 'mcpServers' }
 ]
 
 /** 一个 home 里能读到的插件托管信息。 */
@@ -66,10 +80,12 @@ interface PluginOwnership {
   providers: Set<string>
   /** 托管的密钥 key（目前没插件填，留出位置）。 */
   keys: Set<string>
+  /** 插件声明由它写入的 MCP server id（目前没插件填）。 */
+  mcp: Set<string>
 }
 
 function readOwnership(home: string): PluginOwnership {
-  const out: PluginOwnership = { providers: new Set(), keys: new Set() }
+  const out: PluginOwnership = { providers: new Set(), keys: new Set(), mcp: new Set() }
   for (const spec of PLUGIN_STATE_FILES) {
     let parsed: unknown
     try {
@@ -92,6 +108,14 @@ function readOwnership(home: string): PluginOwnership {
       const key = rec[spec.keyField]
       if (typeof key === 'string' && key) out.keys.add(key)
     }
+    /*
+     * MCP 所有权只认字符串数组：插件声明「这些 server id 是我写的」。单个字符串 / 别的类型一律不认——
+     * 判错的代价是把用户自己的服务排除掉（不可见），比漏排一条死条目严重得多。
+     */
+    if (spec.mcpField) {
+      const list = rec[spec.mcpField]
+      if (Array.isArray(list)) for (const v of list) if (typeof v === 'string' && v) out.mcp.add(v)
+    }
   }
   return out
 }
@@ -107,6 +131,21 @@ export function pluginManagedProviderIds(homes: string[]): Set<string> {
   for (const home of homes) {
     if (!home) continue
     for (const id of readOwnership(home).providers) out.add(id)
+  }
+  return out
+}
+
+/**
+ * 插件**声明**由它写入的 MCP server id 集合（源 home 与目标 home 的并集）。
+ *
+ * 与 `pluginManagedProviderIds` 彻底分开：那是 provider id，这是 MCP server id，两者没有映射关系。
+ * 没有任何插件声明时返回空集——调用方据此「不排除任何 MCP 条目」（见 importer-mcp 的说明）。
+ */
+export function pluginOwnedMcpIds(homes: string[]): Set<string> {
+  const out = new Set<string>()
+  for (const home of homes) {
+    if (!home) continue
+    for (const id of readOwnership(home).mcp) out.add(id)
   }
   return out
 }

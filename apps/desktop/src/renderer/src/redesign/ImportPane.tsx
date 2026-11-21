@@ -34,7 +34,16 @@ import type { Failure } from '../../../shared/import-protocol'
  * 结果里的一行对应一个可见步骤。`secrets` 不在进度事件的 step 取值里（密钥补缺发生在 ① 服务商 之内），
  * 它是主进程单独计数的一项，只在结果清单里占一行——密钥和 provider 混在一起数会让「服务商」那行虚高。
  */
-type RowStep = 'providers' | 'secrets' | 'personas' | 'personaEnabled' | 'memories' | 'skills' | 'sessions' | 'assoc'
+type RowStep =
+  | 'providers'
+  | 'mcp'
+  | 'secrets'
+  | 'personas'
+  | 'personaEnabled'
+  | 'memories'
+  | 'skills'
+  | 'sessions'
+  | 'assoc'
 
 /** 失败原因码 → 人能看懂的原因。主进程回的是 code，不是文案；未知码原样显示，不吞掉。 */
 const FAILURE_REASON_KEY: Record<string, string> = {
@@ -94,9 +103,17 @@ const FAILURE_REASON_KEY: Record<string, string> = {
   writeFailed: 'cf.profile.err.writeFailed',
   // 下面两个不限于某一步：config.json 写盘失败出现在服务商 / 角色启用态，link-failed 出现在技能建链接。
   'config-write-failed': 'settings.import.reason.configWriteFailed',
+  // 目标 config.json 在但读不出来。此刻写回会用空配置抹掉用户原有的 providers / 偏好，所以一条都不写。
+  'target-config-unreadable': 'settings.import.reason.targetConfigUnreadable',
   'link-failed': 'settings.import.reason.linkFailed',
   // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串含本机绝对路径，只进后台日志。
-  'target-write-failed': 'settings.import.reason.targetWriteFailed'
+  'target-write-failed': 'settings.import.reason.targetWriteFailed',
+  // 会话这一轮还在进行、历史被锁定：这次**没导**，但磁盘一点没动，聊完重试就能补上。
+  // 不写成「失败」——写成失败会让人以为数据丢了、要去手工补救。
+  'session-history-locked': 'settings.import.reason.sessionHistoryLocked',
+  // 会话引用的附件在源里存在、目标还没有：主档暂不发布，避免带进来一个引用不到附件的会话。
+  // 与「源里就没有」不同，用户要做的是确认附件是否完整 / 等附件导完再重试。
+  'session-media-missing': 'settings.import.reason.sessionMediaMissing'
 }
 
 /**
@@ -326,7 +343,13 @@ export function ImportPane(): React.JSX.Element {
                     {secretNoteText(n, t)}
                   </span>
                 ))}
-                {(r.detail.length > 0 || (r.noteIds?.length ?? 0) > 0) && (
+                {/* 插件托管、因此没导入的项：与「跳过」分开说，用户要能看出它归插件、不是漏导。 */}
+                {!!r.plugins?.length && (
+                  <span className="cf-imp__note-tag is-plain">
+                    {t(r.plugins.length === 1 ? 'settings.import.pluginManagedNOne' : 'settings.import.pluginManagedN').replace('{n}', String(r.plugins.length))}
+                  </span>
+                )}
+                {(r.detail.length > 0 || (r.noteIds?.length ?? 0) > 0 || !!r.plugins?.length) && (
                   <button className="cf-imp__link" onClick={() => toggle(r.step)}>
                     {expanded.has(r.step) ? t('settings.import.hideDetail') : t('settings.import.showDetail')}
                     <ChevronDown size={12} className={expanded.has(r.step) ? 'is-open' : ''} />
@@ -339,8 +362,9 @@ export function ImportPane(): React.JSX.Element {
                       ? r.noteIds.map((g) =>
                           g.ids.length ? (
                             <li key={g.kind}>
-                              {t(`settings.import.secretGroup.${g.kind}`)}：
-                              {g.ids.slice(0, DETAIL_LIMIT).join('、')}
+                              {t(`settings.import.secretGroup.${g.kind}`)}
+                              {t('settings.import.listColon')}
+                              {g.ids.slice(0, DETAIL_LIMIT).join(t('settings.import.listSep'))}
                               {g.ids.length > DETAIL_LIMIT
                                 ? t('settings.import.moreDetail').replace('{n}', String(g.ids.length - DETAIL_LIMIT))
                                 : ''}
@@ -350,6 +374,18 @@ export function ImportPane(): React.JSX.Element {
                       : r.detail.slice(0, DETAIL_LIMIT).map((d) => <li key={d}>{d}</li>)}
                     {!r.noteIds && r.detail.length > DETAIL_LIMIT && (
                       <li>{t('settings.import.moreDetail').replace('{n}', String(r.detail.length - DETAIL_LIMIT))}</li>
+                    )}
+                    {/* 插件托管的那几条逐条列出并加一句去插件里改——只给数字，用户不知道说的是哪些。 */}
+                    {!!r.plugins?.length && (
+                      <li className="cf-imp__plugin">
+                        {t('settings.import.secretGroup.pluginManaged')}
+                        {t('settings.import.listColon')}
+                        {r.plugins.slice(0, DETAIL_LIMIT).join(t('settings.import.listSep'))}
+                        {r.plugins.length > DETAIL_LIMIT
+                          ? t('settings.import.moreDetail').replace('{n}', String(r.plugins.length - DETAIL_LIMIT))
+                          : ''}
+                        <span className="cf-imp__pluginhint">{t('settings.import.pluginManagedHint')}</span>
+                      </li>
                     )}
                   </ul>
                 )}
@@ -478,6 +514,13 @@ interface StepRow {
   notes?: SecretNote[]
   /** notes 的原始 id，展开后逐条显示（按 note.kind 分组）。 */
   noteIds?: Array<{ kind: string; ids: string[] }>
+  /**
+   * 由外部插件托管、因此**没有导入**的项（`StepStat.pluginManaged` / `SecretsStat.pluginManaged`）。
+   *
+   * 单列而不是混进 `skipped`：`skipped` 是「已存在、保留本地、你不用管」，而这一栏是「它归插件管，
+   * 装好插件它自己会出现，要改请去插件里改」。混进跳过数会让用户以为这些东西被漏掉了。
+   */
+  plugins?: string[]
 }
 
 /** 密钥行的一条附加说明。tone 决定颜色：bad = 用户必须动手，warn = 需要注意，plain = 正常情况，good = 修好了。 */
@@ -554,6 +597,8 @@ export function secretsRow(stat: SecretsStat): StepRow {
     failed: stat.noEncryption.length + realFailed.length,
     detail: stat.copied,
     notes,
+    // 插件托管的密钥：既不属于「需重填」也不属于「已存在」。单列说明它归插件管，装好插件自己会出现。
+    ...(stat.pluginManaged.length ? { plugins: stat.pluginManaged } : {}),
     noteIds: [
       { kind: 'noEncryption', ids: stat.noEncryption },
       { kind: 'failed', ids: realFailed.map((f) => f.id) },
@@ -625,6 +670,9 @@ function stepRows(report: ImportReport, t: (k: string) => string): StepRow[] {
   const memFail = report.memories.failed
   const rows: StepRow[] = [
     row('providers', report.providers),
+    // MCP 服务是独立一步（id 空间与写入层都与服务商不同）。它也带自己的 pluginManaged：
+    // magpie 那条 MCP 是插件填的，排除后若不显示，用户会以为漏导了。
+    row('mcp', report.mcp),
     // 密钥补缺单列（不走通用 row()）：它有自己的五种状态，见 secretsRow。
     secretsRow(report.secrets),
     row('personas', report.personas),
@@ -663,20 +711,30 @@ function stepRows(report: ImportReport, t: (k: string) => string): StepRow[] {
   // 完全没动静的行不摆出来：源里没有角色可启用时，多一行「0 新增 0 跳过」只会稀释真正有数字的那几行。
   // 有失败的行一律保留（failed > 0），失败不能让用户去猜它在哪一步。
   // 有 notes 的行也保留：密钥行可能三个数字都为 0（比如只导入了 ignored），但它的说明本身就是信息。
-  return rows.filter((r) => r.copied > 0 || r.skipped > 0 || r.failed > 0 || (r.notes?.length ?? 0) > 0)
+  return rows.filter(
+    (r) =>
+      r.copied > 0 ||
+      r.skipped > 0 ||
+      r.failed > 0 ||
+      (r.notes?.length ?? 0) > 0 ||
+      // 只有插件托管项的行也要保留：整行不显示，就是「有东西被排除、界面上一个字都没有」。
+      !!r.plugins?.length
+  )
 }
 
 /**
  * 一步的统计摊成界面的一行。failed 取 StepStat 自带的失败清单（可缺省，旧数据没有这一项）；
  * 五步都靠这里出数，不给某一步写特例。skipped 同时当明细用：跳过的 id 就是「已经存在」的清单。
  */
-function row(step: RowStep, stat: { copied: string[]; skipped: string[]; failed?: Failure[] }): StepRow {
+function row(step: RowStep, stat: { copied: string[]; skipped: string[]; failed?: Failure[]; pluginManaged?: string[] }): StepRow {
   return {
     step,
     copied: stat.copied.length,
     skipped: stat.skipped.length,
     failed: stat.failed?.length ?? 0,
-    detail: stat.skipped
+    detail: stat.skipped,
+    // 插件托管、因此没导入的项：单独带出去，绝不算进 skipped（那会被读成「已存在，不用管」）。
+    ...(stat.pluginManaged?.length ? { plugins: stat.pluginManaged } : {})
   }
 }
 

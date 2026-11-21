@@ -893,6 +893,8 @@ const zhCN: MessageTree = {
         importedProviderMissing:
           '导入的服务商没有留在配置里，可能被其他写入覆盖了，请重新导入一次补上',
         configWriteFailed: '配置写盘失败，权限或磁盘异常',
+        // 目标 config.json 在但读不出来（半截 JSON / 被占用）。此刻写回等于用空配置覆盖用户的原有配置。
+        targetConfigUnreadable: '本应用的 config.json 读不出来，为免覆盖原有配置，本次服务商一个都没有导入',
         linkFailed: '建立链接失败，可能缺少权限',
         // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串（含本机绝对路径）只进后台日志，不进界面。
         targetWriteFailed: '写入目标位置失败（权限、磁盘或路径异常），这一项没有导入',
@@ -917,7 +919,13 @@ const zhCN: MessageTree = {
         secretsWriteFailed: '密钥没能写入本地密钥文件（权限或磁盘异常）',
         secretsStoreUnreadable:
           '本地密钥文件本身读不出来（内容损坏或被占用），为避免覆盖掉里面的其它密钥，这次一条都没写。请检查 secrets.json',
-        avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用'
+        avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用',
+        // 会话这一轮还在进行、历史被锁定：说明「不是失败、稍后会补」，并给出下一步。
+        sessionHistoryLocked:
+          '这轮对话还在进行，历史暂时锁定，这次没有导入——数据没有丢，聊完再重新导入一次就会补上',
+        // 附件没准备好：主档先不发布，避免带进来一个打不开附件的会话。
+        sessionMediaMissing:
+          '这条会话的附件（图片、PDF 等）还没准备好，为避免导入后打不开附件，这条会话这次没有导入。请确认原版数据目录里的附件是否完整，或等附件导完后重新导入一次'
       },
       // 密钥行的附加说明（见 ImportPane 的 secretsRow）。{n} 是条数。
       secretNote: {
@@ -928,6 +936,15 @@ const zhCN: MessageTree = {
         failed: '{n} 个没能写入',
         rekeyed: '其中 {n} 条之前用不了，这次修好了'
       },
+      // 由外部插件托管、因此没有导入的项。{n} 是条数。与「已存在，跳过」严格分开说。
+      // 单复数分开写，英文不能出现「1 belong to a plugin」。
+      pluginManagedN: '{n} 个由插件管理，未导入',
+      pluginManagedNOne: '1 个由插件管理，未导入',
+      pluginManagedHint:
+        '这些由插件自己创建和维护，装上对应插件就会自动出现，不需要也不应该手动导入。要改它们请去插件里改。',
+      // 明细里「分组名 + 具体 id」之间、以及 id 之间的分隔符：英文不能用全角冒号/顿号。
+      listColon: '：',
+      listSep: '、',
       // 密钥明细里按分类列 id 时的分组标题
       secretGroup: {
         noEncryption: '需手动重填',
@@ -935,7 +952,8 @@ const zhCN: MessageTree = {
         skipped: '已存在，保留本地',
         ignored: '不适用',
         failed: '写入失败',
-        rekeyed: '已修好'
+        rekeyed: '已修好',
+        pluginManaged: '由插件管理，未导入'
       },
       // 「N 条密钥需要重新填写」：面板级警告，不是失败。{n} 是条数。
       unrecoverable: {
@@ -953,6 +971,7 @@ const zhCN: MessageTree = {
         memories: '记忆',
         skills: '技能',
         sessions: '对话记录',
+        mcp: 'MCP 服务',
         assoc: '附件',
         // 附件按类细分（主进程的 step 是 `assoc:<kind>`）：失败清单据此分组，用户一眼看出是哪一类出的错
         'assoc:media': '附件（媒体）',
@@ -1422,6 +1441,19 @@ const zhCN: MessageTree = {
       skippedN: '跳过 {n} 个',
       // 写盘失败的那些：界面必须与「已替换」分开说，否则重启后全部变回且零提示
       failedN: '{n} 个没能写入',
+      // 索引待重建：**不是失败**，数据已经落盘，只是列表要再读一次才准。
+      indexStaleN: '{n} 个已保存，索引待重建',
+      indexStale: '已保存',
+      indexStaleHint: '模型的改动已经写进磁盘，没有丢。这一批会话的列表索引还没重建，刷新一次列表就会显示正确。',
+      // 被放弃的项：既不是成功也不是失败，必须明说「这一项没改」以及它现在用的是哪个模型。
+      supersededN: '{n} 个未改动（期间被改过或成员已移除）',
+      supersededKept: '未改动，现在用的是{ref}',
+      supersededHint: '点替换之后、写进去之前，这几项的状态变了（你自己换了模型，或成员被移除），所以没有覆盖。下面显示的是它们现在实际使用的模型：',
+      refUnknown: '（未指定模型）',
+      // 查不到名字的引用（模型已被删 / 手改进去的）：给一句人话，原始引用只进 title。
+      refOther: '另一个模型',
+      // 摘要分隔符：英文不能用全角逗号（实测会渲染成「1 switched，1 skipped」）。
+      listSep: '，',
       skipped: '跳过',
       skippedHint: '以下会话用的是别的模型，未改动：',
       showSkipped: '查看跳过的会话',
@@ -2763,6 +2795,8 @@ const en: MessageTree = {
         importedProviderMissing:
           'An imported provider is no longer in the config — something else likely overwrote it. Import again to restore it.',
         configWriteFailed: 'Couldn’t write config — check permissions or disk space',
+        targetConfigUnreadable:
+          'This app’s config.json can’t be read — no providers were imported so your existing config stays untouched',
         linkFailed: 'Couldn’t create the link — permission likely denied',
         targetWriteFailed: 'Couldn’t write to the destination (permissions, disk or path) — this item was not imported',
         noEncryption: 'This machine can’t store keys — add them again by hand',
@@ -2801,7 +2835,11 @@ const en: MessageTree = {
         secretsWriteFailed: 'The key couldn’t be written to the local secrets file — check permissions or disk space',
         secretsStoreUnreadable:
           'The local secrets file itself can’t be read (corrupted or in use). Nothing was written so the other keys inside are not overwritten — check secrets.json',
-        avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable'
+        avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable',
+        sessionHistoryLocked:
+          'This conversation is still running, so its history is locked and nothing was imported this time. No data was lost — import again after that turn finishes and it will be picked up',
+        sessionMediaMissing:
+          'The attachments for this conversation (images, PDFs) aren’t ready yet. It was left out this time so you don’t end up with a conversation whose attachments can’t be opened. Check that the attachments exist upstream, or import again once they finish'
       },
       secretNote: {
         noEncryption: 'This machine can’t store keys — {n} to add by hand',
@@ -2811,13 +2849,20 @@ const en: MessageTree = {
         failed: '{n} couldn’t be written',
         rekeyed: '{n} of them were unusable before and are fixed now'
       },
+      pluginManagedN: '{n} managed by a plugin, not imported',
+      pluginManagedNOne: '1 managed by a plugin, not imported',
+      pluginManagedHint:
+        'A plugin creates and maintains these itself — they appear automatically once that plugin is installed, and should not be imported by hand. To change them, edit them in the plugin.',
+      listColon: ': ',
+      listSep: ', ',
       secretGroup: {
         noEncryption: 'Add by hand',
         invalid: 'Empty in source',
         skipped: 'Already present',
         ignored: 'Not applicable',
         failed: 'Write failed',
-        rekeyed: 'Fixed now'
+        rekeyed: 'Fixed now',
+        pluginManaged: 'Managed by a plugin, not imported'
       },
       unrecoverable: {
         title: '{n} keys need to be entered again',
@@ -2834,6 +2879,7 @@ const en: MessageTree = {
         memories: 'Memories',
         skills: 'Skills',
         sessions: 'Conversations',
+        mcp: 'MCP servers',
         assoc: 'Attachments',
         'assoc:media': 'Attachments (media)',
         'assoc:checkpoints': 'Attachments (rollback panels)',
@@ -3292,6 +3338,17 @@ const en: MessageTree = {
       appliedN: '{n} switched',
       skippedN: '{n} skipped',
       failedN: '{n} couldn’t be saved',
+      indexStaleN: '{n} saved, list index pending',
+      indexStale: 'Saved',
+      indexStaleHint:
+        'The model changes are written to disk and nothing was lost. The conversation-list index for these was not rebuilt yet — refresh the list once and it will be correct.',
+      supersededN: '{n} not changed (edited meanwhile or member removed)',
+      supersededKept: 'Not changed — now using {ref}',
+      supersededHint:
+        'Between clicking Switch and writing, these changed (you picked another model, or the member was removed), so they were left alone. Each row shows the model it actually uses now:',
+      refUnknown: '(no model set)',
+      refOther: 'another model',
+      listSep: ', ',
       skipped: 'Skipped',
       skippedHint: 'These use a different model and were left alone:',
       showSkipped: 'Show skipped conversations',

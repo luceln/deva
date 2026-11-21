@@ -22,7 +22,7 @@ const ELECTRON_BIN = path.join(REPO, 'node_modules', 'electron', 'dist', 'electr
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtremove', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'sessync', 'memcond', 'wtmerge', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'swapindex', 'swapstale', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtremove', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'sessync', 'memcond', 'wtmerge', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
 /**
  * 平台夹具不成立的场景：跳过，但**必须显式计数并打印**，不能静默当作通过。
@@ -69,6 +69,8 @@ const ENV_OF = {
   keynoenc: { scenario: 'keytri', env: { TEST_NO_ENCRYPTION: '1' } },
   cfgcorrupt: { scenario: 'cfgcorrupt', env: { P13_KIND: 'corrupt' } },
   cfgabsent: { scenario: 'cfgcorrupt', env: { P13_KIND: 'absent' } },
+  // P1-④：目标 config.json 内容坏 → 导入服务商必须拒绝写入并如实报失败（配置载入态是模块级缓存，须独立进程）
+  cfgimport: { scenario: 'cfgcorrupt', env: { P13_KIND: 'corrupt', P14_IMPORT: '1' } },
   secretscorrupt: { scenario: 'secretskind', env: { S42_KIND: 'corrupt' } },
   secretsabsent: { scenario: 'secretskind', env: { S42_KIND: 'absent' } },
   /*

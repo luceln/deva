@@ -55,6 +55,16 @@ export interface Failure {
 }
 
 /**
+ * 会话步骤专用的原因码（其余步骤自己的码见 `importer-source-dir.ts` 等）。
+ *
+ * 这两条都表示「这次没导，但磁盘一点没动，稍后重试能补上」，与 `target-blocked`（位置被占）、
+ * `source-file-unreadable`（源文件读不出）区分开：用户要做的事不同——等这一轮聊完，而不是去改文件。
+ */
+export const SESSION_HISTORY_LOCKED = 'session-history-locked'
+/** 会话引用的附件在源里存在、目标却还没有：附件步骤失败或尚未完成，主档不能先发布。 */
+export const SESSION_MEDIA_MISSING = 'session-media-missing'
+
+/**
  * 记忆合并的结果。added / skipped 仍是条目（不只 id），因为界面上要能看清「这条记忆没能导入」的正文，
  * 而记忆 id 是随机短码、单独看不出内容。
  */

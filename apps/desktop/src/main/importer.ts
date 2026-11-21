@@ -196,7 +196,7 @@ export async function runImport(
      */
     onProgress?.({ step: 'mcp', done: 0, total: 0 })
     const mcp = importMcp(src)
-    report.mcp = { copied: mcp.copied, skipped: mcp.skipped, failed: mcp.failed }
+    report.mcp = { copied: mcp.copied, skipped: mcp.skipped, failed: mcp.failed, pluginManaged: mcp.pluginManaged }
 
     // 密钥补缺：与原版服务商 / MCP 服务配套的密文（没有密钥的服务等于不能用）。单独计，不混进各自步骤的数字。
     const secrets = await copySecrets(src)
@@ -251,21 +251,20 @@ export async function runImport(
       failed: skills.failed
     }
 
-    // ⑦ 会话（必须早于 ⑧）
+    // ⑦ 先准备附件依赖，再发布引用它们的会话文件 / hydrate 缓存。
+    onProgress?.({ step: 'assoc', done: 0, total: 0 })
+    const assoc = copyAssoc(src, (done, total) => onProgress?.({ step: 'assoc', done, total }))
+    report.assoc = { ...assoc.assoc, failed: assoc.failures }
+
+    // ⑧ 会话：JSONL 与 media 均已准备；缺任何被引用依赖则会话保持失败、不发布半成品。
     onProgress?.({ step: 'sessions', done: 0, total: 0 })
     const sessions = importSessions(src)
     report.sessions = {
       copied: sessions.copied,
       skipped: sessions.skipped,
-      // 已有、且源是目标内容的超集 → 覆盖。与 copied 分开报，用户才分得清「本来就有」和「这次换成了新的」。
       updated: sessions.updated,
       failed: sessions.failed
     }
-
-    // ⑧ 附件（media 量大，逐个报进度；IPC 侧有节流，见 importer-ipc）
-    onProgress?.({ step: 'assoc', done: 0, total: 0 })
-    const assoc = copyAssoc(src, (done, total) => onProgress?.({ step: 'assoc', done, total }))
-    report.assoc = { ...assoc.assoc, failed: assoc.failures }
 
     // ⑨ 释放暂存 → 补回被覆盖的成果 → 清缓存 → 通知渲染层。
     onProgress?.({ step: 'cache', done: 0, total: 0 })
