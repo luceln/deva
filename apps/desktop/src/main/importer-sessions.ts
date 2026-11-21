@@ -119,6 +119,19 @@ export function importSessions(
        * 跳过必须意味着「目标已是一份有效会话文件」；被目录/损坏文件占位是**真失败**。
        */
       const state = targetState(to)
+      /*
+       * 读不出来（EACCES / EBUSY / EPERM / EMFILE）**在判定行当场**记失败，不能只靠后面某个分支。
+       *
+       * 原分支在 50 行的 `else if` 里（语义正确），但代价是：任何人在中间插入「读到就继续」的逻辑，
+       * unreadable 就会被当成 ok 一路走到覆盖 / 跳过；静态扫描也看不到——它只看调用点后 34 行，
+       * 于是这条守卫在检查里**等于不存在**，报出来是「unreadable 被丢弃」。
+       *
+       * 判定紧贴调用点，方向才是无歧义的：读不出 → 不覆盖、不改任何一个字节、如实记失败。
+       */
+      if (state === 'unreadable') {
+        stat.failed.push({ step: 'sessions', id, reason: 'target-unreadable' })
+        continue
+      }
       if (state === 'session') {
         /*
          * 目标已是一份有效会话。**不再无条件跳过**：原版那次导入之后继续聊的内容，就再也不会过来了
@@ -134,7 +147,15 @@ export function importSessions(
           continue
         }
         const repaired = prepareImportHistory(from, to, source, target)
-        if (repaired && target.compacted) stat.compacted.push(target.compacted.file)
+        /*
+         * 依赖读不出来 → 整条会话阻断。**不能**当成「没有需要补的」继续往下：接着会走
+         * decideExistingByFile / appendSourceTail，而那两步同样读不出依赖，最终结论都是猜的。
+         */
+        if ('failed' in repaired) {
+          stat.failed.push(repaired.failed)
+          continue
+        }
+        if (repaired.repaired && target.compacted) stat.compacted.push(target.compacted.file)
         const decision = decideExistingByFile(from, to)
         if (decision === 'source-newer') {
           /*
@@ -168,10 +189,6 @@ export function importSessions(
       } else if (state === 'blocked') {
         stat.failed.push({ step: 'sessions', id, reason: 'target-blocked' })
         continue
-      } else if (state === 'unreadable') {
-        // 读失败：文件可能是好的，只是此刻被占用 / 无权限。**不覆盖**，如实记失败。
-        stat.failed.push({ step: 'sessions', id, reason: 'target-unreadable' })
-        continue
       } else {
         /**
          * 目标不存在，或是个**解析不出会话的坏文件**（半截 JSON / 没有 id）。
@@ -183,11 +200,24 @@ export function importSessions(
          * 备份名不以 `.json` 结尾（见 backupBroken）：否则 `data/chats` 的索引重建会把它当成一个会话读进来。
          */
         const source = readImportSession(from)
+        /*
+         * ⚠️ 顺序：**先**判拆分历史，**再**判附件。
+         *
+         * `missingMedia` 内部也要读完整历史（`readImportHistory`），依赖读不出来时它同样返回 true
+         * ——于是这条会话会被记成 `session-media-missing`（「附件还没备好，等附件步骤跑完再说」），
+         * 而真相是源侧那份 JSONL 不在了 / 打不开，等多久都不会自己好。方向错了，用户会一直等。
+         */
+        const prepared = prepareImportHistory(from, to, source, source)
+        // 依赖读不出来 → 不发布主档（与上面 session 分支同一判据：写不下去就别写一半）
+        if ('failed' in prepared) {
+          stat.failed.push(prepared.failed)
+          continue
+        }
         if (missingMedia(srcHome, from, source)) {
           stat.failed.push({ step: 'sessions', id, reason: SESSION_MEDIA_MISSING })
           continue
         }
-        if (prepareImportHistory(from, to, source, source) && source.compacted)
+        if (prepared.repaired && source.compacted)
           stat.compacted.push(source.compacted.file)
         if (state === 'broken') {
           const bak = backupBroken(to)

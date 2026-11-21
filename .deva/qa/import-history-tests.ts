@@ -122,6 +122,35 @@ export async function importDependencyRetry(eq: Eq): Promise<void> {
   const repaired = importSessions(f.src)
   eq('legacy partial retry: reference actually restored', fs.existsSync(targetDependency), true)
   eq('legacy partial retry: correct bytes', fs.existsSync(targetDependency) ? fs.readFileSync(targetDependency, 'utf8') : '', body)
+
+  /*
+   * 拆分历史读不出来（源侧 ENOENT / 被占用）必须阻断，不能当成「历史一致」放行。
+   *
+   * 这条守的是同一类缺陷的第 N 个复制品：`readImportHistory` / `prepareImportHistory` 里原先有一处
+   * 裸 `readFileSync`，读失败时抛到 importSessions 的 catch，被记成 `target-write-failed`
+   * （「写目标失败」）——方向反了。更坏的方向（有人为了「不再抛」加个 catch 就 return）会让
+   * 一份读不出来的历史被当成「和本地一样」，主档照写。
+   *
+   * 隔离构造：源里指针指着 `dep-illegal.jsonl`，但那个文件不放（ENOENT）。目标侧该会话不存在，
+   * 走的是「缺失依赖 → 校验归属 → 读源字节 → 写」这条路径。
+   */
+  const depId = 'dep-unreadable', depFx = fixture(depId), depFile = `${depId}.compacted-old.jsonl`
+  write(depFx.from, { ...shell(depId, [msg('dep tail')]), compacted: { file: depFile, count: 1 } })
+  const depResult = importSessions(depFx.src)
+  eq('dependency unreadable: session reported as failed', depResult.failed.some((x) => x.id === depId), true)
+  eq('dependency unreadable: main not published', fs.existsSync(depFx.to), false)
+  eq('dependency unreadable: no compacted listed', depResult.compacted.includes(depFile), false)
+  // 失败码方向必须是「源侧文件读不出」，不是「写目标失败」
+  eq(
+    'dependency unreadable: reason is source-file-unreadable',
+    depResult.failed.find((x) => x.id === depId)?.reason,
+    'source-file-unreadable'
+  )
+  // 补上依赖后可正常导入（证明阻断是暂时的，不是永久拉黑）
+  fs.writeFileSync(path.join(chats(depFx.src), depFile), JSON.stringify(msg('dep early')) + '\n')
+  const depRetry = importSessions(depFx.src)
+  eq('dependency unreadable: retry after restore succeeds', depRetry.copied.includes(depId), true)
+  eq('dependency unreadable: retry publishes main', fs.existsSync(depFx.to), true)
   eq('legacy partial retry: no failure after repair', repaired.failed, [])
   eq('legacy partial retry: complete history reloads', ensureSession(id).messages.length, 3)
   // Existing nonidentical bytes are not proven crash debris. Never overwrite them on a repeated import.
