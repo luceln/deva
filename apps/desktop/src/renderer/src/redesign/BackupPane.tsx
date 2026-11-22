@@ -16,12 +16,13 @@ import { useI18n } from '../i18n/i18n'
  *
  * ## 界面上的几条硬取舍
  *
- * - **口令不是可选项的「高级设置」**：只要包里有密钥，就必须输口令。所以先 `inspect` 探包，
- *   拿到 `hasSecrets` 之后才决定显不显示口令框 —— 让用户先输一个可能根本不需要的口令是纯粹的摩擦。
+ * - **密钥是明文放进包里的**，没有口令这一步。这是明确的取舍：口令最真实的失败模式不是被破解，
+ *   而是用户忘了口令 —— 那等于把一个能恢复的东西变成不能恢复的，与"卸载重装后一模一样"直接冲突。
+ *   代价是包要当密钥文件对待，所以界面上那句警告必须常驻、不能折叠。
+ * - **仍然要先 `inspect` 探包**：不是为了问口令，而是让用户看清里面有什么、多大、含不含密钥，
+ *   再决定要不要覆盖。
  * - **覆盖前必须显式确认**：还原会整目录替换现有数据。这条不做成「点了就干再问」，
  *   而是先看目标是否非空，非空就要用户明确点过头。
- * - **口令错误要在解压前报**：包可能 600MB，解压完才说「口令不对」等于让用户白等几分钟，
- *   而且那时文件已经写进临时目录了。所以有 `checkPassphrase` 这一步。
  */
 
 type Phase = 'idle' | 'inspecting' | 'ready' | 'running' | 'done' | 'error'
@@ -50,15 +51,12 @@ export function BackupPane(): React.JSX.Element {
   const { t } = useI18n()
 
   // 导出侧
-  const [expPass, setExpPass] = useState('')
-  const [expPass2, setExpPass2] = useState('')
   const [expPhase, setExpPhase] = useState<Phase>('idle')
   const [expMsg, setExpMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [expProgress, setExpProgress] = useState<{ done: number; total: number } | null>(null)
 
   // 还原侧
   const [info, setInfo] = useState<InspectInfo | null>(null)
-  const [resPass, setResPass] = useState('')
   const [resPhase, setResPhase] = useState<Phase>('idle')
   const [resMsg, setResMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [resProgress, setResProgress] = useState<{ step: string; done: number; total: number } | null>(null)
@@ -75,16 +73,12 @@ export function BackupPane(): React.JSX.Element {
     }
   }, [])
 
-  const passMismatch = expPass.length > 0 && expPass2.length > 0 && expPass !== expPass2
-  const passTooShort = expPass.length > 0 && expPass.length < 8
-
   async function doExport(): Promise<void> {
-    if (passMismatch || passTooShort) return
     setExpPhase('running')
     setExpMsg(null)
     setExpProgress(null)
     try {
-      const r = (await window.deva.backup.export({ passphrase: expPass || undefined })) as
+      const r = (await window.deva.backup.export()) as
         | { ok: true; path: string; files: number; bytes: number; hasSecrets: boolean }
         | { ok: false; code: string; message?: string }
       if (r.ok) {
@@ -98,8 +92,6 @@ export function BackupPane(): React.JSX.Element {
             secrets: r.hasSecrets ? t('cf.backup.withSecrets') : t('cf.backup.withoutSecrets')
           })
         })
-        setExpPass('')
-        setExpPass2('')
       } else if (r.code === 'cancel-discard') {
         setExpPhase('idle')
       } else {
@@ -140,28 +132,12 @@ export function BackupPane(): React.JSX.Element {
 
   async function doRestore(): Promise<void> {
     if (!info) return
-    // 包里有密钥就必须先校口令：解压完 600MB 才报「口令不对」是纯粹的浪费
-    if (info.hasSecrets) {
-      if (!resPass.trim()) {
-        setResMsg({ kind: 'err', text: t('cf.backup.needPassphrase') })
-        return
-      }
-      setResPhase('running')
-      const chk = await window.deva.backup.checkPassphrase(info.path, resPass)
-      if (!chk.ok && chk.code === 'bad-passphrase') {
-        setResPhase('ready')
-        setResMsg({ kind: 'err', text: t('cf.backup.badPassphrase') })
-        return
-      }
-    }
-
     setResPhase('running')
     setResMsg(null)
     setResProgress(null)
     try {
       const r = (await window.deva.backup.restore({
         path: info.path,
-        passphrase: resPass || undefined,
         overwriteConfirmed: needConfirm
       })) as
         | {
@@ -218,31 +194,22 @@ export function BackupPane(): React.JSX.Element {
         </h3>
         <p className="cf-backup__desc">{t('cf.backup.exportDesc')}</p>
 
-        <label className="cf-backup__label">{t('cf.backup.passphraseLabel')}</label>
-        <input
-          type="password"
-          className="cf-input"
-          value={expPass}
-          placeholder={t('cf.backup.passphrasePlaceholder')}
-          onChange={(e) => setExpPass(e.target.value)}
-          disabled={expPhase === 'running'}
-        />
-        <input
-          type="password"
-          className="cf-input"
-          value={expPass2}
-          placeholder={t('cf.backup.passphraseConfirm')}
-          onChange={(e) => setExpPass2(e.target.value)}
-          disabled={expPhase === 'running'}
-        />
-        {passTooShort && <p className="cf-backup__warn">{t('cf.backup.passTooShort')}</p>}
-        {passMismatch && <p className="cf-backup__warn">{t('cf.backup.passMismatch')}</p>}
-        <p className="cf-backup__hint">{t('cf.backup.passphraseHint')}</p>
+        {/*
+         * 密钥是**明文**放进包里的，所以这句警告不能省、也不能折叠。
+         *
+         * 删掉口令输入是一个明确的取舍（用户要求：不想记口令）。省下来的代价必须明说，
+         * 否则用户会把包丢进同步盘 / 发给别人 / 随手拷 U 盘 —— 那是明文密钥最常见的外泄路径，
+         * 而不是"有人来翻他电脑"。
+         */}
+        <div className="cf-backup__danger">
+          <AlertTriangle size={16} />
+          <p>{t('cf.backup.plainWarning')}</p>
+        </div>
 
         <button
           className="cf-btn is-primary"
           onClick={() => void doExport()}
-          disabled={expPhase === 'running' || passMismatch || passTooShort}
+          disabled={expPhase === 'running'}
         >
           {expPhase === 'running' ? <Loader2 size={14} className="cf-spin" /> : <Download size={14} />}
           {expPhase === 'running' && expProgress
@@ -297,19 +264,7 @@ export function BackupPane(): React.JSX.Element {
           </div>
         )}
 
-        {info?.hasSecrets && (
-          <>
-            <label className="cf-backup__label">{t('cf.backup.restorePassLabel')}</label>
-            <input
-              type="password"
-              className="cf-input"
-              value={resPass}
-              placeholder={t('cf.backup.restorePassPlaceholder')}
-              onChange={(e) => setResPass(e.target.value)}
-              disabled={resPhase === 'running'}
-            />
-          </>
-        )}
+        {info?.hasSecrets && <p className="cf-backup__hint">{t('cf.backup.containsSecrets')}</p>}
 
         {needConfirm && (
           <div className="cf-backup__danger">

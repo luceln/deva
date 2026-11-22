@@ -12,7 +12,6 @@ import {
   type SecretsRestore
 } from '../../shared/bundle-format'
 import { hashFile, isSafeEntryPath, validateManifest } from './bundle-manifest'
-import { decryptSecrets } from './bundle-crypto'
 import { getDevaHome, reloadConfigFromDisk } from './config'
 import { invalidateIndexOnly } from './chat-store'
 
@@ -72,7 +71,6 @@ async function cpPreservingLinks(src: string, dst: string): Promise<void> {
 
 export interface RestoreOptions {
   bundlePath: string
-  passphrase?: string
   /** 目标非空时是否继续（界面已确认）。 */
   overwriteConfirmed?: boolean
   onProgress?: (p: RestoreProgress) => void
@@ -81,7 +79,7 @@ export interface RestoreOptions {
 /** 还原失败时抛出的分类错误，供外层翻成 `RestoreFailCode`。 */
 export class RestoreError extends Error {
   constructor(
-    readonly code: 'not-a-bundle' | 'corrupt' | 'extract-failed' | 'unsafe-path' | 'bad-passphrase' | 'no-secrets' | 'cancelled' | 'write-failed',
+    readonly code: 'not-a-bundle' | 'corrupt' | 'extract-failed' | 'unsafe-path' | 'cancelled' | 'write-failed',
     message: string
   ) {
     super(message)
@@ -201,7 +199,21 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
     }
     report('verify', manifest.files.length, manifest.files.length)
 
-    // ---- 5. 替换 home 内容 ----
+    /*
+     * ---- 5. 先解析密钥段，再动目标 ----
+     *
+     * 顺序不能反。密钥段是唯一"可能坏但还没被发现"的一段：上面的验签只覆盖 `manifest.files`，
+     * 而 `secrets.enc` 不在其中（它不是 home 里的文件）。如果先替换文件、后解析密钥，
+     * 一旦密钥段坏了，用户的数据**已经被覆盖**，才发现还原失败 —— 那时退路只剩那份自动备份，
+     * 而备份本身在磁盘紧张时也可能不完整。
+     *
+     * 这条是 `verify-bundle-real.cjs` 的 E14 抓出来的。
+     */
+    report('secrets', 0, 1)
+    const secretsPlan = await prepareSecrets(entries, manifest)
+    report('secrets', 1, 1)
+
+    // ---- 6. 替换 home 内容 ----
     report('replace', 0, manifest.files.length)
     const now = new Date()
     for (let i = 0; i < manifest.files.length; i++) {
@@ -222,7 +234,7 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
     }
     report('replace', manifest.files.length, manifest.files.length)
 
-    // ---- 6. 重建符号链接 ----
+    // ---- 7. 重建符号链接 ----
     report('symlinks', 0, manifest.symlinks.length)
     const symlinkAsCopy: string[] = []
     let relinked = 0
@@ -247,12 +259,10 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
     }
     report('symlinks', manifest.symlinks.length, manifest.symlinks.length)
 
-    // ---- 7. 密钥 ----
-    report('secrets', 0, 1)
-    const secrets = await restoreSecrets(entries, manifest, opts.passphrase)
-    report('secrets', 1, 1)
+    // ---- 8. 提交密钥（内容已在第 5 步校验过，这里只做重封装与落盘）----
+    const secrets = await commitSecrets(secretsPlan)
 
-    // ---- 8. 让索引失效（下次读时重建） ----
+    // ---- 9. 让索引失效（下次读时重建） ----
     report('refresh', 0, 1)
     /*
      * 只能用 `invalidateIndexOnly()`，**不能用 `invalidateIndex()`**。
@@ -298,28 +308,38 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
   }
 }
 
-/** 还原密钥段。 */
-async function restoreSecrets(
+/**
+ * 第一步：把密钥段读出来并校验格式，**不写任何东西**。
+ *
+ * 返回明文 JSON 字符串（或 null 表示包里没有密钥）。真正落盘在 `commitSecrets`，
+ * 这样"包坏了"能在覆盖用户数据之前就被发现。
+ */
+async function prepareSecrets(
   entries: Record<string, Uint8Array>,
-  manifest: BundleManifest,
-  passphrase: string | undefined
-): Promise<SecretsRestore> {
+  manifest: BundleManifest
+): Promise<string | null> {
   const enc = entries[SECRETS_ENC_NAME]
-  if (!enc || !manifest.hasSecrets || !manifest.secretsKdf) return { restored: 0, absent: true }
+  if (!enc || !manifest.hasSecrets) return null
 
-  const pass = passphrase?.trim() ?? ''
-  if (!pass) throw new RestoreError('no-secrets', '备份包里含密钥，需要输入导出时设置的口令。')
+  const plain = Buffer.from(enc).toString('utf8')
+  if (!plain.trim()) return null
 
-  let plain: string
   try {
-    plain = await decryptSecrets(Buffer.from(enc), pass, manifest.secretsKdf)
-  } catch {
-    throw new RestoreError(
-      'bad-passphrase',
-      '口令不对（无法解密备份包里的密钥段）。请确认导出时设置的口令。'
-    )
+    const parsed = JSON.parse(plain) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('密钥段顶层不是对象')
+    }
+  } catch (e) {
+    throw new RestoreError('corrupt', `备份包里的密钥段已损坏：${(e as Error)?.message ?? e}`)
   }
+  return plain
+}
 
+/**
+ * 第二步：用本环境的 safeStorage 重新封装并写入（文件已替换完成之后再调）。
+ */
+async function commitSecrets(plain: string | null): Promise<SecretsRestore> {
+  if (!plain) return { restored: 0, absent: true }
   return reencryptSecrets(plain)
 }
 

@@ -90,23 +90,13 @@ export interface BundleManifest {
    * 不写的代价：用户看到「还原完成」却发现某个目录没回来，只能猜是漏了还是本来就没有。
    */
   excluded: string[]
-  /** 密钥段是否存在（有口令才导）。缺省 false。 */
+  /**
+   * 密钥段是否存在。缺省 false。
+   *
+   * 密钥段是**明文 JSON**（导出时用 `safeStorage` 解出、还原时再重新封装）。
+   * 没有 KDF 参数，因为没有口令 —— 理由见 `bundle-export.ts` 的 `buildSecretsBlob`。
+   */
   hasSecrets: boolean
-  /** 密钥段用的 KDF 参数。口令派生参数随包存，将来调强度不会让旧包解不开。 */
-  secretsKdf?: SecretsKdf
-}
-
-/** 口令派生的参数（`scrypt`）。随包存，不在代码里写死。 */
-export interface SecretsKdf {
-  algo: 'scrypt'
-  /** salt（base64）。每次导出都重新随机生成。 */
-  salt: string
-  /** scrypt 的 N / r / p。 */
-  N: number
-  r: number
-  p: number
-  /** 派生出的密钥长度（字节）。 */
-  dkLen: number
 }
 
 /**

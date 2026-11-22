@@ -4,7 +4,7 @@ import { join, dirname } from 'path'
 import { Zip, ZipDeflate, ZipPassThrough } from 'fflate'
 import { MANIFEST_NAME, SECRETS_ENC_NAME, type BundleManifest, type ExportResult } from '../../shared/bundle-format'
 import { buildManifest, hashFiles, scanHome, toEntryName } from './bundle-manifest'
-import { checkPassphrase, encryptSecrets, newKdf } from './bundle-crypto'
+
 import { getDevaHome } from './config'
 
 /**
@@ -45,15 +45,6 @@ export interface ExportOptions {
  */
 export async function exportBundle(opts: ExportOptions): Promise<ExportResult> {
   const home = getDevaHome()
-  const pass = opts.passphrase?.trim() ?? ''
-
-  let kdf
-  if (pass) {
-    // 口令给了就必须验强度：太短的口令等于没加密，而这个包里有全部 API 密钥。
-    const chk = checkPassphrase(pass)
-    if (!chk.ok) return { ok: false, code: 'write-failed', message: chk.reason }
-    kdf = newKdf()
-  }
 
   let scan
   try {
@@ -78,17 +69,17 @@ export async function exportBundle(opts: ExportOptions): Promise<ExportResult> {
     return { ok: false, code: 'read-failed', message: `读取文件内容失败：${(e as Error)?.message ?? e}` }
   }
 
-  const secretsBlob = await buildSecretsBlob(home, pass, kdf)
+  const secretsBlob = await buildSecretsBlob(home)
   if (secretsBlob && 'error' in secretsBlob) {
     return { ok: false, code: 'read-failed', message: secretsBlob.error }
   }
   const secrets: Buffer | null = secretsBlob ?? null
 
-  const manifest = buildManifest(
-    scan,
-    { appVersion: await appVersion(), platform: process.platform, hasSecrets: secrets !== null },
-    kdf
-  )
+  const manifest = buildManifest(scan, {
+    appVersion: await appVersion(),
+    platform: process.platform,
+    hasSecrets: secrets !== null
+  })
 
   /*
    * 先写 .part，全部成功才 rename 成正式名。
@@ -135,13 +126,31 @@ export async function exportBundle(opts: ExportOptions): Promise<ExportResult> {
  * 所以这里先解出明文再加密。解不开的条目（来自别的账户 / 更早的环境）**原样保留密文**并计入报告：
  * 删掉会让用户以为是"本来就没配"，保留至少让他能看出有问题。
  */
-async function buildSecretsBlob(
-  home: string,
-  pass: string,
-  kdf: ReturnType<typeof newKdf> | undefined
-): Promise<Buffer | null | { error: string }> {
-  if (!pass || !kdf) return null
-
+/**
+ * 打包密钥段。
+ *
+ * ## 为什么是明文，不再用口令
+ *
+ * 这里的明文**只在包内**：zip 里的 `secrets.enc` 是一串 JSON 明文，还原时会被逐条用本环境的
+ * `safeStorage.encryptString` 重新封装后才写盘（见 `bundle-import.ts` 的 `reencryptSecrets`）。
+ * 所以磁盘上的 `secrets.json` 永远是密文，明文不会落到用户目录里。
+ *
+ * 取舍理由：
+ *  - 包里的会话内容本来就是明文（zip 只做 deflate，不加密）。也就是说「谁拿到这个文件就拿到
+ *    全部聊天记录」这件事已经成立，单独给密钥加一层口令并不改变这个前提。
+ *  - 口令模式最真实的失败模式不是被破解，而是**用户忘了口令**——等于把一个能恢复的东西变成
+ *    不能恢复的，与「卸载重装后一模一样」的目标直接冲突。
+ *  - 用户明确要求不要口令（「就我自己用」）。
+ *
+ * 代价：这个包要当密钥文件对待。界面上必须明说，不能让人不知情地把它丢进同步盘。
+ *
+ * ## 为什么必须先 decryptString 再放进包
+ *
+ * `secrets.json` 里的值是本机 `safeStorage` 的密文，而 DPAPI 的密钥随 Windows 账户走。
+ * 彻底卸载会删掉 `%APPDATA%\devaplus\Local State`，重装后同一串密文**必然解不开**。
+ * 所以包里放的必须是明文，不能图省事直接搬密文文件。
+ */
+async function buildSecretsBlob(home: string): Promise<Buffer | null | { error: string }> {
   let parsed: Record<string, unknown>
   try {
     parsed = JSON.parse(await readFile(join(home, 'secrets.json'), 'utf8')) as Record<string, unknown>
@@ -152,24 +161,33 @@ async function buildSecretsBlob(
 
   const { safeStorage } = await import('electron')
   if (!safeStorage.isEncryptionAvailable()) {
-    return { error: '本机没有可用的加密存储，无法导出密钥（可以不带口令导出，导入后重新填写）。' }
+    // 解不出明文就没法跨环境还原；宁可报错，也不要搬一份注定打不开的密文进去
+    return { error: '本机没有可用的加密存储，无法读出密钥（还原后需要重新填写）。' }
   }
 
+  // 兼容 `{version, secrets}` 与旧平铺格式，与 secrets.ts 的读取口径一致
+  const src =
+    parsed && typeof parsed.secrets === 'object' && parsed.secrets !== null
+      ? (parsed.secrets as Record<string, unknown>)
+      : parsed
+
   const plain: Record<string, string> = {}
-  for (const [key, val] of Object.entries(parsed)) {
+  for (const [key, val] of Object.entries(src)) {
     if (typeof val !== 'string' || !val) continue
     try {
       plain[key] = safeStorage.decryptString(Buffer.from(val, 'base64'))
     } catch {
       /*
-       * 解不开：保持密文原样。
-       * 这些条目在导出环境里本来就已是坏的（历史跨应用导入留下的残留、或换过账户），
-       * 打包出去至少能让用户在新环境看到"有这一条"，而不是静默消失。
+       * 解不开：**跳过，不放进包里**。
+       *
+       * 这些条目在本机就已经是坏的（历史跨应用导入留下的残留、或换过 Windows 账户）。
+       * 把旧密文原样塞进包里毫无意义 —— 重装后同样解不开，只会让用户以为「密钥还在」。
+       * 少一条并如实报告，比放一条永远打不开的进去要诚实。
        */
-      plain[key] = val
     }
   }
-  return encryptSecrets(JSON.stringify(plain), pass, kdf)
+  if (Object.keys(plain).length === 0) return null
+  return Buffer.from(JSON.stringify(plain), 'utf8')
 }
 
 /**

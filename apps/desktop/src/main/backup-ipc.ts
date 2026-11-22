@@ -6,7 +6,6 @@ import { exportBundle } from './services/bundle-export'
 import { restoreBundle, RestoreError } from './services/bundle-import'
 import { validateManifest } from './services/bundle-manifest'
 import { summarizeExcluded } from './services/bundle-manifest'
-import { verifyPassphrase } from './services/bundle-crypto'
 import { acquireLock, releaseLock } from './importer-lock'
 import { getDevaHome } from './services/config'
 
@@ -72,7 +71,7 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
   /** 导出：先弹保存对话框拿路径，再跑。 */
   ipcMain.handle(
     'backup:export',
-    async (_e, opts: { passphrase?: string }) => {
+    async () => {
       const win = getWindow()
       const stamp = new Date().toISOString().slice(0, 10)
       const picked = win
@@ -99,7 +98,6 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
         })
         return await exportBundle({
           targetPath: picked.filePath,
-          passphrase: opts?.passphrase,
           onProgress: (done, total) => send({ step: 'export', done, total })
         })
       } finally {
@@ -156,30 +154,10 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
     }
   })
 
-  /** 校口令：在真正还原之前先验一遍，免得解压完 600MB 才报「口令不对」。 */
-  ipcMain.handle('backup:check-passphrase', async (_e, opts: { path: string; passphrase: string }) => {
-    try {
-      const buf = await readFile(opts.path)
-      const entries = unzipSync(new Uint8Array(buf))
-      const raw = entries[MANIFEST_NAME]
-      const enc = entries[SECRETS_ENC_NAME]
-      if (!raw) return { ok: false, code: 'not-a-bundle', message: '不是备份包' }
-      const parsed = validateManifest(JSON.parse(Buffer.from(raw).toString('utf8')))
-      if (!parsed.ok) return { ok: false, code: 'not-a-bundle', message: parsed.reason }
-      if (!parsed.manifest.hasSecrets || !enc || !parsed.manifest.secretsKdf) {
-        return { ok: true, noSecrets: true }
-      }
-      const good = await verifyPassphrase(Buffer.from(enc), opts.passphrase, parsed.manifest.secretsKdf)
-      return good ? { ok: true } : { ok: false, code: 'bad-passphrase', message: '口令不对' }
-    } catch (e) {
-      return { ok: false, code: 'not-a-bundle', message: `校验失败：${(e as Error)?.message ?? e}` }
-    }
-  })
-
   /** 还原：路径与确认由界面先问，这里只执行。 */
   ipcMain.handle(
     'backup:restore',
-    async (_e, opts: { path: string; passphrase?: string; overwriteConfirmed?: boolean }) => {
+    async (_e, opts: { path: string; overwriteConfirmed?: boolean }) => {
       const lock = acquireLock(getDevaHome())
       if ('busy' in lock) {
         return {
@@ -195,7 +173,6 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
         })
         return await restoreBundle({
           bundlePath: opts.path,
-          passphrase: opts.passphrase,
           overwriteConfirmed: opts.overwriteConfirmed,
           onProgress: send
         })

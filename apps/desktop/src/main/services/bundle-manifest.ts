@@ -148,8 +148,7 @@ export async function hashFile(absPath: string): Promise<string> {
 /** 组装清单。 */
 export function buildManifest(
   scan: ScanResult,
-  meta: { appVersion: string; platform: string; hasSecrets: boolean },
-  kdf?: BundleManifest['secretsKdf']
+  meta: { appVersion: string; platform: string; hasSecrets: boolean }
 ): BundleManifest {
   return {
     format: BUNDLE_FORMAT,
@@ -160,8 +159,7 @@ export function buildManifest(
     files: scan.files,
     symlinks: scan.symlinks,
     excluded: scan.excluded,
-    hasSecrets: meta.hasSecrets,
-    ...(kdf ? { secretsKdf: kdf } : {})
+    hasSecrets: meta.hasSecrets
   }
 }
 

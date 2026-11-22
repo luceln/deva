@@ -16,7 +16,7 @@
  *   B6  覆盖前必须先备份现有数据，且备份失败要中止
  *   B7  统一刷 mtime（不刷会被启动清扫按 mtime 删掉）
  *   B8  索引刷新只用 invalidateIndexOnly（用 invalidateIndex 会让之后所有 save() 静默失败）
- *   B9  密钥必须重封装（导出解明文、导入用本机 safeStorage 重新加密）
+ *   B9  密钥：包内是明文（无口令），但**磁盘上必须仍是密文**（导出解明文、导入重封装）
  *   B10 符号链接要记录，不能只搬内容
  *
  * 它**不能**证明的：真实导出/还原能不能跑通、包里内容对不对。那是 verify-bundle-real.cjs 的事。
@@ -161,12 +161,34 @@ forbid(
   'invalidateIndex 会清 sessionCache，之后所有 save() 静默返回 not-saved'
 )
 
-// ── B9 密钥重封装 ──
+// ── B9 密钥：包内明文、磁盘密文 ──
 need('B9a 导出解出明文', srcExport, /safeStorage\.decryptString/, '没解明文 → 旧密文跨环境必然解不开')
-need('B9b 导出用口令加密', srcExport, /encryptSecrets\(/, '没有口令加密')
 need('B9c 导入重新封装', srcImport, /safeStorage\.encryptString/, '没重封装 → 还原后密钥全是坏密文')
 need('B9d 无加密能力时不写明文', srcImport, /noEncryption: true/, '本机无加密时应报 noEncryption 而不是退化成明文')
-need('B9e 口令错要明确报错', srcImport, /bad-passphrase/, '缺 bad-passphrase')
+forbid(
+  'B9e 不得保留口令加密',
+  stripComments(srcExport),
+  /encryptSecrets|newKdf|checkPassphrase/,
+  '用户明确要求不要口令；残留会把明文又加密回去，还原时还得让用户输口令'
+)
+forbid(
+  'B9f 不得有口令校验通道',
+  stripComments(srcIpc),
+  /check-passphrase|verifyPassphrase/,
+  '没有口令可校，留着会让界面以为需要输口令'
+)
+/*
+ * 顺序判据（这条是端到端 E14 抓出来的真 bug）：
+ * 密钥段**必须在替换用户数据之前**解析，否则坏包会在覆盖完数据之后才暴露，
+ * 用户剩下的唯一退路是那份自动备份。
+ */
+{
+  const iPrepare = srcImport.indexOf('prepareSecrets(entries, manifest)')
+  const iReplace = srcImport.indexOf("report('replace', 0, manifest.files.length)")
+  if (iPrepare < 0 || iReplace < 0) fail('B9g 密钥解析在替换之前', '找不到判据锚点')
+  else if (iPrepare < iReplace) pass('B9g 密钥解析在替换用户数据之前')
+  else fail('B9g 密钥解析在替换之前', '坏包会先覆盖数据再报错，用户只能靠自动备份退回')
+}
 
 // ── B10 符号链接还原 ──
 need('B10a 还原时重建链接', srcImport, /await symlink\(link\.target/, '没重建符号链接')
@@ -177,7 +199,7 @@ need('C1 format 常量', srcFormat, /BUNDLE_FORMAT = 'devaplus-backup'/, '常量
 need('C2 有 schemaVersion', srcFormat, /BUNDLE_SCHEMA_VERSION = \d+/, '缺版本常量')
 
 // ── 契约：IPC 通道与 preload 一致 ──
-for (const ch of ['backup:export', 'backup:inspect', 'backup:check-passphrase', 'backup:restore']) {
+for (const ch of ['backup:export', 'backup:inspect', 'backup:restore']) {
   const inIpc = srcIpc.includes(`'${ch}'`)
   const pre = path.join(REPO, 'apps', 'desktop', 'src', 'preload', 'backup.ts')
   const srcPre = fs.existsSync(pre) ? fs.readFileSync(pre, 'utf8') : ''

@@ -114,6 +114,29 @@ fs.writeFileSync(
 check('D3 zip slip 判据有效', 'E13', runVerify())
 restore()
 
+/*
+ * ── D4 把密钥解析挪到替换之后 ──
+ *
+ * 这条对应端到端抓出来的真 bug：坏包会先把用户数据覆盖掉，然后才报「密钥段损坏」。
+ * 注入方式是把 `prepareSecrets` 的调用点挪到替换循环之后 —— 顺序判据（护栏 B9g）与
+ * 端到端（E14）都应当报红。这里验端到端这一侧。
+ */
+console.log('\nD4 把密钥解析挪到替换用户数据之后…')
+{
+  // 源码可能是 CRLF（Windows 检出），锚点要按实际换行符拼，否则永远找不到
+  const nl = origImport.includes('\r\n') ? '\r\n' : '\n'
+  const call = `    const secretsPlan = await prepareSecrets(entries, manifest)${nl}`
+  const marker = `    report('replace', manifest.files.length, manifest.files.length)${nl}`
+  if (!origImport.includes(call) || !origImport.includes(marker)) {
+    bad('D4 注入失败', '找不到锚点')
+  } else {
+    const moved = origImport.replace(call, '').replace(marker, `${marker}${call}`)
+    fs.writeFileSync(IMPORT, moved)
+    check('D4 密钥顺序判据有效', 'E14', runVerify())
+    restore()
+  }
+}
+
 // ── 收尾：源码必须与开始时逐字节一致 ──
 console.log('\n收尾核对…')
 if (sha(IMPORT) === hashImport) ok('bundle-import.ts 已复原')

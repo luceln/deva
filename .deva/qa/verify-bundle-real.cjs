@@ -24,7 +24,7 @@
  *   E3 包内每个文件的 sha256 与源文件一致
  *   E4 媒体（二进制）字节完全一致
  *   E5 符号链接被记录（不是把内容当普通文件搬）
- *   E6 密钥段存在且**不是明文**（用口令能解回、错口令解不开）
+ *   E6 密钥段存在且是明文 JSON，内容与源密钥一致
  *   E7 还原后逐文件哈希与原始 home 一致
  *   E8 还原后 mtime 是新的（不是源文件的旧时间）
  *   E9 还原后 `_index.json` 不存在（派生索引应当重建，不能来自包）
@@ -32,7 +32,7 @@
  *   E11 目标非空且确认 → 先产出 `restore-backup-*` 备份目录
  *   E12 损坏包（改一个字节）→ 报 corrupt，且目标不被破坏
  *   E13 zip slip 包（条目名含 ..）→ 拒绝
- *   E14 错口令 → bad-passphrase，目标不被破坏
+ *   E14 密钥段被写坏 → corrupt，目标不被破坏
  *   E15 第二次还原同一包 → 结果与第一次一致（幂等）
  */
 const esbuild = require('esbuild')
@@ -156,7 +156,18 @@ function makeHome(root) {
     JSON.stringify({ version: 1, tasks: [{ id: 't1', cron: '0 9 * * *' }] })
   )
   fs.writeFileSync(path.join(home, 'read-state.json'), JSON.stringify({ 's-1': 1700000000000 }))
-  fs.writeFileSync(path.join(home, 'secrets.json'), JSON.stringify({ p1: 'CIPHERTEXT_PLACEHOLDER' }))
+  /*
+   * 密钥库夹具必须用 fake safeStorage **加密后的**值，不能塞一串假密文。
+   *
+   * 导出侧的设计是：`decryptString` 解不开的条目**跳过、不放进包里**（因为重装后同样解不开，
+   * 放进去只会让用户以为密钥还在）。所以夹具若给一段假密文，导出会正确地什么都不导 ——
+   * 那时 E6 失败是夹具的问题，不是实现的问题。
+   */
+  {
+    const stub = require(path.join(QA, 'stubs', 'electron.cjs'))
+    const encrypted = stub.safeStorage.encryptString('sk-plaintext-qa-key-123').toString('base64')
+    fs.writeFileSync(path.join(home, 'secrets.json'), JSON.stringify({ p1: encrypted }))
+  }
 
   // 技能：一个普通文件 + 一个符号链接（指向外部仓库）
   fs.writeFileSync(path.join(home, 'skills/demo/SKILL.md'), '# demo\n')
@@ -189,9 +200,6 @@ async function build() {
 export { restoreBundle, RestoreError } from ${JSON.stringify(path.join(SRC, 'main/services/bundle-import.ts'))}
 export { scanHome, validateManifest, isSafeEntryPath } from ${JSON.stringify(
       path.join(SRC, 'main/services/bundle-manifest.ts')
-    )}
-export { encryptSecrets, decryptSecrets, newKdf, checkPassphrase } from ${JSON.stringify(
-      path.join(SRC, 'main/services/bundle-crypto.ts')
     )}
 `
   )
@@ -228,8 +236,7 @@ async function main() {
 
   // ── E1~E6 导出 ──
   const bundlePath = path.join(root, 'backup.dbk')
-  const passphrase = 'correct horse battery'
-  const exp = await api.exportBundle({ targetPath: bundlePath, passphrase })
+  const exp = await api.exportBundle({ targetPath: bundlePath })
   if (!exp.ok) {
     bad('E1 导出成功', JSON.stringify(exp))
     return done()
@@ -284,28 +291,35 @@ async function main() {
     ok('E5 符号链接已记录', `target=${t}`)
   } else skip('E5 符号链接', '本环境无法创建符号链接（Windows 需开发者模式/管理员）')
 
-  // E6 密钥段：不是明文、口令能解、错口令解不开
+  /*
+   * E6 密钥段。
+   *
+   * **语义变了**：以前是"必须不是明文、要口令才解得开"；现在用户明确要求不要口令 —
+   * 包里就是明文 JSON，省掉记忆和输入口令。所以判据要反过来断言"能直接读出明文"，
+   * 并且断言**读出来的就是原密钥**（否则还原后密钥是错的，比没有更糟）。
+   *
+   * 同时必须确认：明文只在包内，磁盘上的 `secrets.json` 仍然是密文（见 E7d）。
+   */
   const sec = entries['secrets.enc']
   if (!sec) bad('E6a 密钥段存在')
   else {
-    const raw = Buffer.from(sec)
-    const asText = raw.toString('utf8')
-    if (asText.includes('CIPHERTEXT_PLACEHOLDER')) bad('E6b 密钥段是明文', '包内直接能读到')
-    else ok('E6b 密钥段不是明文')
-    const mm = JSON.parse(Buffer.from(mRaw).toString('utf8'))
+    const text = Buffer.from(sec).toString('utf8')
+    let parsed = null
     try {
-      const plain = await api.decryptSecrets(raw, passphrase, mm.secretsKdf)
-      if (plain.includes('CIPHERTEXT_PLACEHOLDER')) ok('E6c 正确口令能解回原内容')
-      else bad('E6c 解出的内容不对')
-    } catch (e) {
-      bad('E6c 正确口令解不开', String(e).slice(0, 80))
-    }
-    try {
-      await api.decryptSecrets(raw, 'wrong passphrase!!', mm.secretsKdf)
-      bad('E6d 错口令应当解不开', '居然解开了')
+      parsed = JSON.parse(text)
     } catch {
-      ok('E6d 错口令正确报错')
+      bad('E6b 密钥段是合法 JSON', text.slice(0, 80))
     }
+    if (parsed) {
+      if (parsed.p1 === 'sk-plaintext-qa-key-123') ok('E6b 密钥段是明文且内容正确')
+      else bad('E6b 密钥段内容不对', JSON.stringify(parsed).slice(0, 100))
+      if (typeof parsed.p1 === 'string' && !parsed.p1.startsWith('FAKE_DPAPI')) {
+        ok('E6c 密钥段里是解出来的明文，不是本机密文')
+      } else bad('E6c 密钥段里还是密文', '跨环境还原后必然解不开')
+    }
+    const mm = JSON.parse(Buffer.from(mRaw).toString('utf8'))
+    if (mm.hasSecrets === true && mm.secretsKdf === undefined) ok('E6d manifest 不再声明 KDF（没有口令了）')
+    else bad('E6d manifest 残留 KDF 声明', JSON.stringify({ hasSecrets: mm.hasSecrets, kdf: mm.secretsKdf }))
   }
 
   // ── 模拟「彻底卸载」：删掉整个 home ──
@@ -313,7 +327,7 @@ async function main() {
   fs.mkdirSync(home, { recursive: true })
 
   // ── E7~E9 还原 ──
-  const res = await api.restoreBundle({ bundlePath, passphrase })
+  const res = await api.restoreBundle({ bundlePath })
   if (!res.ok) {
     bad('E7 还原成功', JSON.stringify(res))
     return done()
@@ -386,7 +400,7 @@ async function main() {
 
   // E10 目标非空且未确认 → 拒绝且零写入
   const before = sha256File(path.join(home, 'config.json'))
-  const r10 = await api.restoreBundle({ bundlePath, passphrase, overwriteConfirmed: false })
+  const r10 = await api.restoreBundle({ bundlePath, overwriteConfirmed: false })
   if (!r10.ok && r10.code === 'cancelled') {
     const after = sha256File(path.join(home, 'config.json'))
     if (before === after) ok('E10 非空目标未确认 → 拒绝且零写入')
@@ -394,7 +408,7 @@ async function main() {
   } else bad('E10 应当拒绝', JSON.stringify(r10).slice(0, 100))
 
   // E11 确认后应产出 restore-backup-*
-  const r11 = await api.restoreBundle({ bundlePath, passphrase, overwriteConfirmed: true })
+  const r11 = await api.restoreBundle({ bundlePath, overwriteConfirmed: true })
   if (r11.ok && r11.backupOfPrevious && fs.existsSync(r11.backupOfPrevious)) {
     ok('E11 覆盖前自动备份', path.basename(r11.backupOfPrevious))
   } else bad('E11 没有自动备份', JSON.stringify(r11).slice(0, 120))
@@ -406,7 +420,7 @@ async function main() {
    * 以包为基准才能同时抓住"第一次对、第二次被污染"和"两次都少了同样的东西"。
    */
   const cfgHash1 = sha256File(path.join(home, 'config.json'))
-  const r15 = await api.restoreBundle({ bundlePath, passphrase, overwriteConfirmed: true })
+  const r15 = await api.restoreBundle({ bundlePath, overwriteConfirmed: true })
   const cfgHash2 = sha256File(path.join(home, 'config.json'))
   if (!r15.ok) bad('E15a 第二次还原成功', JSON.stringify(r15).slice(0, 120))
   else {
@@ -437,7 +451,7 @@ async function main() {
     fs.writeFileSync(corruptPath, src)
   }
   const beforeC = sha256File(path.join(home, 'config.json'))
-  const r12 = await api.restoreBundle({ bundlePath: corruptPath, passphrase, overwriteConfirmed: true })
+  const r12 = await api.restoreBundle({ bundlePath: corruptPath, overwriteConfirmed: true })
   const afterC = sha256File(path.join(home, 'config.json'))
   if (!r12.ok && (r12.code === 'corrupt' || r12.code === 'not-a-bundle' || r12.code === 'extract-failed')) {
     if (beforeC === afterC) ok('E12 损坏包被拒且目标未被破坏', r12.code)
@@ -472,13 +486,33 @@ async function main() {
   if (!r13.ok && r13.code === 'unsafe-path') ok('E13 zip slip 被拒', '../../evil.txt')
   else bad('E13 zip slip 没被拦住', JSON.stringify(r13).slice(0, 120))
 
-  // ── E14 错口令 ──
-  const beforeE = sha256File(path.join(home, 'config.json'))
-  const r14 = await api.restoreBundle({ bundlePath, passphrase: 'definitely-wrong', overwriteConfirmed: true })
-  if (!r14.ok && r14.code === 'bad-passphrase') {
-    ok('E14 错口令被拒', r14.code)
-  } else bad('E14 错口令没被拦住', JSON.stringify(r14).slice(0, 120))
-  void beforeE
+  /*
+   * ── E14 密钥段损坏 ──
+   *
+   * 没有口令了，"口令错"这个失败模式消失，但"密钥段坏了"还在（磁盘位翻转、传输截断）。
+   * 它必须在**动密钥库之前**被挡住：否则会用一份坏数据覆盖掉用户现有的可用密钥。
+   */
+  const badSecPath = path.join(root, 'badsecrets.dbk')
+  {
+    const { zipSync } = require('fflate')
+    const m = JSON.parse(Buffer.from(mRaw).toString('utf8'))
+    const evil = {
+      'manifest.json': mRaw,
+      'secrets.enc': new Uint8Array(Buffer.from('{ this is not json')),
+      ...Object.fromEntries(
+        Object.entries(entries).filter(([k]) => k.startsWith('home/'))
+      )
+    }
+    fs.writeFileSync(badSecPath, Buffer.from(zipSync(evil)))
+    void m
+  }
+  const beforeE = sha256File(path.join(home, 'secrets.json'))
+  const r14 = await api.restoreBundle({ bundlePath: badSecPath, overwriteConfirmed: true })
+  const afterE = sha256File(path.join(home, 'secrets.json'))
+  if (!r14.ok && r14.code === 'corrupt') {
+    if (beforeE === afterE) ok('E14 密钥段损坏被拒，且现有密钥未被破坏')
+    else bad('E14 损坏被拒了但密钥库已被改动')
+  } else bad('E14 损坏的密钥段没被拦住', JSON.stringify(r14).slice(0, 120))
 
   // ── 清场 ──
   fs.rmSync(root, { recursive: true, force: true })
