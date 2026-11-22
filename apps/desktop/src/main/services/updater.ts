@@ -17,6 +17,7 @@ import type { UpdateMode, UpdateRelease, UpdateState } from '../../shared/update
 import { httpFetch } from '../http'
 import { settleActiveTurns } from './chat'
 import { installedByNsis, isPortable } from './portable'
+import { ARTIFACT_NAME_PREFIX, DEB_INSTALL_DIR } from '../../shared/brand'
 
 // 二开版自己的仓库（上游是 sqfcyily/deva）。三处地址必须与 electron-builder.yml 的 publish.owner 一致：
 // 只改 publish 不改这里的话，应用内「检查更新」仍去查上游 Release，发现上游发新版就提示更新，
@@ -90,7 +91,7 @@ function canAutoInstall(): boolean {
 function linuxPackage(): 'appimage' | 'deb' | null {
   if (!app.isPackaged) return null
   if (process.env.APPIMAGE) return 'appimage'
-  if (process.execPath.startsWith('/opt/DevaPlus/')) return 'deb'
+  if (process.execPath.startsWith(`${DEB_INSTALL_DIR}/`)) return 'deb'
   return null
 }
 
@@ -100,21 +101,21 @@ function linuxPackage(): 'appimage' | 'deb' | null {
  */
 function installerName(version: string): string | null {
   if (process.platform === 'win32')
-    return isPortable() ? `DevaPlus-${version}-portable.zip` : `DevaPlus-${version}-setup.exe`
+    return isPortable() ? `${ARTIFACT_NAME_PREFIX}-${version}-portable.zip` : `${ARTIFACT_NAME_PREFIX}-${version}-setup.exe`
   if (process.platform === 'darwin') {
     // x64 版经 Rosetta 跑在 Apple 芯片上时 process.arch 也是 x64，改推原生的 arm64 包
     const arm = process.arch === 'arm64' || app.runningUnderARM64Translation
-    return `DevaPlus-${version}-${arm ? 'arm64' : 'x64'}.dmg`
+    return `${ARTIFACT_NAME_PREFIX}-${version}-${arm ? 'arm64' : 'x64'}.dmg`
   }
   // Linux：按安装方式给同类包，文件名带架构（见 electron-builder.yml 的 linux.artifactName）。
   // 注意 electron-builder 用的是各格式自己的架构名：AppImage 的 x64 叫 x86_64、deb 叫 amd64，arm64 都不变，
   // 不是 Windows/macOS 那套 x64。下载后由用户自己替换 / 安装，不做应用内自动安装。
   if (process.platform === 'linux') {
     const pkg = linuxPackage()
-    if (pkg === 'deb') return `DevaPlus-${version}-${process.arch === 'arm64' ? 'arm64' : 'amd64'}.deb`
+    if (pkg === 'deb') return `${ARTIFACT_NAME_PREFIX}-${version}-${process.arch === 'arm64' ? 'arm64' : 'amd64'}.deb`
     if (pkg === 'appimage') {
       const arch = process.arch === 'arm64' ? 'arm64' : process.arch === 'ia32' ? 'i386' : 'x86_64'
-      return `DevaPlus-${version}-${arch}.AppImage`
+      return `${ARTIFACT_NAME_PREFIX}-${version}-${arch}.AppImage`
     }
   }
   return null

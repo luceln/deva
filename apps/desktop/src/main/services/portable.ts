@@ -3,6 +3,7 @@ import { execFile } from 'child_process'
 import { existsSync, writeFileSync } from 'fs'
 import { dirname, join } from 'path'
 import { getAppIcon } from './tray-icon'
+import { APP_DISPLAY_NAME } from '../../shared/brand'
 
 /**
  * Windows 便携版（zip 解压后直接运行 DevaPlus.exe，见 electron-builder.yml 的 zip 目标）。
@@ -43,7 +44,7 @@ export function registerToastIdentity(appId: string): void {
       () => {}
     )
   }
-  set('DisplayName', 'DevaPlus')
+  set('DisplayName', APP_DISPLAY_NAME)
   try {
     const icon = join(app.getPath('userData'), 'notification-icon.png')
     writeFileSync(icon, getAppIcon().toPNG({ scaleFactor: 2 }))

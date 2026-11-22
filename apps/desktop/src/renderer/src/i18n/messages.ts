@@ -3,6 +3,8 @@
  * 新增语言只需在此追加一份同结构字典。
  */
 
+import { APP_DISPLAY_NAME } from '../../../shared/brand'
+
 export type Locale = 'zh-CN' | 'en'
 
 export interface MessageTree {
@@ -28,7 +30,7 @@ function mergeFork(base: MessageTree, fork: MessageTree): MessageTree {
 }
 
 const zhCN: MessageTree = {
-  app: { name: 'DevaPlus', tagline: '' },
+  app: { name: APP_DISPLAY_NAME, tagline: '' },
   activity: {
     chat: '对话',
     explorer: '资源管理器',
@@ -1681,7 +1683,7 @@ const zhCN: MessageTree = {
 }
 
 const en: MessageTree = {
-  app: { name: 'DevaPlus', tagline: '' },
+  app: { name: APP_DISPLAY_NAME, tagline: '' },
   activity: {
     chat: 'Chat',
     explorer: 'Explorer',
