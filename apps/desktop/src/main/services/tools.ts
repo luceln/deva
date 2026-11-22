@@ -10,6 +10,7 @@ import { spillLongOutput } from './tool-results'
 import { skillsDir, upsertSkill } from './skills'
 import type { MemoryAccess } from './memory'
 import { MEMORY_TOOL_SPECS, memoryDeleteTool, memoryReadTool, memoryWriteTool } from './memory-tools'
+import { APP_UA_PREFIX } from '../../shared/brand'
 import type { CompactModelConfig } from './compaction'
 import { upsertServer, type McpValue } from './mcp-config'
 import {
@@ -1553,7 +1554,7 @@ const toolHandlers: Record<string, (a: Record<string, unknown>, ctx: ToolContext
         signal: controller.signal,
         redirect: 'follow',
         headers: {
-          'user-agent': `DevaPlus/${app.getVersion()} (+https://github.com/luceln/deva)`,
+          'user-agent': `${APP_UA_PREFIX}/${app.getVersion()} (+https://github.com/luceln/deva)`,
           accept: 'text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8'
         }
       })
