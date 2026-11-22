@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron'
 import type { CompactModelConfig } from './compaction'
-import { condenseMemories, type CondenseResult } from './memory-consolidate'
-import { GLOBAL_SCOPE, listMemories, type MemoryScope } from './memory'
+import { condenseMemories, type CondenseResult, type SkippedEntry } from './memory-consolidate'
+import { GLOBAL_SCOPE, readMemories, scopeLabel, type MemoryScope } from './memory'
 import { resolveDefaultModel } from './model-resolve'
 import { resolveAvailability } from './model-availability'
 import { readSecret } from './secrets'
@@ -44,16 +44,28 @@ export type CondenseIpcResult =
       changed: number
       /** 是否真的腾出了空间。`false` 时界面**不要**说「已腾出空间」。 */
       freedSpace: boolean
+      /**
+       * 归纳结果里被跳过的条目：等待模型返回期间，这些条目被用户改过（`modified`）或删掉（`deleted`）。
+       *
+       * 必须回传：跳过意味着「这次整理对这几条没生效」。静默吞掉的话，用户看到「已整理」却发现
+       * 某条既没被压、也没按他的新值显示，无从判断是模型没做还是系统挡了。
+       */
+      skipped: SkippedEntry[]
       /** 用哪个模型做的（`providerId:modelId`），便于用户确认。 */
       model: string
     }
   | {
       ok: false
-      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted'
+      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit' | 'readFailed'
       /** 给用户看的一句话（可直接显示；技术细节更全的说明放 detail）。 */
       reason: string
       /** 技术定位（provider id / 错误信息），供排查；界面可折叠显示。 */
       detail?: string
+      /**
+       * 只有 `concurrent-change` 会带：等待模型期间被改动 / 删除的条目 id。
+       * 用户要知道是哪几条变了，否则「没提交」看起来像系统抽风。
+       */
+      changed?: string[]
     }
 
 /**
@@ -148,8 +160,19 @@ export function registerMemoryCondenseIpc(): void {
       /*
        * 先看有没有东西可压：空作用域连模型都不用挑。放在 pickModel 之前——
        * 「项目记忆还是空的」这种提示比「模型不可用」更贴近用户此刻的处境。
+       *
+       * ⚠️ 必须三态读（P2-14）：`listMemories()` 把「文件读不出来」折成空数组，于是文件损坏会被
+       * 报成「这里还没有记忆条目」。用户据此以为记忆丢了 / 不需要整理，真正要做的是去修那个文件。
        */
-      if (listMemories(scope).length === 0) {
+      const peek = readMemories(scope)
+      if (peek.kind === 'unreadable')
+        return {
+          ok: false,
+          code: 'readFailed',
+          reason: `${scopeLabel(scope)}文件读不出来，请先检查该文件`,
+          detail: peek.error
+        }
+      if (peek.entries.length === 0) {
         return { ok: false, code: 'empty', reason: '这里还没有记忆条目，不需要整理' }
       }
       const picked = await pickModel()
@@ -172,7 +195,8 @@ export function registerMemoryCondenseIpc(): void {
         return {
           ok: false,
           code: r.code,
-          reason: r.code === 'empty' ? '这里还没有记忆条目，不需要整理' : r.reason
+          reason: r.code === 'empty' ? '这里还没有记忆条目，不需要整理' : r.reason,
+          ...(r.changed ? { changed: r.changed } : {})
         }
       }
       return {
@@ -182,6 +206,7 @@ export function registerMemoryCondenseIpc(): void {
         freed: r.freed,
         changed: r.changed,
         freedSpace: r.freedSpace,
+        skipped: r.skipped,
         model: picked.ref
       }
     }

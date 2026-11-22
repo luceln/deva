@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { existsSync, mkdirSync, promises as fsp, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, promises as fsp, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './config'
 import type { ContentPart, Message } from '../providers/types'
@@ -113,9 +113,28 @@ function hydratePart(p: Record<string, unknown>): boolean {
 }
 
 /**
- * 载入后原地还原消息里的 blob 引用。读不回的（media 目录被手动清理等）不能留成空块发给模型——
- * 服务商会直接 400：消息里的独立块换成一行文字说明，工具结果里的图片去掉并在正文里注明。
+ * 导入前置检查：主档引用的 blob 在源里确实存在、却还没落到目标，说明附件依赖尚未准备好。
+ * 只拦这一种——源自己也没有该 blob 时，正常载入同样降级成文字说明，不算依赖失败。
+ * 不修改消息（hydrate 会就地换字段，必须在依赖就绪后再做）。
  */
+export function missingSourceMedia(messages: Message[], sourceHome: string): boolean {
+  let sourceBlobs: Set<string>
+  try { sourceBlobs = new Set(readdirSync(join(sourceHome, 'data', 'media'))) }
+  catch { return false }
+  const missing = (hash: unknown) =>
+    typeof hash === 'string' && sourceBlobs.has(hash) && readBlob(hash) === null
+  for (const message of messages) {
+    if (!message || typeof message !== 'object') return true
+    if (typeof message.content === 'string') continue
+    if (!Array.isArray(message.content)) return true
+    for (const part of message.content) {
+      if (isRef(part) && missing(part.blob)) return true
+      if (part.type === 'tool_result' && part.images?.some((image) => isRef(image) && missing(image.blob))) return true
+    }
+  }
+  return false
+}
+
 export function hydrateMessages(messages: Message[]): void {
   for (const m of messages) {
     if (typeof m.content === 'string') continue

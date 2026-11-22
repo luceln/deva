@@ -9,7 +9,7 @@
  * 线缆类型按项目约定在本文件内结构化复述，不跨层 import。
  */
 import * as pty from '@lydell/node-pty'
-import { statSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 
 /** 主进程 → 宿主 的入站消息。 */
@@ -46,11 +46,10 @@ function defaultShell(): string {
   return process.env.SHELL || '/bin/bash'
 }
 
-/** 未选择 cwd 才使用 home；明确绑定的目录失效必须报错，不改变执行位置。 */
+/** cwd 兜底：目录不存在（或未开项目）时回退到用户主目录，避免 spawn 失败。 */
 function safeCwd(cwd: string | null): string {
-  if (!cwd) return homedir()
-  if (!statSync(cwd).isDirectory()) throw new Error('终端工作目录不可用，不会回退用户主目录')
-  return cwd
+  if (cwd && existsSync(cwd)) return cwd
+  return homedir()
 }
 
 function handleCreate(msg: Extract<InboundMessage, { type: 'create' }>): void {

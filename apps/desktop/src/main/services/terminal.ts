@@ -14,15 +14,12 @@
 import { BrowserWindow, ipcMain, utilityProcess, type UtilityProcess } from 'electron'
 import { join } from 'path'
 import { detectShells, resolveShell } from './shells'
-import { assertMemberTerminalDirectory } from './member-worktree-guard'
-import { getSession, listSessions } from './chat-store'
 
 /** 渲染层传入的建终端参数（结构化复述，与 preload 对齐）。 */
 interface CreateOptions {
   cols: number
   rows: number
   cwd: string | null
-  sessionId?: string
   shellId?: string | null
 }
 
@@ -36,7 +33,6 @@ export function registerTerminalIpc(getWindow: () => BrowserWindow | null): void
   let ready = false
   let seq = 0
   const activeIds = new Set<string>()
-  const executionRoots = new Map<string, { cwd: string | null; sessionId?: string }>()
   const pending: Record<string, unknown>[] = []
 
   /** 把待发消息冲刷给 Utility Process；未就绪时留在 pending，spawn 后再发。 */
@@ -70,7 +66,6 @@ export function registerTerminalIpc(getWindow: () => BrowserWindow | null): void
         win.webContents.send('terminal:data', { id: msg.id, data: msg.data })
       } else if (msg?.type === 'exit') {
         activeIds.delete(msg.id)
-        executionRoots.delete(msg.id)
         win.webContents.send('terminal:exit', { id: msg.id, exitCode: msg.exitCode })
       }
     })
@@ -82,7 +77,6 @@ export function registerTerminalIpc(getWindow: () => BrowserWindow | null): void
         win?.webContents.send('terminal:exit', { id, exitCode: -1 })
       }
       activeIds.clear()
-      executionRoots.clear()
       pending.length = 0
       child = null
       ready = false
@@ -94,34 +88,17 @@ export function registerTerminalIpc(getWindow: () => BrowserWindow | null): void
     detectShells().map(({ id, label, isDefault }) => ({ id, label, isDefault }))
   )
 
-  ipcMain.handle('terminal:create', async (_evt, opts: CreateOptions): Promise<{ id: string }> => {
-    const sessionId = opts.sessionId ?? listSessions().find((meta) => {
-      const s = getSession(meta.id)
-      return s?.parentId && s.focusRoot === opts.cwd
-    })?.id
-    await assertMemberTerminalDirectory(opts.cwd, sessionId)
+  ipcMain.handle('terminal:create', (_evt, opts: CreateOptions): { id: string } => {
     ensureChild()
     const id = `t${++seq}`
     activeIds.add(id)
-    executionRoots.set(id, { cwd: opts.cwd, sessionId })
     const { path: shellPath, args: shellArgs } = resolveShell(opts.shellId ?? null)
     send({ type: 'create', id, cols: opts.cols, rows: opts.rows, cwd: opts.cwd, shellPath, shellArgs })
     return { id }
   })
 
-  ipcMain.on('terminal:input', async (_evt, id: string, data: string) => {
-    const root = executionRoots.get(id)
-    if (!root || !activeIds.has(id)) return
-    try {
-      await assertMemberTerminalDirectory(root.cwd, root.sessionId)
-      if (activeIds.has(id)) send({ type: 'input', id, data })
-    } catch (e) {
-      activeIds.delete(id)
-      executionRoots.delete(id)
-      send({ type: 'dispose', id })
-      getWindow()?.webContents.send('terminal:data', { id, data: `\r\n${(e as Error).message}\r\n` })
-      getWindow()?.webContents.send('terminal:exit', { id, exitCode: -1 })
-    }
+  ipcMain.on('terminal:input', (_evt, id: string, data: string) => {
+    send({ type: 'input', id, data })
   })
 
   ipcMain.on('terminal:resize', (_evt, id: string, cols: number, rows: number) => {
@@ -130,7 +107,6 @@ export function registerTerminalIpc(getWindow: () => BrowserWindow | null): void
 
   ipcMain.on('terminal:dispose', (_evt, id: string) => {
     activeIds.delete(id)
-    executionRoots.delete(id)
     send({ type: 'dispose', id })
   })
 }

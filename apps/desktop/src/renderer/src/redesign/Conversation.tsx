@@ -47,8 +47,6 @@ import {
   ConvMessage
 } from './ConvMessage'
 import { type SlashCommand, type ComposerPrefill, MemberProgressNotice, Composer } from './Composer'
-import { MemberWorktreePanel } from './MemberWorktreePanel'
-import type { MemberWorktreeBindResult, MemberWorktreePrecheckResult, MemberWorktreeState } from '../../../shared/member-worktree-protocol'
 
 /**
  * 「回到底部」按钮的显隐阈值：距底 ≤ 此像素即隐藏按钮（= 视为已在底部）。
@@ -281,18 +279,6 @@ export function Conversation({
   const scrollRef = useRef<HTMLDivElement>(null)
   // 成员在内置浏览器里等你操作（登录、验证等）：同提问 / 计划，在对话末尾放一枚胶囊提醒（见 MemberAsks）。
   const browserState = useBrowserState()
-  const [worktreeOpen, setWorktreeOpen] = useState(false)
-  const [worktreeState, setWorktreeState] = useState<MemberWorktreeState | null>(null)
-  const memberSessionId = memberView?.entry.meta.sessionId
-  const worktreeBusy = !!sessionStates[currentSessionId]?.streaming
-  useEffect(() => {
-    if (!worktreeOpen || !memberSessionId) return
-    let alive = true
-    void window.deva.chat.memberWorktreeState({ sessionId: memberSessionId }).then((result) => {
-      if (alive && result.ok) setWorktreeState(result.state)
-    })
-    return () => { alive = false }
-  }, [worktreeOpen, memberSessionId])
   // 在本对话中运行的定时任务名（小写）：主角色的 member_send / member_status 也能点到它们（见 blocks.tsx TaskNamesContext）。
   // 与成员同名的让给成员（主进程同样先找成员）。
   const taskNames = useMemo(() => {
@@ -1198,7 +1184,6 @@ export function Conversation({
           streaming={streaming}
           focusRoot={focusRoot}
           onMount={onMount}
-          onOpenWorktree={memberView ? () => setWorktreeOpen(true) : undefined}
           onSend={stableSend}
           onStop={onStop}
           showJump={!atBottom && messages.length > 0}
@@ -1209,64 +1194,6 @@ export function Conversation({
         />
       )}
 
-      {worktreeOpen && memberView && worktreeState && (
-        <MemberWorktreePanel
-          open={worktreeOpen}
-          name={memberView.entry.meta.name}
-          sessionId={memberView.entry.meta.sessionId}
-          expectedRevision={worktreeState.revision}
-          busy={worktreeBusy || worktreeState.pending}
-          focusRoot={worktreeState.focusRoot}
-          bound={worktreeState.identity ? {
-            sourceRoot: worktreeState.focusRoot ?? worktreeState.identity.checkoutRoot,
-            checkoutRoot: worktreeState.identity.checkoutRoot,
-            focusRoot: worktreeState.focusRoot ?? worktreeState.identity.checkoutRoot,
-            branch: worktreeState.identity.branch
-          } : undefined}
-          recovery={worktreeState.recovery ? {
-            operationId: worktreeState.recovery.operationId,
-            sourceRoot: worktreeState.recovery.sourceFocusRoot ?? worktreeState.recovery.checkoutRoot,
-            checkoutRoot: worktreeState.recovery.checkoutRoot,
-            focusRoot: `${worktreeState.recovery.checkoutRoot}/${worktreeState.recovery.relativePath}`,
-            branch: worktreeState.recovery.branch,
-            message: worktreeState.recovery.reason
-          } : undefined}
-          onClose={() => setWorktreeOpen(false)}
-          onUseDirectory={async (path) => { onMount(path) }}
-          onPrecheck={async (draft) => {
-            const result: MemberWorktreePrecheckResult = await window.deva.chat.memberWorktreePrecheck(draft)
-            return result.ok
-              ? { ok: true, revision: result.revision, sourceRoot: result.sourceFocusRoot, relativePath: result.relativePath, precheck: result.precheck }
-              : { ok: false, message: result.message ?? result.reason }
-          }}
-          onCreateAndBind={async (draft) => {
-            const result: MemberWorktreeBindResult = await window.deva.chat.memberWorktreeBind(draft)
-            if (result.ok) return { status: 'bound', state: { sourceRoot: draft.sourceRoot, checkoutRoot: result.checkoutRoot, focusRoot: result.focusRoot, branch: draft.create.branch ?? '' } }
-            if (result.status === 'created-unbound') {
-              const recovery = result.binding?.recovery
-              return { status: 'created-unbound', recovery: {
-                operationId: result.operationId, sourceRoot: draft.sourceRoot, checkoutRoot: result.checkoutRoot,
-                focusRoot: recovery ? `${recovery.checkoutRoot}/${recovery.relativePath}` : result.checkoutRoot,
-                branch: recovery?.branch ?? draft.create.branch ?? '', message: result.reason
-              } }
-            }
-            return { status: 'rejected', message: result.message ?? result.reason }
-          }}
-          onRetryBind={async (sessionId, expectedRevision, operationId) => {
-            const result = await window.deva.chat.memberWorktreeRetryBind({ sessionId, expectedRevision, operationId })
-            if (result.ok) return { status: 'bound', state: { sourceRoot: result.focusRoot, checkoutRoot: result.checkoutRoot, focusRoot: result.focusRoot, branch: '' } }
-            if (result.status === 'created-unbound') return { status: 'created-unbound', recovery: { operationId: result.operationId, sourceRoot: result.binding?.recovery?.sourceFocusRoot ?? result.checkoutRoot, checkoutRoot: result.checkoutRoot, focusRoot: result.binding?.recovery?.checkoutRoot ?? result.checkoutRoot, branch: result.binding?.recovery?.branch ?? '', message: result.reason } }
-            return { status: 'rejected', message: result.message ?? result.reason }
-          }}
-          onBound={(state) => {
-            void window.deva.chat.memberWorktreeState({ sessionId: memberView.entry.meta.sessionId }).then((result) => {
-              if (result.ok) setWorktreeState(result.state)
-            })
-            // Backend binding already changes focus and publishes sessions; never call mountFocus/setFocus here.
-            void state
-          }}
-        />
-      )}
       {rewind && (
         <RewindModal
           sessionId={currentSessionId}
