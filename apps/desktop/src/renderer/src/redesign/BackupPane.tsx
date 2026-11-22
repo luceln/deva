@@ -58,7 +58,15 @@ export function BackupPane(): React.JSX.Element {
   // 还原侧
   const [info, setInfo] = useState<InspectInfo | null>(null)
   const [resPhase, setResPhase] = useState<Phase>('idle')
-  const [resMsg, setResMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  /**
+   * `notes` 是还原完成后的附加说明（备份路径、降级清单、配置重读失败）。
+   * 单列一个数组而不是拼进 `text`：这几条要能逐条读，拼成一段会糊掉。
+   */
+  const [resMsg, setResMsg] = useState<{
+    kind: 'ok' | 'err'
+    text: string
+    notes?: string[]
+  } | null>(null)
   const [resProgress, setResProgress] = useState<{ step: string; done: number; total: number } | null>(null)
   const [needConfirm, setNeedConfirm] = useState(false)
 
@@ -155,6 +163,40 @@ export function BackupPane(): React.JSX.Element {
 
       if (r.ok) {
         setResPhase('done')
+        /*
+         * 还原完成后的「细节」必须真的显示出来。
+         *
+         * 这几个字段（前次备份路径 / 降级成副本的技能 / 链接重建数 / 配置重读失败）
+         * 在 `RestoreResult` 里一直有、主进程也一直填，但界面曾经完全没渲染 ——
+         * 后果是三条静默失效：想退回时找不到备份在哪；技能已经不再联动外部仓库却以为还连着；
+         * 配置重读失败时界面照样说「还原完成」，而用户看到的是旧配置。
+         *
+         * 所以这里不是「锦上添花的详情」，而是把三类失败从静默变成可见。
+         */
+        const notes: string[] = []
+        if (r.backupOfPrevious) {
+          notes.push(fill(t('cf.backup.restoreBackupAt'), { path: r.backupOfPrevious }))
+        }
+        if (r.relinked > 0) notes.push(fill(t('cf.backup.restoreRelinked'), { n: r.relinked }))
+        if (r.symlinkAsCopy.length > 0) {
+          notes.push(
+            fill(t('cf.backup.restoreDowngraded'), {
+              n: r.symlinkAsCopy.length,
+              list: r.symlinkAsCopy.join('、')
+            })
+          )
+        }
+        if (r.configReloadError) {
+          notes.push(
+            fill(t('cf.backup.restoreConfigStale'), { msg: r.configReloadError })
+          )
+        }
+        /*
+         * 重启提示按主进程给的 `needsRestart` 决定，而不是无条件写死在文案里。
+         * 无条件的后果：将来某次还原不需要重启（比如只补了几个文件），界面还是让用户重启，
+         * 属于"狼来了" —— 用户重启几次没用之后就不再看这类提示了。
+         */
+        if (r.needsRestart) notes.push(t('cf.backup.restoreRestart'))
         setResMsg({
           kind: 'ok',
           text: fill(t('cf.backup.restoreDone'), {
@@ -164,7 +206,8 @@ export function BackupPane(): React.JSX.Element {
               : r.secrets.noEncryption
                 ? t('cf.backup.secretsNoEncryption')
                 : fill(t('cf.backup.secretsRestored'), { n: r.secrets.restored })
-          })
+          }),
+          notes
         })
       } else if (r.code === 'cancelled') {
         // 目标非空：不是错误，是需要用户确认
@@ -292,7 +335,14 @@ export function BackupPane(): React.JSX.Element {
           </button>
         )}
 
-        {resMsg && <p className={resMsg.kind === 'ok' ? 'cf-backup__ok' : 'cf-backup__err'}>{resMsg.text}</p>}
+        {resMsg && (
+          <p className={resMsg.kind === 'ok' ? 'cf-backup__ok' : 'cf-backup__err'}>{resMsg.text}</p>
+        )}
+        {resMsg?.notes?.map((n) => (
+          <p className="cf-backup__hint" key={n}>
+            {n}
+          </p>
+        ))}
       </section>
     </div>
   )

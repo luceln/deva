@@ -188,7 +188,8 @@ export const forkZhCN = {
       restoreBtn: '开始还原',
       overwriteConfirmBtn: '确认覆盖并还原',
       restoring: '正在还原（{step} {done}/{total}）…',
-      restoreDone: '还原完成：{files} 个文件，{secrets}。建议重启应用让所有改动生效。',
+      restoreDone: '还原完成：{files} 个文件，{secrets}。',
+      restoreRestart: '建议重启应用，让所有改动都生效。',
       restoreFailed: '还原失败',
       notABundle: '这不是本应用导出的备份包',
       overwriteWarn: '当前数据目录里已有内容。继续会先自动备份一份，然后整目录替换。确认要覆盖吗？',
@@ -202,7 +203,11 @@ export const forkZhCN = {
       excludedNote: '以下派生内容不会还原（会自动重建）：{list}',
       secretsAbsent: '包里不含密钥',
       secretsNoEncryption: '本机没有可用的加密存储，密钥未还原，请在设置里重新填写',
-      secretsRestored: '已还原 {n} 条密钥'
+      secretsRestored: '已还原 {n} 条密钥',
+      restoreBackupAt: '覆盖前的那份数据已备份到：{path}（觉得还原不对，可以把它拷回去）',
+      restoreRelinked: '{n} 个外部链接已重新连上',
+      restoreDowngraded: '以下 {n} 项原本指向外部目录，但外部目录已不在了，还原成了独立副本（不再与外部仓库联动）：{list}',
+      restoreConfigStale: '配置重读失败（{msg}），界面上看到的可能还是旧配置。重启应用可让它生效。'
     },
     wt: {
       paneTitle: '工作区',
@@ -522,7 +527,8 @@ export const forkEn = {
       restoreBtn: 'Restore',
       overwriteConfirmBtn: 'Overwrite and restore',
       restoring: 'Restoring ({step} {done}/{total})…',
-      restoreDone: 'Restore complete: {files} files, {secrets}. Restart the app so every change takes effect.',
+      restoreDone: 'Restore complete: {files} files, {secrets}.',
+      restoreRestart: 'Restart the app so every change takes effect.',
       restoreFailed: 'Restore failed',
       notABundle: 'This is not a backup file created by this app',
       overwriteWarn: 'The data folder already has content. Continuing will back it up automatically, then replace it entirely. Overwrite?',
@@ -536,7 +542,11 @@ export const forkEn = {
       excludedNote: 'These derived items are not restored (they are rebuilt automatically): {list}',
       secretsAbsent: 'no keys in this bundle',
       secretsNoEncryption: 'no encryption available on this machine — keys were not restored, please re-enter them in Settings',
-      secretsRestored: '{n} keys restored'
+      secretsRestored: '{n} keys restored',
+      restoreBackupAt: 'The data you replaced was backed up to: {path} (copy it back if the restore was wrong)',
+      restoreRelinked: '{n} external links reconnected',
+      restoreDowngraded: '{n} items pointed at external folders that no longer exist and were restored as independent copies (no longer linked to the outside repo): {list}',
+      restoreConfigStale: 'Config reload failed ({msg}); what you see may still be the old config. Restart the app to apply.'
     },
     wt: {
       paneTitle: 'Worktrees',

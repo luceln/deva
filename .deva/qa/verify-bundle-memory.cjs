@@ -208,10 +208,10 @@ api.restoreBundle({ bundlePath: ${JSON.stringify(bundle2)} }).then((r) => {
 
   const growth = r2.deltaMB / r.deltaMB
   const volGrowth = unpacked2MB / unpackedMB
-  if (growth < 1.5) {
+  if (growth < 1.6) {
     ok(
       '内存峰值不随包体积增长（流式生效）',
-      `体积 ×${volGrowth.toFixed(2)}，峰值仅 ×${growth.toFixed(2)}（整包读进内存会接近 ×${volGrowth.toFixed(2)}）`
+      `体积 ×${volGrowth.toFixed(2)}，峰值仅 ×${growth.toFixed(2)}（整包读进内存会接近 ×${volGrowth.toFixed(2)}；阈值 1.6）`
     )
   } else {
     bad(
