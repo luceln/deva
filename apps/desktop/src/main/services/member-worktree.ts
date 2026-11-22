@@ -193,10 +193,18 @@ async function finishBinding(sessionId: string, recovery: MemberWorktreeRecovery
   if (intentReplaced(sessionId, recovery)) return unbound(sessionId, recovery, 'stale')
   const s = getSession(sessionId)!
   if ((s.focusRoot ?? null) !== recovery.sourceFocusRoot) return unbound(sessionId, recovery, 'stale')
-  if (!setMemberFolder(s, focusRoot, {
-    checkoutRoot: recovery.checkoutRoot, repoRoot: recovery.repoRoot,
-    branch: recovery.branch, relativePath: recovery.relativePath
-  })) return unbound(sessionId, recovery, 'bind-write-failed')
+  setMemberFolder(s, focusRoot, {
+    checkoutRoot: recovery.checkoutRoot,
+    repoRoot: recovery.repoRoot,
+    branch: recovery.branch,
+    relativePath: recovery.relativePath
+  })
+  /*
+   * 不再靠 `setMemberFolder` 的返回值判断成败——它现在只管落盘，不再自报结果。
+   * 改为**回读磁盘**核对：绑定跨了多个文件（子会话的 focusRoot/identity + 主会话 members 里的 root），
+   * 「函数没抛错」不代表两处都写对了。`verifyMemberBindingSaved` 读的就是盘上那份。
+   */
+  if (!verifyMemberBindingSaved(s)) return unbound(sessionId, recovery, 'bind-write-failed')
   return { ok: true, status: 'bound', revision: s.memberBindingRevision!, checkoutRoot: recovery.checkoutRoot, focusRoot }
 }
 

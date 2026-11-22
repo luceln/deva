@@ -36,6 +36,11 @@ export interface ToolUsePart {
   id: string
   name: string
   input: unknown
+  /**
+   * 模型随这次调用给出的思考签名（目前只有 Gemini，见 providers/openai.ts）：回放历史时须原样带回，
+   * 缺了该模型会以 400 拒收。别家模型没有此项。
+   */
+  signature?: string
 }
 export interface ToolResultPart {
   type: 'tool_result'
@@ -159,7 +164,7 @@ export interface NormalizedError {
 export type StreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'thinking_delta'; text: string }
-  | { type: 'tool_call'; id: string; name: string; args: unknown }
+  | { type: 'tool_call'; id: string; name: string; args: unknown; /** 思考签名，见 ToolUsePart.signature。 */ signature?: string }
   /**
    * 参数没能完整解析的工具调用：参数原文残缺、不可执行，cause 说明原因（见 BrokenCallCause）。
    * 循环把它记成一次失败的工具调用，按原因回灌纠正提示（见 agent-loop.ts runAgentLoop）。
@@ -186,8 +191,8 @@ export interface AdapterConfig {
   baseURL: string
   apiKey: string
   /**
-   * 该服务商要求的专有请求头（由 providers/index.ts 按 baseURL + 对话 id 现算，见
-   * providers/opencode.ts）。适配器原样并进 fetch headers，无须知道其来源。
+   * 追加的请求头：自有 UA、服务商专有头、用户填的自定义请求头（由 providers/index.ts 现算，见
+   * providers/opencode.ts 的 providerHeaders）。适配器原样并进 fetch headers 末尾，无须知道其来源。
    */
   headers?: Record<string, string>
 }
@@ -292,6 +297,27 @@ function isEffortRejection(status: number, body: string): boolean {
 }
 
 /**
+ * 403：密钥多半是对的，被拒另有原因——账号没有该模型的权限、地区受限、余额 / 套餐不符，或中转只放行特定
+ * 客户端（按 UA / `originator` 识别，issue #77）。此前与 401 一并报成「请检查 API 密钥」，用户照做也无济于事，
+ * 真正的原因写在响应正文里却没显示。这里把正文带出来；正文为空或是整页 HTML（WAF 拦截页）时给出排查方向。
+ * kind 仍为 'auth'：不重试，接入引导等按「凭据 / 权限问题」处理的地方照旧。
+ */
+function forbiddenError(body: string): NormalizedError {
+  const en = isEn()
+  const hint = /^\s*</.test(body) ? '' : bodyHint(body)
+  const advice = en
+    ? ': check the API key, your account’s access to this model, and whether the provider restricts which clients may connect.'
+    : '：请检查 API 密钥、账号对该模型的权限，以及该服务商是否限制了可接入的客户端。'
+  return {
+    kind: 'auth',
+    retryable: false,
+    message: en
+      ? `The provider refused the request (403)${hint || advice}`
+      : `服务商拒绝了请求（403）${hint || advice}`
+  }
+}
+
+/**
  * HTTP 状态码 → 归一化错误。retryAfter 为响应头 retry-after 原值（可选）；
  * effortSent = 本次请求带了思考等级参数（见 GenerateRequest.effort）。
  * message 会直接显示给用户，按界面语言出中 / 英文（见 locale.ts）。
@@ -314,7 +340,7 @@ export function httpError(
       limit: parseContextLimit(body),
       overflow: parseContextOverflow(body)
     }
-  if (status === 401 || status === 403)
+  if (status === 401)
     return {
       kind: 'auth',
       retryable: false,
@@ -322,6 +348,7 @@ export function httpError(
         ? `Authentication failed (${status}). Check your API key.`
         : `鉴权失败（${status}）：请检查 API 密钥。`
     }
+  if (status === 403) return forbiddenError(body)
   if (status === 429)
     return {
       kind: 'rate_limit',

@@ -1,0 +1,614 @@
+/**
+ * 导入新状态 —— 在真实 DOM 上断言三处展示接线。
+ *
+ *  A. pluginManaged（导入报告）：单列成「由插件管理，未导入」，与「已存在，跳过」区分，且不被算成失败或跳过数。
+ *  B. indexStale（模型替换结果）：说成「已保存、索引待重建」，绝不出现在失败清单里。
+ *  C. superseded（模型替换结果）：显示「未改动」+ 当前真实模型名，不能静默消失。
+ *
+ * 反向约束：这些字段缺省时不能凭空多出区块（旧持久化结果 / 旧调用方）。
+ */
+
+const LOGS = []
+window.__logs = LOGS
+const log = (m) => {
+  LOGS.push(m)
+  console.log(m)
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+const q = (s) => document.querySelector(s)
+const qa = (s) => [...document.querySelectorAll(s)]
+
+function assert(c, m) {
+  if (!c) throw new Error(m)
+}
+function eq(a, b, m) {
+  if (a !== b) throw new Error(`${m}（期望 ${JSON.stringify(b)}，实际 ${JSON.stringify(a)}）`)
+}
+async function waitFor(fn, msg, ms = 4000) {
+  const t0 = Date.now()
+  for (;;) {
+    const v = fn()
+    if (v) return v
+    if (Date.now() - t0 > ms) throw new Error(`超时：${msg}`)
+    await sleep(25)
+  }
+}
+
+/** 与 shared/import-protocol.ts 同形；patch 里只放本用例关心的字段。 */
+function report(patch) {
+  const emptySecrets = {
+    copied: [],
+    skipped: [],
+    ignored: [],
+    noEncryption: [],
+    invalid: [],
+    unrecoverable: [],
+    rekeyed: [],
+    pluginManaged: []
+  }
+  const step = (n = 0) => ({
+    copied: Array.from({ length: n }, (_, i) => `x${i}`),
+    skipped: [],
+    failed: []
+  })
+  return {
+    ok: true,
+    providers: step(0),
+    mcp: step(0),
+    secrets: { ...emptySecrets, ...(patch.secrets ?? {}) },
+    personas: step(0),
+    personaEnabled: [],
+    memories: { added: [], skipped: [], failed: [] },
+    skills: step(0),
+    sessions: step(0),
+    assoc: { media: 0, checkpoints: 0, subagents: 0, toolResults: 0 },
+    failures: [],
+    ...(patch.top ?? {})
+  }
+}
+
+/** 切语言：detectLocale 先读 config.getSync（挂载时结算），故改它再重挂即可。 */
+function setLocale(locale) {
+  try {
+    localStorage.clear()
+  } catch {
+    /* ignore */
+  }
+  window.deva.config.getSync = () => ({ locale })
+}
+
+async function runImport(reportData) {
+  window.__unmountAll()
+  window.__resetImportSession()
+  window.__mountImport()
+  const btn = await waitFor(
+    () => {
+      const b = [...document.querySelectorAll('.cf-imp__actions button')].find((x) =>
+        /开始导入|再次导入|Start import|Import again/.test(x.textContent ?? '')
+      )
+      return b && !b.disabled ? b : null
+    },
+    '「开始导入」一直不可点'
+  )
+  window.__setReport(reportData)
+  btn.click()
+  await waitFor(() => q('.cf-imp__result'), '结果区没出现')
+  await sleep(80)
+}
+
+const rowOf = (text) => qa('.cf-imp__row').find((r) => (r.textContent ?? '').includes(text))
+
+/** 展开某一行明细（点该行里的「明细」按钮）。 */
+async function expandRow(row) {
+  const btn = [...row.querySelectorAll('button')].find((b) => /明细|Details/.test(b.textContent ?? ''))
+  assert(btn, '这一行没有明细入口')
+  btn.click()
+  await sleep(60)
+}
+
+/** 打开替换对话框：选一个目标模型再点「替换」。 */
+async function runSwap(result, locale = 'zh-CN') {
+  setLocale(locale)
+  window.__unmountAll()
+  window.__mountSwap(result)
+  const combo = await waitFor(() => q('.modal__card [role="combobox"]'), '没有目标模型下拉')
+  combo.click()
+  const opt = await waitFor(
+    () => document.querySelector('.select-menu__opt:not(.is-disabled)'),
+    '候选模型没出现'
+  )
+  opt.click()
+  await sleep(60)
+  const apply = await waitFor(
+    () => [...document.querySelectorAll('.modal__card button')].find((b) => /^(替换|Switch)$/.test((b.textContent ?? '').trim())),
+    '没有替换按钮'
+  )
+  assert(!apply.disabled, '替换按钮不可点（未选到目标模型）')
+  apply.click()
+  await waitFor(() => q('.modal__card .cf-swap__result'), '替换结果没出现')
+  await sleep(80)
+}
+
+const broken = (id, name, ref, kind = 'model-disabled') => ({ sessionId: id, name, ref, kind })
+
+const CASES = []
+const ok = (name, fn) => CASES.push({ name, fn })
+
+// ── A. pluginManaged ─────────────────────────────────────────────
+
+ok('A1 服务商行显示「由插件管理，未导入」，且不混进「跳过」', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({
+      top: {
+        providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] }
+      }
+    })
+  )
+  const row = rowOf('服务商')
+  assert(row, '找不到服务商行')
+  const tags = [...row.querySelectorAll('.cf-imp__note-tag')].map((t) => t.textContent ?? '')
+  assert(tags.some((t) => /1 个由插件管理，未导入/.test(t)), `缺插件托管标签：${JSON.stringify(tags)}`)
+  // 关键：不能把插件托管算成「跳过 1」，那会被读成「已存在、不用管」
+  const numText = [...row.querySelectorAll('.cf-imp__num')].map((n) => n.textContent ?? '').join('|')
+  assert(/跳过 0/.test(numText), `跳过数应为 0：${numText}`)
+  assert(!/失败/.test(numText), `不该出现失败数：${numText}`)
+})
+
+ok('A2 展开明细逐条列出插件托管的 id，并说明去插件里改', async () => {
+  const row = rowOf('服务商')
+  await expandRow(row)
+  const sub = row.querySelector('.cf-imp__sub')
+  assert(sub, '没有明细区')
+  assert(sub.textContent.includes('magpie'), `明细里应有 magpie：${sub.textContent}`)
+  const hint = sub.querySelector('.cf-imp__pluginhint')
+  assert(hint, '缺「去插件里改」的说明')
+  assert(/插件/.test(hint.textContent), `说明文案不对：${hint.textContent}`)
+})
+
+ok('A3 只有插件托管项的行仍然显示（0 新增 0 跳过也不会被过滤掉）', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({
+      top: {
+        mcp: { copied: [], skipped: [], failed: [], pluginManaged: ['magpie'] }
+      }
+    })
+  )
+  const row = rowOf('MCP 服务')
+  assert(row, 'MCP 行被过滤掉了——有东西被排除却在界面上一个字都没有')
+  assert(/由插件管理，未导入/.test(row.textContent), `缺插件托管标签：${row.textContent}`)
+})
+
+ok('A4 密钥行的插件托管密钥不落进「需要重新填写」警告', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({
+      secrets: { copied: ['openai'], pluginManaged: ['magpie'], unrecoverable: [] }
+    })
+  )
+  const row = rowOf('API 密钥')
+  assert(row, '找不到密钥行')
+  assert(/由插件管理，未导入/.test(row.textContent), `密钥行缺插件标签：${row.textContent}`)
+  // 它是「由插件管理」，不是「去设置重填」——走错那条指引会让用户扑空
+  eq(!!q('.cf-imp__warn'), false, '不该出现「需要重新填写」警告面板')
+})
+
+ok('A5 英文环境用插件口径的文案，不是「跳过」', async () => {
+  setLocale('en')
+  await runImport(
+    report({
+      top: {
+        providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] }
+      }
+    })
+  )
+  const row = rowOf('Providers')
+  assert(row, '找不到 Providers 行')
+  const txt = row.textContent ?? ''
+  assert(/1 managed by a plugin, not imported/.test(txt), `英文插件标签不对：${txt}`)
+  assert(/0 skipped/.test(txt), `英文跳过数应为 0：${txt}`)
+})
+
+// ── B / C. indexStale + superseded ───────────────────────────────
+
+ok('B1 indexStale 说成「已保存、索引待重建」，不进失败清单', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [broken('s1', '主对话', 'anthropic:claude')],
+    skipped: [],
+    failed: [],
+    indexStale: [broken('s2', '成员甲', 'anthropic:claude')],
+    superseded: []
+  })
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  assert(/已替换 1 个/.test(summary), `成功数不对：${summary}`)
+  assert(/1 个已保存，索引待重建/.test(summary), `标题里应有索引待重建：${summary}`)
+  assert(!/没能写入/.test(summary), `索引待重建不能被说成失败：${summary}`)
+
+  const note = qa('.modal__card .cf-swap__note').map((n) => n.textContent ?? '').join('\n')
+  assert(/没有丢/.test(note), `应说明数据没丢：${note}`)
+  assert(/刷新/.test(note), `应说明列表刷新一次即可：${note}`)
+
+  const row = qa('.modal__card .cf-swap__row').find((r) => (r.textContent ?? '').includes('成员甲'))
+  assert(row, '索引待重建的会话没有单列出来')
+  assert(/已保存/.test(row.textContent), `该行应标「已保存」：${row.textContent}`)
+
+  // 失败清单的类是危险色语义，索引待重建绝不能用它
+  eq(qa('.modal__card .cf-swap__kind').filter((k) => /替换失败|Switch failed/.test(k.textContent ?? '')).length, 0, '不该出现「替换失败」')
+})
+
+ok('B2 索引待重建的会话不算进失败数（写盘失败仍需单独报）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [],
+    skipped: [],
+    failed: [broken('s3', '成员乙', 'anthropic:claude')],
+    indexStale: [broken('s2', '成员甲', 'anthropic:claude')],
+    superseded: []
+  })
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  assert(/1 个没能写入/.test(summary), `真实失败仍要说出来：${summary}`)
+  assert(/1 个已保存，索引待重建/.test(summary), `索引待重建仍要说出来：${summary}`)
+  const rows = qa('.modal__card .cf-swap__row').map((r) => r.textContent ?? '')
+  assert(rows.some((r) => r.includes('成员乙')), `失败行丢了：${JSON.stringify(rows)}`)
+  assert(rows.some((r) => r.includes('成员甲')), `索引待重建行丢了：${JSON.stringify(rows)}`)
+})
+
+ok('C1 superseded 显示「未改动」+ 当前真实模型名（不静默）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [broken('s1', '主对话', 'anthropic:claude')],
+    skipped: [],
+    failed: [],
+    indexStale: [],
+    // 关键：ref 是**当前真实引用**（用户期间换成了 claude-lite），不是快照值
+    superseded: [broken('s4', '成员丙', 'anthropic:claude-lite')]
+  })
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  assert(/1 个未改动/.test(summary), `标题里应有未改动数：${summary}`)
+
+  const row = qa('.modal__card .cf-swap__row').find((r) => (r.textContent ?? '').includes('成员丙'))
+  assert(row, '被放弃的会话没有显示出来')
+  const txt = row.textContent ?? ''
+  assert(/未改动/.test(txt), `该行应写「未改动」：${txt}`)
+  // 显示人看得懂的模型名，而不是 RPC 字段值 anthropic:claude-lite
+  assert(/Claude Lite/.test(txt), `应显示当前真实模型名：${txt}`)
+  assert(!/anthropic:claude-lite/.test(txt), `不该把引用原文当给人看的文案：${txt}`)
+})
+
+ok('C2 superseded 的说明讲清「为什么没改」，并保留选择权归用户', async () => {
+  const notes = qa('.modal__card .cf-swap__note').map((n) => n.textContent ?? '').join('\n')
+  assert(/没有覆盖/.test(notes), `应说明没有覆盖：${notes}`)
+  assert(/现在实际使用/.test(notes) || /现在用的是/.test(notes), `应说明这些是当前实际值：${notes}`)
+})
+
+ok('C3 字段缺省时不凭空多出区块（旧结果兼容）', async () => {
+  setLocale('zh-CN')
+  await runSwap({ changed: [broken('s1', '主对话', 'anthropic:claude')], skipped: [], failed: [] })
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  eq(summary, '已替换 1 个', `只有成功时标题应保持原样：${summary}`)
+  eq(qa('.modal__card .cf-swap__note').length, 0, '不该出现索引/放弃说明')
+  eq(qa('.modal__card .cf-swap__row').length, 1, '只应有 changed 那一行')
+})
+
+// ── E. 文案缺陷（验收实测那三处 + toast 漏失败项）─────────────────
+
+ok('E1 查不到名字时不把内部引用摆给用户（只进 title）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [],
+    skipped: [],
+    failed: [],
+    indexStale: [],
+    // 这条引用不在 providers 里：查不到名字
+    superseded: [broken('s9', '成员丁', 'openai:gpt-mystery')]
+  })
+  const row = qa('.modal__card .cf-swap__row').find((r) => (r.textContent ?? '').includes('成员丁'))
+  assert(row, '被放弃的行没显示')
+  const kind = row.querySelector('.cf-swap__kind')
+  assert(kind, '缺「未改动」那一句')
+  const visible = kind.textContent ?? ''
+  assert(!/openai:gpt-mystery/.test(visible), `可见文本里不该出现内部引用：${visible}`)
+  assert(/另一个模型/.test(visible), `应换成一句人话：${visible}`)
+  // 原始引用仍可供悬停查看
+  assert(/openai:gpt-mystery/.test(kind.getAttribute('title') ?? ''), `title 里应保留原始引用：${kind.getAttribute('title')}`)
+  const cardText = q('.modal__card').textContent ?? ''
+  assert(!/openai:gpt-mystery/.test(cardText), `整个对话框的可见文本都不该有它：${cardText.slice(0, 300)}`)
+})
+
+ok('E2 查得到名字时仍显示模型名（没把 E1 的修复做成「一律另一个模型」）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [],
+    skipped: [],
+    failed: [],
+    indexStale: [],
+    superseded: [broken('s4', '成员丙', 'anthropic:claude-lite')]
+  })
+  const kind = qa('.modal__card .cf-swap__kind').find((k) => /未改动/.test(k.textContent ?? ''))
+  assert(kind, '缺「未改动」那一句')
+  assert(/Claude Lite/.test(kind.textContent), `应显示模型名：${kind.textContent}`)
+  assert(!/另一个模型/.test(kind.textContent), `查得到名字时不该说「另一个模型」：${kind.textContent}`)
+})
+
+ok('E3 英文摘要不含全角标点（逗号/顿号/冒号）', async () => {
+  await runSwap(
+    {
+      changed: [broken('s1', 'Main', 'anthropic:claude')],
+      skipped: [broken('s5', 'Member E', 'anthropic:claude')],
+      failed: [broken('s3', 'Member B', 'anthropic:claude')],
+      indexStale: [broken('s2', 'Member A', 'anthropic:claude')],
+      superseded: [broken('s4', 'Member C', 'anthropic:claude-lite')]
+    },
+    'en'
+  )
+  const text = q('.modal__card').textContent ?? ''
+  for (const bad of ['，', '、', '：', '；']) {
+    assert(!text.includes(bad), `英文界面不该出现全角标点「${bad}」：${text.slice(0, 300)}`)
+  }
+  // 分隔符确实是英文逗号，不是把标点删掉拼在一起
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  assert(/switched, /.test(summary) || /switched,/.test(summary), `条目之间应以英文逗号分隔：${summary}`)
+})
+
+ok('E4 英文插件托管标签单复数正确、并说明「由插件管理」', async () => {
+  setLocale('en')
+  await runImport(
+    report({
+      top: {
+        providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] },
+        mcp: { copied: [], skipped: [], failed: [], pluginManaged: ['magpie', 'other'] }
+      }
+    })
+  )
+  const tags = qa('.cf-imp__note-tag').map((x) => x.textContent ?? '')
+  assert(tags.includes('1 managed by a plugin, not imported'), `单数应为 1 managed：${JSON.stringify(tags)}`)
+  assert(tags.includes('2 managed by a plugin, not imported'), `复数应为 {n} managed：${JSON.stringify(tags)}`)
+  assert(!tags.some((x) => /1 belong\b/.test(x)), `不该出现 1 belong 这种主谓不一致：${JSON.stringify(tags)}`)
+})
+
+ok('E5 导入明细里「分组名 + id」用英文冒号与逗号', async () => {
+  const row = rowOf('Providers')
+  assert(row, '找不到 Providers 行')
+  await expandRow(row)
+  const sub = row.querySelector('.cf-imp__sub')
+  assert(sub, '明细区没出现')
+  const text = sub.textContent ?? ''
+  assert(!text.includes('：'), `英文明细不该出现全角冒号：${text}`)
+  assert(!text.includes('、'), `英文明细不该出现顿号：${text}`)
+  assert(/Managed by a plugin, not imported: magpie/.test(text), `分组名后应是英文冒号：${text}`)
+})
+
+ok('E6 toast 与对话框摘要项数一致，失败项不能漏', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [broken('s1', '主对话', 'anthropic:claude')],
+    skipped: [broken('s5', '成员戊', 'anthropic:claude')],
+    failed: [broken('s3', '成员乙', 'anthropic:claude')],
+    indexStale: [broken('s2', '成员甲', 'anthropic:claude')],
+    superseded: [broken('s4', '成员丙', 'anthropic:claude-lite')]
+  })
+  const dialog = q('.modal__card .cf-swap__result').textContent ?? ''
+  const toastEl = await waitFor(() => q('.toast__msg'), 'toast 没出现')
+  const toast = toastEl.textContent ?? ''
+  // 失败是最不该漏的一项：toast 少一句，只看 toast 的人就会以为全都换好了。
+  assert(/1 个没能写入/.test(toast), `失败项在 toast 里丢了：${toast}`)
+  // 两边必须是同一份摘要（同口径、同顺序）——注意「已保存，索引待重建」这句本身含逗号，
+  // 所以按逗号切分算项数是错的，直接比整串。
+  eq(toast, dialog, `toast 与对话框摘要应完全一致（toast=${toast} / dialog=${dialog}）`)
+  for (const piece of ['已替换 1 个', '1 个已保存', '索引待重建', '跳过 1 个', '1 个未改动', '1 个没能写入']) {
+    assert(dialog.includes(piece), `摘要缺「${piece}」：${dialog}`)
+  }
+})
+
+ok('E7 中文侧仍是全角分隔符（没为英文把中文改坏）', async () => {
+  setLocale('zh-CN')
+  await runSwap({
+    changed: [broken('s1', '主对话', 'anthropic:claude')],
+    skipped: [broken('s5', '成员戊', 'anthropic:claude')],
+    failed: [],
+    indexStale: [],
+    superseded: []
+  })
+  const summary = q('.modal__card .cf-swap__result').textContent ?? ''
+  assert(/，/.test(summary), `中文摘要应用全角逗号：${summary}`)
+  assert(!/, /.test(summary), `中文摘要不该用英文逗号：${summary}`)
+})
+
+// ── F. 观感：中文插值不多空格、同一屏一套术语 ──────────────────
+
+/** 中文里「用的是」后面紧跟插值：任何多出来的空格都是照搬英文模板留下的。 */
+const CJK_SPACE = /用的是\s+/
+
+ok('F1 中文 superseded 行在插值前没有多余空格（真名 / 未指定 / 另一个模型 三种）', async () => {
+  setLocale('zh-CN')
+  const cases = [
+    { ref: 'anthropic:claude-lite', label: '真实模型名' },
+    { ref: '', label: '空引用' },
+    { ref: 'openai:gpt-mystery', label: '查不到名字' }
+  ]
+  for (const c of cases) {
+    await runSwap({
+      changed: [],
+      skipped: [],
+      failed: [],
+      indexStale: [],
+      superseded: [broken('s4', '成员丙', c.ref)]
+    })
+    const kind = qa('.modal__card .cf-swap__kind').find((k) => /未改动/.test(k.textContent ?? ''))
+    assert(kind, `${c.label}：缺「未改动」那一句`)
+    const txt = kind.textContent ?? ''
+    assert(!CJK_SPACE.test(txt), `${c.label}：插值前多了空格 → ${JSON.stringify(txt)}`)
+    assert(/用的是\S/.test(txt) || /用的是$/.test(txt), `${c.label}：应为「用的是」紧接内容 → ${JSON.stringify(txt)}`)
+  }
+})
+
+ok('F2 英文 superseded 行的空格保持不变（英文需要这个空格）', async () => {
+  await runSwap(
+    {
+      changed: [],
+      skipped: [],
+      failed: [],
+      indexStale: [],
+      superseded: [broken('s4', 'Member C', 'anthropic:claude-lite')]
+    },
+    'en'
+  )
+  const kind = qa('.modal__card .cf-swap__kind').find((k) => /Not changed/.test(k.textContent ?? ''))
+  assert(kind, '缺「Not changed」那一句')
+  assert(/now using Claude Lite/.test(kind.textContent), `英文应有空格：${JSON.stringify(kind.textContent)}`)
+})
+
+ok('F3 中文同一屏只有一套插件术语（标签与明细都是「由插件管理」）', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({
+      top: { providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] } }
+    })
+  )
+  const row = rowOf('服务商')
+  assert(row, '找不到服务商行')
+  const tag = [...row.querySelectorAll('.cf-imp__note-tag')].map((x) => x.textContent ?? '')
+  await expandRow(row)
+  const sub = row.querySelector('.cf-imp__sub')
+  const subText = sub?.textContent ?? ''
+  assert(tag.some((x) => /由插件管理/.test(x)), `标签该用「由插件管理」：${JSON.stringify(tag)}`)
+  assert(/由插件管理/.test(subText), `明细也该用「由插件管理」：${subText}`)
+  // 同一屏不能两种说法
+  const screen = row.textContent ?? ''
+  assert(!/归插件管/.test(screen), `同一屏不该再出现旧说法「归插件管」：${screen}`)
+})
+
+ok('F4 英文同一屏只有一套插件术语（标签与明细都是 managed by）', async () => {
+  setLocale('en')
+  await runImport(
+    report({
+      top: { providers: { copied: ['openai'], skipped: [], failed: [], pluginManaged: ['magpie'] } }
+    })
+  )
+  const row = rowOf('Providers')
+  assert(row, '找不到 Providers 行')
+  const tag = [...row.querySelectorAll('.cf-imp__note-tag')].map((x) => x.textContent ?? '')
+  await expandRow(row)
+  const subText = row.querySelector('.cf-imp__sub')?.textContent ?? ''
+  assert(tag.some((x) => /managed by a plugin/.test(x)), `标签该用 managed by：${JSON.stringify(tag)}`)
+  assert(/Managed by a plugin/.test(subText), `明细也该用 Managed by：${subText}`)
+  const screen = row.textContent ?? ''
+  assert(!/Owned by/.test(screen), `同一屏不该再出现旧说法 Owned by：${screen}`)
+})
+
+ok('G1 中文：历史锁定与会话附件缺失显示人话，不露出错误码', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({
+      top: {
+        // 失败清单里两条会话失败：一条历史仍在写、一条附件没就位
+        failures: [
+          { step: 'sessions', id: 'sess-locked', reason: 'session-history-locked' },
+          { step: 'sessions', id: 'sess-media', reason: 'session-media-missing' }
+        ]
+      }
+    })
+  )
+  const fails = q('.cf-imp__fails')
+  assert(fails, '失败清单没出现')
+  const reasons = [...fails.querySelectorAll('.cf-imp__reason')].map((n) => n.textContent ?? '')
+  const all = reasons.join('\n')
+  assert(!/session-history-locked/.test(all), `不该露出错误码：${all}`)
+  assert(!/session-media-missing/.test(all), `不该露出错误码：${all}`)
+
+  const locked = reasons.find((x) => /锁定/.test(x))
+  assert(locked, `缺「历史锁定」的人话：${JSON.stringify(reasons)}`)
+  // 关键语义：不是失败、数据没丢、聊完重试可补
+  assert(/没有丢/.test(locked), `要说清数据没丢：${locked}`)
+  assert(/不是失败|没有导入/.test(locked), `要说清这次只是没导：${locked}`)
+  assert(/聊完|重新导入/.test(locked), `要给出下一步：${locked}`)
+
+  const media = reasons.find((x) => /附件/.test(x))
+  assert(media, `缺「附件未就位」的人话：${JSON.stringify(reasons)}`)
+  assert(/重新导入|确认/.test(media), `要给出下一步：${media}`)
+  // 中文全角标点
+  assert(/，|。/.test(locked), `中文应用全角标点：${locked}`)
+  assert(!/[a-zA-Z]{2,}-[a-zA-Z]/.test(locked), `中文里不该有连字符码：${locked}`)
+})
+
+ok('G2 英文：同一组失败码说英文，且只有半角标点', async () => {
+  setLocale('en')
+  await runImport(
+    report({
+      top: {
+        failures: [
+          { step: 'sessions', id: 'sess-locked', reason: 'session-history-locked' },
+          { step: 'sessions', id: 'sess-media', reason: 'session-media-missing' }
+        ]
+      }
+    })
+  )
+  const fails = q('.cf-imp__fails')
+  assert(fails, '失败清单没出现')
+  const all = [...fails.querySelectorAll('.cf-imp__reason')].map((n) => n.textContent ?? '').join('\n')
+  assert(!/session-history-locked/.test(all), `英文下也不该露出错误码：${all}`)
+  assert(!/session-media-missing/.test(all), `英文下也不该露出错误码：${all}`)
+  assert(/No data was lost/.test(all), `英文该说清数据没丢：${all}`)
+  assert(/still running/.test(all), `英文该说清还在进行：${all}`)
+  for (const bad of ['，', '、', '：', '。']) {
+    assert(!all.includes(bad), `英文不该出现全角标点「${bad}」：${all}`)
+  }
+})
+
+ok('G3 未知码仍原样显示（没有为这两条把兜底吞掉）', async () => {
+  setLocale('zh-CN')
+  await runImport(
+    report({ top: { failures: [{ step: 'sessions', id: 'x', reason: 'some-future-code' }] } })
+  )
+  const reasons = [...document.querySelectorAll('.cf-imp__reason')].map((n) => n.textContent ?? '')
+  assert(reasons.some((x) => x === 'some-future-code'), `未知码应原样显示：${JSON.stringify(reasons)}`)
+})
+
+ok('D1 英文环境下三项都说英文，且不出现 RPC 字段名', async () => {
+  setLocale('en')
+  await runSwap(
+    {
+      changed: [],
+      skipped: [],
+      failed: [],
+      indexStale: [broken('s2', 'Member A', 'anthropic:claude')],
+      superseded: [broken('s4', 'Member C', 'anthropic:claude-lite')]
+    },
+    'en'
+  )
+  const text = q('.modal__card').textContent ?? ''
+  assert(/saved, list index pending/.test(text), `英文索引文案不对：${text.slice(0, 400)}`)
+  assert(/not changed/.test(text), `英文未改动文案不对：${text.slice(0, 400)}`)
+  assert(/Claude Lite/.test(text), '英文下也应显示当前模型名')
+  for (const bad of ['indexStale', 'superseded', 'pluginManaged']) {
+    assert(!text.includes(bad), `界面上不该出现字段名 ${bad}`)
+  }
+})
+
+// ── 运行 ────────────────────────────────────────────────────────
+
+async function main() {
+  let pass = 0
+  const fails = []
+  for (const c of CASES) {
+    try {
+      await c.fn()
+      pass++
+      log(`PASS ${c.name}`)
+    } catch (e) {
+      fails.push(`${c.name} → ${e.message}`)
+      log(`FAIL ${c.name} → ${e.message}`)
+    }
+  }
+  if (window.__errors?.length) log(`页面错误：${window.__errors.join(' | ')}`)
+  log(`==RESULT== ${pass}/${CASES.length} PASS`)
+  for (const f of fails) log(`  ✗ ${f}`)
+  document.title = `DONE ${pass}/${CASES.length}`
+}
+
+main().catch((e) => {
+  log(`FATAL ${e && (e.stack || e.message)}`)
+  document.title = 'DONE FATAL'
+})

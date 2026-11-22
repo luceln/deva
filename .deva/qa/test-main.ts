@@ -18,19 +18,48 @@ import { runImport } from '../../apps/desktop/src/main/importer'
 import { canImport, upstreamHome } from '../../apps/desktop/src/main/importer-gate'
 import { acquireLock, isLockLive, readLockPid, releaseLock, LOCK_FILE } from '../../apps/desktop/src/main/importer-lock'
 import { importSessions } from '../../apps/desktop/src/main/importer-sessions'
+import { importActive, importHistoryConflict, importDependencyRetry, importMedia } from './import-history-tests'
+import { configWriteGuard } from './config-memory-index-tests'
+import { indexRecovery } from './index-recovery-tests'
+import { swapIdentity } from './swap-identity-tests'
+import { swapBinding } from './swap-binding-tests'
+import { memoryReadFailure } from './memory-read-failure-tests'
+import { mcpOwnership } from './mcp-ownership-tests'
 import { importSkills } from '../../apps/desktop/src/main/importer-skills'
 import { importMemories } from '../../apps/desktop/src/main/importer-memory'
 import { importPersonas } from '../../apps/desktop/src/main/importer-personas'
 import { mergeProviders, copySecrets } from '../../apps/desktop/src/main/importer-config'
 import { copyAssoc } from '../../apps/desktop/src/main/importer-assoc'
 import { getDevaHome, getConfig, setConfig, registerConfigIpc } from '../../apps/desktop/src/main/services/config'
-import { invalidateIndex, listSessions } from '../../apps/desktop/src/main/services/chat-store'
+import { invalidateIndex, listSessions, ensureSession, save, getSession } from '../../apps/desktop/src/main/services/chat-store'
 import { onSessionsChanged } from '../../apps/desktop/src/main/services/chat-bus'
 import { sweepMedia } from '../../apps/desktop/src/main/services/media-store'
 import { sweepCheckpoints } from '../../apps/desktop/src/main/services/checkpoints'
 import { sweepSubagents } from '../../apps/desktop/src/main/services/subagent-store'
-import { writeMemory, listMemories, GLOBAL_SCOPE } from '../../apps/desktop/src/main/services/memory'
+import { writeMemory as writeMemoryV2, listMemories, formatMemoryLine, GLOBAL_SCOPE } from '../../apps/desktop/src/main/services/memory'
 import { readSecret } from '../../apps/desktop/src/main/services/secrets'
+
+/**
+ * 记忆写入的测试适配层，把「一句话正文」映成 v2 的 `MemoryInput`。
+ *
+ * 上游把记忆条目从「一条 content」改成「type + title + body」，索引预算只算标题那一行。测试里大量
+ * 「`writeMemory('xxx'.padEnd(120,'x'))` 先铺满」的写法是按 v1 语义写的（正文越长越占预算），
+ * 在 v2 下 title 超 60 字会被直接拒（`tooLong`），于是「先有 6 条」变成「0 条」，后续断言全错位。
+ *
+ * 这里保留各用例原本想表达的意图（铺 N 条、每条尽量占预算），只是把正文挪进 body、标题截到上限内：
+ * `title` 是正文的第一句（同 memory.ts 的 firstSentence），所以仍能按标题认出条目。
+ */
+function writeMemory(
+  content: string,
+  id?: string,
+  scope: Parameters<typeof writeMemoryV2>[2] = GLOBAL_SCOPE
+): ReturnType<typeof writeMemoryV2> {
+  const text = content.trim()
+  const first = text.match(/^.+?[。！？；!?;](?=\s|$|[^\d])/)?.[0] ?? text
+  const raw = first.replace(/[。；;，,、：:]+$/, '')
+  const title = raw.length <= 60 ? raw : `${raw.slice(0, 59)}…`
+  return writeMemoryV2({ type: 'user', title, body: text }, id, scope)
+}
 
 const HOME = process.env.TEST_HOME as string
 const APPDATA = process.env.TEST_APPDATA as string
@@ -394,7 +423,13 @@ async function scenarioFull(): Promise<void> {
   // 第一轮
   const r1 = await runOnce()
   info('progress 顺序', progressSteps.join(' → '))
-  check('进度：十步按序 + done', progressSteps.join(',') === 'providers,mcp,personas,personaEnabled,memories,skills,sessions,assoc,cache,done', progressSteps.join(','))
+  /*
+   * 顺序里 `assoc` 在 `sessions` **之前**（P2-7）。这不是笔误，也不能改回去：
+   * 会话主档会引用 media / checkpoints 等附件，必须先备好依赖再发布会话，
+   * 否则会留下「引用不到附件」的半成品会话（媒体被降级成「数据已丢失」，而它其实在源里）。
+   * 见 importer.ts 第 ⑦/⑧ 步的注释。
+   */
+  check('进度：十步按序 + done', progressSteps.join(',') === 'providers,mcp,personas,personaEnabled,memories,skills,assoc,sessions,cache,done', progressSteps.join(','))
 
   if ('error' in r1) {
     fail('run1 不该返回 error', JSON.stringify(r1))
@@ -419,36 +454,16 @@ async function scenarioFull(): Promise<void> {
     .filter((id: string) => !pluginHosted.has(id))
   eq('服务商：copied 只含用户自定义（已排除插件托管的）', [...r1.providers.copied].sort(), customProviders.sort())
   /*
-   * 已知产品缺陷（2026-11 验收发现，未修）：`runImport()` 组装 `report.providers` 时只拷了
-   * copied / skipped / builtin / failed 四个字段（importer.ts:177-182），把 `mergeProviders()` 已经算好的
-   * `pluginManaged` 漏掉了 —— 同一轮 `report.secrets.pluginManaged` 是有的（importer.ts:207），
-   * 说明不是判定失败，是汇总漏拷。
-   *
-   * 后果：界面拿不到「有几个服务商归插件管」，那行提示永远不出现；用户在原版里看到的 magpie
-   * 到本应用里"消失了"，也没有任何解释。
-   *
-   * 这里**不写成预期失败吞掉**：把事实如实打出来，并单独给一条明确命名的 FAIL，
-   * 让它在汇总里一直可见，直到产品侧修好。修好后这条自然转绿（判据不变）。
+   * `report.providers.pluginManaged` 已由 importer.ts 汇总（13c8eff 修好）：这里断言它与**独立算出**的
+   * 托管集一致，而不是只检查字段存在。曾经这段是「已知缺陷、如实报红」的写法——汇总漏拷时一直红；
+   * 修好后不再需要那条豁免分支，改成直接比对两个集合，字段再被漏拷或判定退化都会立刻变红。
    */
   const reportedPluginManaged = (r1.providers as any).pluginManaged
   if (reportedPluginManaged === undefined) {
-    /*
-     * 契约不一致（不是用户可见缺陷）：`runImport()` 组装 `report.providers` 时只拷了
-     * copied / skipped / builtin / failed（importer.ts:177-182），把 `mergeProviders()` 算好的
-     * `pluginManaged` 漏了 —— 同轮 `report.secrets.pluginManaged` 是有的（importer.ts:207），
-     * 说明判定没问题，纯属汇总漏拷。
-     *
-     * 为什么仍要留一条红：`StepStat.pluginManaged` 是协议里声明的可选字段（import-protocol.ts:36），
-     * providers 步骤恰好是注释点名「会有它」的两步之一。前端此刻确实没读它（ImportPane 的 row()
-     * 只看 copied/skipped/failed），所以**当前没有用户可见后果**；但协议与实现不一致，
-     * 谁按协议去渲染那行「N 个服务商归插件管」都会踩空。
-     *
-     * 默认如实报红；`QA_ALLOW_KNOWN_BUG=1` 可降级成 INFO，便于只关注其它断言的人跑绿。
-     */
-    const known = process.env.QA_ALLOW_KNOWN_BUG === '1'
-    const detail = `独立算出 ${JSON.stringify([...pluginHosted])}，报告里没这个键；对照 report.secrets.pluginManaged=${JSON.stringify(r1.secrets.pluginManaged)} 是有的（同轮同源，证明是汇总漏拷）`
-    if (known) info('KNOWN-BUG 服务商：report.providers 缺 pluginManaged 字段（importer.ts:177-182 漏拷）', detail)
-    else fail('服务商：report.providers 缺 pluginManaged 字段（协议有声明、汇总漏拷，见 importer.ts:177-182）', detail)
+    fail(
+      '服务商：report.providers 缺 pluginManaged 字段（协议有声明，汇总又漏拷了）',
+      `独立算出 ${JSON.stringify([...pluginHosted])}`
+    )
   } else {
     eq(
       '服务商：插件托管的都报进 pluginManaged（与独立算出的一致）',
@@ -847,25 +862,31 @@ async function scenarioMemIdem(): Promise<void> {
 
 async function scenarioBudget(): Promise<void> {
   fs.mkdirSync(SRC, { recursive: true })
-  // 目标先填到接近上限：全局 4000 字预算（含格式 "- [id] content"）
+  /*
+   * 目标先填到接近上限。
+   *
+   * v2 的预算是**索引**口径：每条只算 `- [id] 类型 · 标题` 那一行（正文不计，见 memory.ts 的
+   * memoryUsage / MEMORY_INDEX_BUDGET）。所以「铺满」要靠近 60 字上限的长标题，而不是长正文——
+   * 旧的 `.padEnd(250)` 正文在 v2 下根本不占预算，还会先被 MEMORY_TITLE_MAX 拒掉。
+   */
   const filler: string[] = []
-  for (let i = 0; i < 60; i++) {
-    const content = `既有记忆第${i}条-`.padEnd(250, 'x')
-    const r = writeMemory(content, undefined, GLOBAL_SCOPE)
+  for (let i = 0; i < 100; i++) {
+    const title = `既有记忆第${i}条-`.padEnd(58, 'x')
+    const r = writeMemoryV2({ type: 'user', title, body: '正文不占索引预算' }, undefined, GLOBAL_SCOPE)
     if (!r.ok) {
       info('预填到上限', `第 ${i} 条被拒：${r.code}`)
       break
     }
     filler.push(r.entry.id)
   }
-  const used = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+  const used = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
   info('预填后用量', `${used} / 4000`)
 
   writeJson(path.join(SRC, 'memory.json'), {
     version: 1,
     entries: [
-      { id: 'm_11111111', content: '这条应该被预算挡住-'.padEnd(250, 'y') },
-      { id: 'm_22222222', content: '这条也应被挡住-'.padEnd(250, 'z') }
+      { id: 'm_11111111', type: 'user', title: '这条应该被预算挡住-'.padEnd(58, 'y'), body: '' },
+      { id: 'm_22222222', type: 'user', title: '这条也应被挡住-'.padEnd(58, 'z'), body: '' }
     ]
   })
   const r = (await runOnce()) as Report
@@ -1561,12 +1582,194 @@ async function scenarioConfigCorrupt(): Promise<void> {
     eq('P1-3(corrupt)：载入状态是 corrupt（不是 ok/absent）', getConfigLoadKind(), 'corrupt')
     eq('P1-3(corrupt)：配置读坏 → 放行 ok:true（旧实现判 missing 并全库标红）', r.ok, true)
     eq('P1-3(corrupt)：放行时不该带 kind', r.kind, undefined)
+    if (process.env.P14_IMPORT === '1') {
+      /*
+       * P1-④：目标 config.json 内容坏时导入服务商。
+       *
+       * 旧实现照常合并再 setConfig，写回的是「空配置 + 这次导入的几项」——用户原有的 providers / 偏好
+       * 被整份抹掉，且报告里没有失败。修复后必须：磁盘字节不变 + 有一条可见失败。
+       */
+      const { mergeProviders } = await import('../../apps/desktop/src/main/importer-config')
+      const srcHome = path.join(DST, 'p14-src')
+      fs.mkdirSync(srcHome, { recursive: true })
+      fs.writeFileSync(
+        path.join(srcHome, 'config.json'),
+        JSON.stringify({
+          models: {
+            providers: [
+              { id: 'from-upstream', name: '原版服务商', kind: 'custom', apiHost: 'https://x.example/v1', enabled: true, models: [] }
+            ]
+          }
+        })
+      )
+      const beforeBytes = fs.readFileSync(cfgPath, 'utf8')
+      const st = mergeProviders(srcHome)
+      info('P1-④ mergeProviders', JSON.stringify({ copied: st.copied, failed: st.failed }))
+      eq('P1-④：目标 config 读不出来 → 整体不写（不看 copied）', st.copied.length, 0)
+      eq(
+        'P1-④：如实报一条 target-config-unreadable',
+        (st.failed ?? []).some((f) => f.reason === 'target-config-unreadable'),
+        true
+      )
+      eq('P1-④：目标 config.json 字节未被改写', fs.readFileSync(cfgPath, 'utf8'), beforeBytes)
+    }
   } else {
     // 对照：真没配过 ≠ 读坏，必须仍然判 missing，别把「没配」也放行了
     eq('P1-3(absent)：文件不存在 → absent', getConfigLoadKind(), 'absent')
     eq('P1-3(absent)：真没配过仍判 missing（不能一起放行）', r.kind, 'missing')
     eq('P1-3(absent)：真没配过不是 ok', r.ok, false)
   }
+}
+
+/**
+ * P2-⑥：提交前必须复核当前状态——异步间隙里用户换了模型 / 移除了成员，就放弃这一项。
+ *
+ * 原缺陷：`applyModelSwap` 拿进入循环前拍下的 `c.ref` 判断并直接写 `session.model = to`，期间
+ * `await resolveAvailability(...)` 有真实异步窗口。用户在窗口里切了模型或移除成员，旧实现照样覆盖
+ * （成员那条之后还会被「派任务同步」改回来，用户看到的是「批量替换部分失效」）。
+ *
+ * 用 `setModelSwapCommitHookForTest` 摆出可控间隙：钩子第一次被调用时改状态，之后清空。
+ */
+async function scenarioSwapStaleCommit(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const { applyModelSwap, setModelSwapCommitHookForTest } = await import(
+    '../../apps/desktop/src/main/services/model-swap'
+  )
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        { id: 'p', name: 'P', apiHost: 'https://a.example/v1', enabled: true, models: [{ id: 'm' }] },
+        { id: 'q', name: 'Q', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'n' }] },
+        { id: 'r', name: 'R', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'z' }] }
+      ]
+    }
+  })
+
+  // ── ① 异步间隙里用户把这个会话的模型换成了 r:z ──
+  {
+    const main = cs.ensureSession('Smain', { model: 'p:gone' })
+    main.title = 'Stale'
+    eq('P2-⑥：前置——主对话落盘', cs.save('Smain'), true)
+
+    let fired = false
+    setModelSwapCommitHookForTest(async () => {
+      if (fired) return
+      fired = true
+      // 用户在主进程里亲手切了模型（等价于 chat:set-model）
+      const s = cs.getSession('Smain')!
+      s.model = 'r:z'
+      cs.save('Smain')
+      // 只制造一次间隙：后面不再干预
+      setModelSwapCommitHookForTest(null)
+    })
+    const r = await applyModelSwap({ mainId: 'Smain', fromRef: 'p:gone', toRef: 'q:n' })
+    setModelSwapCommitHookForTest(null)
+    if ('error' in r) {
+      fail('P2-⑥①：不该整批拒绝', JSON.stringify(r))
+      return
+    }
+    info('P2-⑥① 结果', JSON.stringify({ changed: r.changed.map((b) => b.sessionId), superseded: (r.superseded ?? []).map((b) => [b.sessionId, b.ref]) }))
+    eq('P2-⑥①：用户期间换过模型 → 放弃本次提交（不进 changed）', r.changed.map((b) => b.sessionId), [])
+    eq('P2-⑥①：如实报告被更新选择取代', (r.superseded ?? []).map((b) => b.sessionId), ['Smain'])
+    eq('P2-⑥①：报告里带的是当前真实引用', (r.superseded ?? [])[0]?.ref, 'r:z')
+    eq('P2-⑥①：用户的新选择没有被覆盖', cs.getSession('Smain')?.model, 'r:z')
+    const disk = JSON.parse(fs.readFileSync(path.join(DST, 'data', 'chats', 'Smain.json'), 'utf8')) as { model?: string }
+    eq('P2-⑥①：磁盘也是用户的新选择', disk.model, 'r:z')
+  }
+
+  // ── ② 异步间隙里用户把成员移除了 ──
+  {
+    const main = cs.ensureSession('Smain2', { model: 'p:gone' })
+    main.title = 'StaleMember'
+    const sub = cs.ensureSession('Ssub2', { model: 'p:gone', focusRoot: null })
+    sub.parentId = 'Smain2'
+    main.members = [{ sessionId: 'Ssub2', name: 'helper', root: null, duty: 'test', origin: 'created' } as never]
+    eq('P2-⑥：前置——主与新成员都落盘', cs.save('Smain2') && cs.save('Ssub2'), true)
+
+    let fired = false
+    setModelSwapCommitHookForTest(async () => {
+      if (fired) return
+      fired = true
+      // 用户在批量替换期间移除了这个成员（名单里打 removed 标记）
+      const m = cs.getSession('Smain2')!
+      ;(m.members![0] as { removed?: boolean }).removed = true
+      cs.save('Smain2')
+      setModelSwapCommitHookForTest(null)
+    })
+    const r = await applyModelSwap({ mainId: 'Smain2', fromRef: 'p:gone', toRef: 'q:n' })
+    setModelSwapCommitHookForTest(null)
+    if ('error' in r) {
+      fail('P2-⑥②：不该整批拒绝', JSON.stringify(r))
+      return
+    }
+    info('P2-⑥② 结果', JSON.stringify({ changed: r.changed.map((b) => b.sessionId), superseded: (r.superseded ?? []).map((b) => b.sessionId) }))
+    eq('P2-⑥②：已移除的成员不被写入（旧实现会照样改）', r.changed.map((b) => b.sessionId), ['Smain2'])
+    eq('P2-⑥②：如实报告被移除', (r.superseded ?? []).map((b) => b.sessionId), ['Ssub2'])
+    eq('P2-⑥②：已移除成员的模型保持原值', cs.getSession('Ssub2')?.model, 'p:gone')
+    const subDisk = JSON.parse(fs.readFileSync(path.join(DST, 'data', 'chats', 'Ssub2.json'), 'utf8')) as { model?: string }
+    eq('P2-⑥②：磁盘上也没被改', subDisk.model, 'p:gone')
+    // 主对话自己仍应被换成目标模型（这一项没被跳过）
+    eq('P2-⑥②：主对话正常替换', cs.getSession('Smain2')?.model, 'q:n')
+  }
+}
+
+/**
+ * P2-⑦：主 JSON 已落盘、索引落盘失败时，**不得回滚内存、不得报成整体失败**。
+ *
+ * 原缺陷：`save()` 在索引写失败时返回 false，`applyModelSwap` 据此把会话推进 `failed` 并把内存态回滚成旧引用。
+ * 结果是「界面说没换成 / 重启后却是新模型」——数据其实已经落盘，索引只是派生数据（`ensureIndex()` 会扫目录重建）。
+ *
+ * 造法：把 `data/chats/_index.json` 换成同名**目录**（EISDIR），主 JSON 的写入路径完全正常。
+ */
+async function scenarioSwapIndexFail(): Promise<void> {
+  const cs = await import('../../apps/desktop/src/main/services/chat-store')
+  const { applyModelSwap } = await import('../../apps/desktop/src/main/services/model-swap')
+  const { setConfig } = await import('../../apps/desktop/src/main/services/config')
+
+  setConfig({
+    models: {
+      providers: [
+        { id: 'p', name: 'P', apiHost: 'https://a.example/v1', enabled: true, models: [{ id: 'm' }] },
+        { id: 'q', name: 'Q', apiHost: 'http://localhost:11434/v1', enabled: true, models: [{ id: 'n' }] }
+      ]
+    }
+  })
+  const s = cs.ensureSession('Sidx', { model: 'p:gone' })
+  s.title = 'IndexFail'
+  eq('P2-⑦：前置——会话正常落盘', cs.save('Sidx'), true)
+
+  const chatsDir = path.join(DST, 'data', 'chats')
+  const indexFile = path.join(chatsDir, '_index.json')
+  // 只删我们自己刚建的索引文件，再换成同名目录，让 persistIndex 必然 EISDIR
+  fs.rmSync(indexFile, { force: true })
+  fs.mkdirSync(indexFile)
+
+  // ① saveOutcome 必须能把「主文件已落盘」与「根本没写」分开
+  const s2 = cs.getSession('Sidx')!
+  s2.model = 'q:n'
+  eq('P2-⑦：索引失败时 saveOutcome = saved-index-stale（旧实现只能拿到 false）', cs.saveOutcome('Sidx'), 'saved-index-stale')
+  const onDisk = JSON.parse(fs.readFileSync(path.join(chatsDir, 'Sidx.json'), 'utf8')) as { model?: string }
+  eq('P2-⑦：主 JSON 确实已是新模型（证明「已落盘」不是错觉）', onDisk.model, 'q:n')
+
+  // ② applyModelSwap 不得把它算成 failed，也不得回滚内存
+  s2.model = 'p:gone'
+  const r = await applyModelSwap({ mainId: 'Sidx', fromRef: 'p:gone', toRef: 'q:n' })
+  if ('error' in r) {
+    fail('P2-⑦：不该整批拒绝（目标模型可用）', JSON.stringify(r))
+    return
+  }
+  info('P2-⑦ applyModelSwap 结果', JSON.stringify({ changed: r.changed.map((b) => b.sessionId), failed: (r.failed ?? []).map((b) => b.sessionId), indexStale: (r.indexStale ?? []).map((b) => b.sessionId) }))
+  eq('P2-⑦：索引待重建的会话仍算替换成功（不被算进 failed）', (r.failed ?? []).map((b) => b.sessionId), [])
+  eq('P2-⑦：它进了 changed', r.changed.map((b) => b.sessionId), ['Sidx'])
+  eq('P2-⑦：同时如实报告索引待重建', (r.indexStale ?? []).map((b) => b.sessionId), ['Sidx'])
+  eq('P2-⑦：内存态**没有**被回滚成旧引用（旧实现会回滚）', cs.getSession('Sidx')?.model, 'q:n')
+  const diskAfter = JSON.parse(fs.readFileSync(path.join(chatsDir, 'Sidx.json'), 'utf8')) as { model?: string }
+  eq('P2-⑦：磁盘与内存一致（都是新模型）', diskAfter.model, 'q:n')
+
+  // 恢复索引，避免影响后续场景
+  fs.rmdirSync(indexFile)
 }
 
 /**
@@ -2896,14 +3099,16 @@ async function scenarioWorktreeBrief(): Promise<void> {
   check('A36-13：null 时不出现「手动合回 <branch>」的具体分支指引', !/手动合回 `/.test(nullTargetText), '')
 
   // ── 三段提示词都真的带上它（不是只有一处）──
-  const sys = P.systemPrompt(wt, [], [], [], brief)
+  // 上游把首参从工作区路径改成 dir: { root, home }（默认工作区）。这里只给 root。
+  const sys = P.systemPrompt({ root: wt, home: null }, [], [], [], brief)
   check('A36-14：systemPrompt 带上了边界说明', /独立工作区/.test(sys), '')
-  const sealed = P.sealedSystemPrompt(wt, [], [], [], undefined, brief)
+  const sealed = P.sealedSystemPrompt({ root: wt, home: null }, [], [], [], undefined, brief)
   check('A36-15：sealedSystemPrompt 带上了边界说明', /独立工作区/.test(sealed), '')
   const member = P.memberSystemPrompt({
     member: { sessionId: 's', name: 'm', origin: 'created', personaId: 'general', root: null, duty: '', addedAt: 0 },
     owner: 'Deva',
-    workspaceRoot: wt,
+    // 上游把 workspaceRoot 换成 dir: { root, home }（默认工作区功能）。这里只给 root。
+    dir: { root: wt, home: null },
     folder: 'x',
     personas: [],
     memory: [],
@@ -2912,7 +3117,7 @@ async function scenarioWorktreeBrief(): Promise<void> {
   })
   check('A36-16：memberSystemPrompt 带上了边界说明', /独立工作区/.test(member), '')
   // 不传 worktree 时不该出现（普通目录行为不变）
-  const plain = P.systemPrompt(wt, [], [], [])
+  const plain = P.systemPrompt({ root: wt, home: null }, [], [], [])
   check('A36-17：普通目录（不传 worktree）不含边界说明', !/独立工作区/.test(plain), '')
   // 既有那句仍在（spec：保留在前，追加在后）
   check('A36-18：既有「历史目录作废」那句仍在', /历史消息里出现过的其它目录一律作废/.test(sys), '')
@@ -3234,24 +3439,25 @@ async function scenarioWorktree(): Promise<void> {
   eq('A35：null 透传 null', SCOPE.projectMemoryRootOf(null), null)
 
   const marker = `A35-${Date.now()}`
-  const wrote = M.writeMemory(`${marker} 在 worktree 里写下的记忆`, undefined, {
-    kind: 'project',
-    root: memoryRoot!
-  })
+  const wrote = M.writeMemory(
+    { type: 'user', title: '在 worktree 里写下的记忆', body: `${marker} 在 worktree 里写下的记忆` },
+    undefined,
+    { kind: 'project', root: memoryRoot! }
+  )
   eq('A35 前置：写入成功', wrote.ok, true)
   // 主仓库会话读：必须立刻看到同一条（listMemories 每次读盘，无缓存）
   const fromPrimary = M.listMemories({ kind: 'project', root: repo })
   check(
     'A35：worktree 写入 → 主仓库立即可读',
-    fromPrimary.some((e) => e.content.includes(marker)),
-    JSON.stringify(fromPrimary.map((e) => e.content))
+    fromPrimary.some((e) => e.body.includes(marker)),
+    JSON.stringify(fromPrimary.map((e) => e.body))
   )
   // 反向：如果记忆根错用 workspaceRoot，读到的会是另一份（空）
   const wrongRoot = M.listMemories({ kind: 'project', root: wt })
   check(
     'A35 反向：直接用 worktree 路径当记忆根读不到（证明共享靠 memoryScopeRoot 而非路径巧合）',
-    !wrongRoot.some((e) => e.content.includes(marker)),
-    JSON.stringify(wrongRoot.map((e) => e.content))
+    !wrongRoot.some((e) => e.body.includes(marker)),
+    JSON.stringify(wrongRoot.map((e) => e.body))
   )
   // 清理：别把测试数据留在真实记忆里
   M.clearMemories({ kind: 'project', root: memoryRoot! })
@@ -4174,6 +4380,13 @@ async function scenarioInsertAttachments(): Promise<void> {
   const r2 = A.stageUploadedFile(img2, fs.statSync(img2).size)
   eq('前置：附件被判定为可读的图片', [r1.supported, r1.kind], [true, 'image'])
   eq('前置：第二张同样可读', [r2.supported, r2.kind], [true, 'image'])
+  /*
+   * 上游把插入消息的附件从「路径字符串」升级成结构化 `InsertAttachment`（path/name/kind/size，
+   * 见 shared/chat-protocol.ts 与 chat-inserts.ts）。渲染层因此不必再猜类型/大小——撤回与退回时
+   * 放回输入框的附件条能直接显示正确的图标与体积。这里的夹具跟着换成结构化形状。
+   */
+  const att1 = { path: img1, name: 'shot1.png', kind: 'image' as const, size: fs.statSync(img1).size }
+  const att2 = { path: img2, name: 'shot2.png', kind: 'image' as const, size: fs.statSync(img2).size }
 
   /*
    * 用 `markInsertableForTest` 直接摆出「有一轮在接受插入」的状态，而不是真跑一轮：
@@ -4187,12 +4400,12 @@ async function scenarioInsertAttachments(): Promise<void> {
   T.markInsertableForTest(sid, turnId)
 
   // ── ① 带附件插话能入队（协议有 attachments，insertMessage 接受）──
-  const ins = T.insertMessage({ sessionId: sid, text: '看这张截图', model, attachments: [img1] })
+  const ins = T.insertMessage({ sessionId: sid, text: '看这张截图', model, attachments: [att1] })
   info('插入结果', JSON.stringify(ins))
   eq('插话：带附件可以插入（不再因为只认正文而丢掉附件）', ins, { ok: true })
 
   // ── ② 无正文只有附件也可插入 ──
-  const ins2 = T.insertMessage({ sessionId: sid, text: '', model, attachments: [img2] })
+  const ins2 = T.insertMessage({ sessionId: sid, text: '', model, attachments: [att2] })
   eq('插话：只有附件、没有正文也能插入（截图 + 不打字是常见用法）', ins2, { ok: true })
 
   // 空 + 无附件仍拒
@@ -4205,11 +4418,11 @@ async function scenarioInsertAttachments(): Promise<void> {
 
   // ── ③ 待送达列表只列正文（附件不出现在文本里）──
   const pendingEv = events.filter((e) => e.event?.type === 'inserts')
-  const lastPending = pendingEv[pendingEv.length - 1]?.event as { pending?: string[] } | undefined
+  const lastPending = pendingEv[pendingEv.length - 1]?.event as { pending?: Array<{ text: string; attachments: string[] }> } | undefined
   info('inserts 事件', JSON.stringify(lastPending))
   eq(
-    '插话：inserts 事件的 pending 仍是纯正文数组（界面按它显示待送达，附件走另一条路）',
-    lastPending?.pending,
+    '插话：inserts 事件的 pending 仍是正文列表（附件另走一条路，界面按它显示待送达）',
+    lastPending?.pending?.map((p) => p.text),
     ['看这张截图', '']
   )
 
@@ -4221,15 +4434,16 @@ async function scenarioInsertAttachments(): Promise<void> {
     taken !== null && typeof taken.text === 'string' && Array.isArray(taken.attachments),
     JSON.stringify(taken)
   )
-  eq('插话：两条插话的正文合并', taken?.text, '看这张截图' + String.fromCharCode(10,10))
-  eq('插话：两条插话的附件都在', taken?.attachments, [img1, img2])
+  // 上游的 takeInserts 用 filter(Boolean) 跳过空正文：只有附件的那条不产生空段落
+  eq('插话：两条插话的正文合并', taken?.text, '看这张截图')
+  eq('插话：两条插话的附件都在', taken?.attachments?.map((a) => a.path), [img1, img2])
   eq('插话：取走后再取为 null', T.takeInserts(sid), null)
 
   // ── ⑤ 同一附件插两次只喂一次 ──
-  T.insertMessage({ sessionId: sid, text: 'a', model, attachments: [img1] })
-  T.insertMessage({ sessionId: sid, text: 'b', model, attachments: [img1] })
+  T.insertMessage({ sessionId: sid, text: 'a', model, attachments: [att1] })
+  T.insertMessage({ sessionId: sid, text: 'b', model, attachments: [att1] })
   const dedup = T.takeInserts(sid)
-  eq('插话：同一张图插两次只保留一份（重复喂给模型只是多花钱）', dedup?.attachments, [img1])
+  eq('插话：同一张图插两次只保留一份（重复喂给模型只是多花钱）', dedup?.attachments?.map((a) => a.path), [img1])
 
   // ── ⑥ 附件真的变成模型输入的一部分（复用普通发送那条链路）──
   const { part } = await A.buildAttachmentPart(img1, 'openai')
@@ -4241,10 +4455,10 @@ async function scenarioInsertAttachments(): Promise<void> {
   )
 
   // ── ⑦ 撤回：正文与附件一起退回 ──
-  T.insertMessage({ sessionId: sid, text: '撤回我', model, attachments: [img2] })
+  T.insertMessage({ sessionId: sid, text: '撤回我', model, attachments: [att2] })
   const withdrawn = T.takeInserts(sid)
   eq('撤回：正文回来了', withdrawn?.text, '撤回我')
-  eq('撤回：附件也回来了（不能只回正文）', withdrawn?.attachments, [img2])
+  eq('撤回：附件也回来了（不能只回正文）', withdrawn?.attachments?.map((a) => a.path), [img2])
 
   unsub()
   T.clearInsertableForTest(sid, turnId)
@@ -4262,10 +4476,10 @@ async function scenarioInsertAttachments(): Promise<void> {
   const ev2: Array<{ turnId: string; event: Record<string, unknown> }> = []
   const unsub2 = chatBus.onChatEvent((p) => ev2.push(p as never))
   T.markInsertableForTest(sid2, turnId2)
-  T.insertMessage({ sessionId: sid2, text: '带图的插话', model, attachments: [img1] })
+  T.insertMessage({ sessionId: sid2, text: '带图的插话', model, attachments: [att1] })
   // 撤回（等价于回合被停止时的 giveBack 载荷）：正文与附件都要在
   const back = T.takeInserts(sid2)
-  eq('中止/撤回：正文随附件一起退回', back, { text: '带图的插话', attachments: [img1] })
+  eq('中止/撤回：正文随附件一起退回', { text: back.text, attachments: back.attachments?.map((a) => a.path) }, { text: '带图的插话', attachments: [img1] })
   unsub2()
   T.clearInsertableForTest(sid2, turnId2)
 }
@@ -4818,6 +5032,79 @@ async function scenarioPluginManaged(): Promise<void> {
       JSON.stringify(st2.pluginManaged)
     )
   }
+
+  /*
+   * ── ⑤ MCP：插件**显式声明**托管的 mcpServers 条目必须主动排除（P2-13 后的判据）──
+   *
+   * magpie 插件会往原版 `mcp.json` 写一条指向本机网关的服务（`127.0.0.1:3425/mcp/magpie/hub`）。
+   * 二开版没装插件时把它搬过来就是一条永远连不上的死条目，而报告还显示「MCP 已导入 1 个」。
+   *
+   * ⚠️ 判据是**插件对 MCP 条目的显式声明**（状态文件的 `mcpServers` 数组），不是 provider id。
+   * 旧夹具只写 `providerId` 就期望排除同名 MCP 条目，等于断言「provider id 同名即所有权」——那个契约
+   * 已被 P2-13 证明没有依据（插件状态文件里根本没有 MCP 字段）。契约变了，夹具跟着改；
+   * 四条断言的语义（显式声明 → 排除）不变。
+   *
+   * 「同名但没有 mcpServers 声明 → 正常导入」由 `mcpown` 场景专门覆盖，这里不重复造同一份夹具。
+   */
+  const { importMcp } = await import('../../apps/desktop/src/main/importer-mcp')
+  {
+    const mcpSrc = path.join(DST, 'plug-mcp-src')
+    fs.mkdirSync(mcpSrc, { recursive: true })
+    // 源侧显式声明 mcpServers 由插件写入（故意不用 'magpie' 这个字面量，证明不硬编码）
+    fs.writeFileSync(
+      path.join(mcpSrc, '.magpie-agent.state.json'),
+      JSON.stringify({ providerId: 'gw-relay-7', ownedSecret: true, mcpServers: ['gw-relay-7'] })
+    )
+    fs.writeFileSync(
+      path.join(mcpSrc, 'mcp.json'),
+      JSON.stringify({
+        mcpServers: {
+          'gw-relay-7': { name: 'magpie hub', transport: 'http', url: 'http://127.0.0.1:3425/mcp/magpie/hub' },
+          'my-context7': { name: 'context7', transport: 'http', url: 'https://c7.example/mcp' },
+          'my-stdio': { name: 'stdio one', transport: 'stdio', command: 'node', args: ['x.js'] }
+        }
+      })
+    )
+    // 清掉目标 mcp.json，确保这次是干净起点
+    fs.rmSync(path.join(dstHome, 'mcp.json'), { force: true })
+    const st = importMcp(mcpSrc)
+    info('MCP 插件托管', JSON.stringify({ copied: st.copied, pluginManaged: st.pluginManaged, skipped: st.skipped }))
+    eq('MCP：插件托管的条目单列进 pluginManaged', st.pluginManaged, ['gw-relay-7'])
+    eq('MCP：它不算 copied', st.copied.includes('gw-relay-7'), false)
+    eq('MCP：它也不进 skipped（那会被误读成「目标已有」）', st.skipped.includes('gw-relay-7'), false)
+    const dstMcp = JSON.parse(fs.readFileSync(path.join(dstHome, 'mcp.json'), 'utf8')) as {
+      mcpServers?: Record<string, unknown>
+    }
+    eq('MCP：目标 mcp.json 里没有这条死条目', 'gw-relay-7' in (dstMcp.mcpServers ?? {}), false)
+    eq(
+      'MCP：非插件的条目照常复制',
+      Object.keys(dstMcp.mcpServers ?? {}).sort(),
+      ['my-context7', 'my-stdio']
+    )
+  }
+
+  /*
+   * ⑥ 反向：源侧状态文件整体缺失 → 同一份源会被当普通条目导入。
+   *
+   * 这验的是新判据的**另一半**：「没有任何 MCP 所有权声明 → 不排除」。
+   * （⑤ 验「显式声明 → 排除」，⑥ 验「没有声明 → 放行」，两者合起来才说明排除是由声明驱动的，
+   *  而不是无条件过滤、也不是靠 provider id 同名。）
+   */
+  {
+    const mcpSrc = path.join(DST, 'plug-mcp-src')
+    fs.rmSync(path.join(mcpSrc, '.magpie-agent.state.json'), { force: true })
+    // 目标侧也不留声明，否则并集仍会命中
+    fs.rmSync(path.join(dstHome, '.magpie-agent.state.json'), { force: true })
+    fs.rmSync(path.join(dstHome, 'mcp.json'), { force: true })
+    const st = importMcp(mcpSrc)
+    info('MCP 反向（无状态文件）', JSON.stringify({ copied: st.copied, pluginManaged: st.pluginManaged }))
+    eq('MCP 反向：没有插件声明时按普通条目导入（既有行为）', st.copied.includes('gw-relay-7'), true)
+    eq('MCP 反向：此时 pluginManaged 为空', st.pluginManaged, [])
+    const dstMcp = JSON.parse(fs.readFileSync(path.join(dstHome, 'mcp.json'), 'utf8')) as {
+      mcpServers?: Record<string, unknown>
+    }
+    eq('MCP 反向：条目确实落到了目标里', 'gw-relay-7' in (dstMcp.mcpServers ?? {}), true)
+  }
 }
 
 /**
@@ -4995,6 +5282,160 @@ async function scenarioSessionSync(): Promise<void> {
       JSON.stringify(st2.skipped)
     )
   }
+
+  /*
+   * ── ⑤ P1-①：目标会话**已载入缓存**时的重复同步（旧用例的盲区）──
+   *
+   * 上面 ②～④ 都只碰磁盘、不预载缓存，于是测不出真正的数据丢失路径：用户点开过这个对话 → 缓存里有旧对象
+   * → 导入器覆盖磁盘 → 下一次正常保存把旧消息集写回，上游新同步的消息静默消失。
+   * 这条用例必须**先 ensureSession 载入缓存**，再导入，再 save，最后验磁盘内容。
+   */
+  {
+    const id = 'sess_cached_sync'
+    const srcFile = path.join(srcChats, `${id}.json`)
+    const dstFile = path.join(dstChats, `${id}.json`)
+    const first = [msg('user', '原版第一句'), msg('assistant', '原版回一')]
+    fs.writeFileSync(srcFile, S(id, first))
+    fs.writeFileSync(dstFile, S(id, first))
+    // 模拟「用户在本应用里点开过这个对话」：把它载入 sessionCache
+    const cached = ensureSession(id)
+    eq('P1-①：缓存里确实是那份旧内容', cached.messages.length, first.length)
+
+    // 用户继续在原版聊：源在共同前缀之后加了两条
+    const grown = [...first, msg('user', '原版后来加的'), msg('assistant', '原版回二')]
+    fs.writeFileSync(srcFile, S(id, grown))
+    const st3 = importSessions(srcHome)
+    eq('P1-①：缓存已载入时仍判定为超集并同步', st3.updated.includes(id), true)
+
+    // 关键一步：这时候来一次正常保存（一轮对话的 onStep / finally 就是这个动作）
+    eq('P1-①：保存可以正常进行（缓存未被清空）', save(id), true)
+    const afterSave = JSON.parse(fs.readFileSync(dstFile, 'utf8')) as { messages: unknown[] }
+    eq('P1-①：保存后磁盘仍是同步来的新条数（旧缓存不得写回）', afterSave.messages.length, grown.length)
+    eq('P1-①：缓存对象本身也已是新内容', getSession(id)!.messages.length, grown.length)
+  }
+
+  /*
+   * ── ⑥ P1-③：主文件判定 skipped 时，它的拆分历史不得被替换 ──
+   *
+   * 目标主 JSON 因分叉保留本地版本，但源里有同名 compacted 且尺寸不同时，旧代码仍会把它备份并覆盖，
+   * 而主文件还指向本地 count。这里直接照原样构造：目标主文件 compacted.count 与源不同，两边 jsonl 行数不同。
+   * 断言「主文件字节未变」+「jsonl 字节未变」+「没有 compacted 成功记录」——静默改写必须可见/不发生。
+   */
+  {
+    const id = 'sess_compacted_skip'
+    // 同名 compacted：旧代码会因为尺寸不同把它备份后覆盖，正是 P1-③ 的路径
+    const localJsonl = `${id}.compacted-same.jsonl`
+    const localMsgs = [msg('user', '本地更早'), msg('assistant', '本地回一')]
+    const newer = [msg('user', '本地新一句')]
+    const targetMain = {
+      id,
+      title: id,
+      createdAt: 1,
+      updatedAt: 1,
+      // 目标主文件只存 compacted 边界之后的尾部，早期在 jsonl 里
+      messages: [msg('user', '共同的第一句'), msg('assistant', '本地的分支')],
+      compacted: { count: localMsgs.length, file: localJsonl }
+    }
+    fs.writeFileSync(path.join(dstChats, localJsonl), `${localMsgs.map((m) => JSON.stringify(m)).join('\n')}\n`)
+    fs.writeFileSync(path.join(dstChats, `${id}.json`), JSON.stringify(targetMain))
+    // 源：主文件从第 2 条起分叉；同一个 compacted 文件名但行数不同（3 行 vs 2 行）
+    fs.writeFileSync(
+      path.join(srcChats, localJsonl),
+      `${[...localMsgs, ...newer].map((m) => JSON.stringify(m)).join('\n')}\n`
+    )
+    fs.writeFileSync(
+      path.join(srcChats, `${id}.json`),
+      JSON.stringify({ ...targetMain, messages: [msg('user', '共同的第一句'), msg('assistant', '原版的分支')], compacted: { count: 3, file: localJsonl } })
+    )
+    const beforeMain = fs.readFileSync(path.join(dstChats, `${id}.json`), 'utf8')
+    const beforeJsonl = fs.readFileSync(path.join(dstChats, localJsonl), 'utf8')
+    const st4 = importSessions(srcHome)
+    eq('P1-③：目标主文件分叉 → 进 skipped', st4.skipped.includes(id), true)
+    eq('P1-③：主文件字节未变', fs.readFileSync(path.join(dstChats, `${id}.json`), 'utf8') === beforeMain, true)
+    eq('P1-③：本地拆分历史字节未变（不得被源替换）', fs.readFileSync(path.join(dstChats, localJsonl), 'utf8') === beforeJsonl, true)
+    eq('P1-③：没有把源拆分文件当成成功搬过来', st4.compacted.includes(localJsonl), false)
+  }
+
+  /*
+   * ── ⑦ P1-②：源是超集时**只追加消息**，本地元数据必须原样保留 ──
+   *
+   * 用户真实路径：A 导入 → 上游继续聊（源多出尾部消息）→ 用户在本应用里改过标题 / 切过模型
+   * → 再导入。旧实现整档 copyFileSync，消息到位了，标题与模型却被源那份顶掉。
+   *
+   * 这里同时覆盖「已载入缓存」（否则测不到 P1-① 的路径）与「目标已有 compacted 指针」：
+   * 指针必须仍是目标的、count 不变，只在其后追加尾消息。
+   */
+  {
+    const id = 'sess_meta_keep'
+    const srcFile = path.join(srcChats, `${id}.json`)
+    const dstFile = path.join(dstChats, `${id}.json`)
+    const jsonl = `${id}.compacted-local.jsonl`
+    /*
+     * 真实结构（model-view.ts 的 modelFirst）：拆分文件只存**摘要之前**的消息，摘要本身留在主文件
+     * messages 的第一条；count 等于摘要下标。把摘要写进 jsonl 是造错数据——那样 modelFirst 会指回
+     * 摘要的位置，保存时自然重算边界，测出来的「换文件」其实是数据不真实。
+     */
+    const early = [msg('user', '很早的一句'), msg('assistant', '很早的回')]
+    const summary = msg('user', '⟦deva:compaction⟧ 之前的对话摘要')
+    fs.writeFileSync(path.join(dstChats, jsonl), `${early.map((m) => JSON.stringify(m)).join('\n')}\n`)
+    // Both pointers must reference real history; the old tail-only comparison masked this missing source fixture.
+    fs.writeFileSync(path.join(srcChats, jsonl), `${early.map((m) => JSON.stringify(m)).join('\n')}\n`)
+    const shared = [msg('user', '共同第一句'), msg('assistant', '共同回一')]
+    const cut = early.length
+    // 目标：本地改过标题与模型，且带着自己的压缩边界
+    const targetMain = {
+      id,
+      title: '我在二开版改过的标题',
+      createdAt: 1,
+      updatedAt: 777,
+      model: 'local-picked:model',
+      messages: [summary, ...shared],
+      compacted: { count: cut, file: jsonl }
+    }
+    fs.writeFileSync(dstFile, JSON.stringify(targetMain))
+    fs.writeFileSync(srcFile, JSON.stringify({ ...targetMain, title: id, model: 'upstream:model', updatedAt: 1 }))
+    // 载入缓存，模拟用户点开过这个对话
+    const cached = ensureSession(id)
+    eq('P1-②：缓存载入的是本地改过的元数据', cached.title, '我在二开版改过的标题')
+
+    // 上游继续聊：源在共同前缀之后多了两条
+    const grown = [summary, ...shared, msg('user', '上游新问'), msg('assistant', '上游新答')]
+    fs.writeFileSync(srcFile, JSON.stringify({ ...targetMain, title: '上游标题覆盖', model: 'upstream:model', updatedAt: 9, messages: grown }))
+
+    const st5 = importSessions(srcHome)
+    eq('P1-②：源是超集 → 进 updated', st5.updated.includes(id), true)
+    const merged = JSON.parse(fs.readFileSync(dstFile, 'utf8')) as {
+      title: string
+      model?: string
+      updatedAt: number
+      messages: unknown[]
+      compacted?: { count: number; file: string }
+    }
+    // 磁盘主文件 = 摘要 + 共同两条 + 上游新增两条
+    const mainCount = 1 + shared.length + 2
+    eq('P1-②：消息增量到位（磁盘主文件只存 compacted 之后的段）', merged.messages.length, mainCount)
+    eq('P1-②：本地标题保留（不被源覆盖）', merged.title, '我在二开版改过的标题')
+    eq('P1-②：本地模型保留（不被源覆盖）', merged.model, 'local-picked:model')
+    eq('P1-②：本地 updatedAt 保留', merged.updatedAt, 777)
+    eq('P1-②：compacted 指针仍是目标那份', merged.compacted, { count: cut, file: jsonl })
+    eq('P1-②：缓存已同步（否则下一轮 save 会写回旧消息）', getSession(id)!.messages.length, cut + mainCount)
+    eq('P1-②：缓存里的标题也还是本地值', getSession(id)!.title, '我在二开版改过的标题')
+    // 保存一次，确认不会把旧消息集写回磁盘，也不会平白换拆分文件
+    eq('P1-②：同步后保存仍成功', save(id), true)
+    const afterSave = JSON.parse(fs.readFileSync(dstFile, 'utf8')) as {
+      messages: unknown[]
+      compacted?: { count: number; file: string }
+    }
+    eq('P1-②：保存后磁盘主文件仍是合并后的尾段', afterSave.messages.length, mainCount)
+    eq('P1-②：保存没有换掉拆分文件（前缀仍被认作已落盘）', afterSave.compacted, { count: cut, file: jsonl })
+
+    // 只有元数据不同（消息一致）→ 不得报 updated，元数据也不该被改写
+    const beforeBytes = fs.readFileSync(dstFile, 'utf8')
+    fs.writeFileSync(srcFile, JSON.stringify({ ...targetMain, title: '又一个上游标题', messages: grown }))
+    const st6 = importSessions(srcHome)
+    eq('P1-②：消息没变（仅元数据不同）→ 归 skipped 不虚报 updated', st6.updated.includes(id), false)
+    eq('P1-②：没有可追加的尾部时目标文件字节未变', fs.readFileSync(dstFile, 'utf8') === beforeBytes, true)
+  }
 }
 
 /**
@@ -5016,9 +5457,7 @@ async function scenarioMemCondense(): Promise<void> {
   const { registerMemoryCondenseIpc } = await import(
     '../../apps/desktop/src/main/services/memory-condense-ipc'
   )
-  const { writeMemory, listMemories, GLOBAL_SCOPE, deleteMemory } = await import(
-    '../../apps/desktop/src/main/services/memory'
-  )
+  const { deleteMemory, replaceMemories } = await import('../../apps/desktop/src/main/services/memory')
   const SEC = await import('../../apps/desktop/src/main/services/secrets')
   const T = require('./stub-electron.cjs')
   registerMemoryCondenseIpc()
@@ -5048,11 +5487,25 @@ async function scenarioMemCondense(): Promise<void> {
 
   /** 模型下一轮该回什么（每个用例改它）。 */
   let replyJson = '{"entries":[]}'
+  /*
+   * 归纳请求到达时先跑一次，然后才回结果。
+   *
+   * 这是复现 P1-⑤ 的唯一窗口：`condenseMemories` 先读完 `before`、再 await 模型、最后才读一次
+   * 当前存储做合并。只有在「模型还没回」的这段时间里动记忆，才是真正的并发改动；
+   * 在 `invokeCondense()` 前后动都是同步的，碰不到那个窗口。
+   *
+   * 服务端 handler 是同步执行的（`req.on('end')` 里），所以这里改记忆不会被别的异步打散。
+   */
+  let beforeReply: (() => void) | null = null
   const server = http.createServer((req, res) => {
     // 吃掉请求体，否则 socket 不释放
     req.on('data', () => {})
     req.on('end', () => {
       seen.push({ url: String(req.url), head: String(replyJson).slice(0, 60) })
+      // 只动第一次：归纳失败会重试（ATTEMPTS=2），第二次不该再改一遍
+      const hook = beforeReply
+      beforeReply = null
+      hook?.()
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       /*
        * OpenAI 的流式形状：每行 `data: {chunk}`，最后 `data: [DONE]`。
@@ -5107,9 +5560,13 @@ async function scenarioMemCondense(): Promise<void> {
 
     // ── ② 模型不可用（三种原因各一条），且记忆一动不动 ──
     {
-      for (let i = 0; i < 6; i++) writeMemory(`第${i}条-`.padEnd(120, 'x'), undefined, GLOBAL_SCOPE)
+      for (let i = 0; i < 6; i++) {
+        const wr = writeMemory(`第${i}条-`.padEnd(120, 'x'), undefined, GLOBAL_SCOPE)
+        if (!wr.ok) info('PRELOAD-FAIL', `${i}:${(wr as { code?: string }).code}`)
+      }
       const n0 = listMemories(GLOBAL_SCOPE).length
-      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      info('PRELOAD', `n0=${n0}`)
+      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
 
       // (a) 没有默认模型
       setConfig({ models: { activeModelId: '', providers: [] } })
@@ -5155,14 +5612,14 @@ async function scenarioMemCondense(): Promise<void> {
        */
       await SEC.deleteSecret('qa-cond')
       replyJson = JSON.stringify({
-        entries: listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, content: e.content }))
+        entries: listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, type: e.type, title: e.title, body: e.body }))
       })
       r = (await invokeCondense()) as { ok: boolean; code?: string; freedSpace?: boolean }
       eq('不可用(e)：密钥 absent 不拦（本地无钥模型要走得通）', r.code === 'model-unavailable', false)
       eq('不可用(e)：确实跑进去了（ok=true）', r.ok, true)
       eq('不可用(e)：模型原样返回 → 没腾出空间', r.freedSpace, false)
 
-      const used1 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      const used1 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
       eq('不可用的几种都没改记忆（条数）', listMemories(GLOBAL_SCOPE).length, n0)
       eq('不可用的几种都没改记忆（字数）', used1, used0)
     }
@@ -5177,15 +5634,15 @@ async function scenarioMemCondense(): Promise<void> {
         if (r.ok) ids.push(r.entry.id)
       }
       const beforeEntries = listMemories(GLOBAL_SCOPE)
-      const usedBefore = beforeEntries.reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      const usedBefore = beforeEntries.reduce((n, e) => n + formatMemoryLine(e).length, 0)
       eq('成功：先有 6 条', beforeEntries.length, 6)
 
       useModel()
       await SEC.deleteSecret('qa-cond')
       replyJson = JSON.stringify({
         entries: [
-          { id: beforeEntries[0].id, content: '同主题要点一（已合并前三条）' },
-          { id: beforeEntries[3].id, content: '同主题要点二（已合并后三条）' }
+          { id: beforeEntries[0].id, type: 'user', title: '同主题要点一（已合并前三条）', body: '' },
+          { id: beforeEntries[3].id, type: 'user', title: '同主题要点二（已合并后三条）', body: '' }
         ]
       })
       const r = (await invokeCondense()) as {
@@ -5238,7 +5695,7 @@ async function scenarioMemCondense(): Promise<void> {
       useModel()
       await SEC.deleteSecret('qa-cond')
       // 原样返回（同 id 同内容）
-      replyJson = JSON.stringify({ entries: entries.map((e) => ({ id: e.id, content: e.content })) })
+      replyJson = JSON.stringify({ entries: entries.map((e) => ({ id: e.id, type: e.type, title: e.title, body: e.body })) })
       const r = (await invokeCondense()) as {
         ok: boolean
         freed?: number
@@ -5255,7 +5712,7 @@ async function scenarioMemCondense(): Promise<void> {
     // ── ⑤ 模型返回不可解析 → failed，且记忆不变 ──
     {
       const n0 = listMemories(GLOBAL_SCOPE).length
-      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0)
+      const used0 = listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0)
       useModel()
       replyJson = '这不是 JSON'
       const r = (await invokeCondense()) as { ok: boolean; code?: string; reason?: string }
@@ -5265,10 +5722,175 @@ async function scenarioMemCondense(): Promise<void> {
       eq('不可解析：记忆条数没变', listMemories(GLOBAL_SCOPE).length, n0)
       eq(
         '不可解析：记忆字数没变',
-        listMemories(GLOBAL_SCOPE).reduce((n, e) => n + `- [${e.id}] ${e.content}`.length, 0),
+        listMemories(GLOBAL_SCOPE).reduce((n, e) => n + formatMemoryLine(e).length, 0),
         used0
       )
     }
+    // ── ⑥ P1-⑤：归纳等待期间用户改了某条的值 → 归纳结束后用户的值仍在 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      for (let i = 0; i < 3; i++) writeMemory(`并发改值用例第${i}条-`.padEnd(110, 'c'), undefined, GLOBAL_SCOPE)
+      const entries = listMemories(GLOBAL_SCOPE)
+      const target = entries[1]
+      const userValue = '用户改过的新值（必须保留）'
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      /*
+       * 模型结果里 target 被改成了「模型版本」——若不做版本校验，这条会按 id 直接覆盖掉用户的值。
+       * 其余两条照常压缩，保证这次归纳在别处仍然生效（否则「全都跳过」也能骗过断言）。
+       */
+      replyJson = JSON.stringify({
+        entries: [
+          { id: entries[0].id, type: 'user', title: '第 0 条已被模型精简', body: '' },
+          { id: target.id, type: 'user', title: '模型版本（不该出现在盘上）', body: '' },
+          { id: entries[2].id, type: 'user', title: '第 2 条已被模型精简', body: '' }
+        ]
+      })
+      // 请求到达、模型还没回结果的那段时间里，用户改了 target 的值
+      beforeReply = () => {
+        const w = writeMemory(userValue, target.id, GLOBAL_SCOPE)
+        info('并发改值：等待期间的用户写入', JSON.stringify(w.ok ? { ok: true } : w))
+      }
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        changed?: number
+        skipped?: Array<{ id: string; reason: string; current: string | null }>
+      }
+      info('并发改值结果', JSON.stringify(r))
+      const after = listMemories(GLOBAL_SCOPE)
+      const kept = after.find((e) => e.id === target.id)
+      eq('并发改值：用户的值仍在（归纳结果不得覆盖）', kept?.body, userValue)
+      eq('并发改值：没有出现模型版本', after.some((e) => e.body === '模型版本（不该出现在盘上）'), false)
+      /*
+       * 第二批按契约改为**整轮拒绝**：不做「其余照常」的局部保全。
+       * 局部保全要求写出的集合恰好等于「模型结果 ∪ 用户改动」，任何一处漏算都会静默丢条目
+       * （实证：用户改 A、模型把 A+B 合并到 A，结果保留用户 A 却删了 B，还报 ok:true）。
+       */
+      eq('并发改值：整轮拒绝（ok=false）', r.ok, false)
+      eq('并发改值：原因码与超限/模型失败分开', (r as { code?: string }).code, 'concurrent-change')
+      eq('并发改值：改动过的 id 被报出', (r as { changed?: string[] }).changed, [target.id])
+      eq('并发改值：其余两条也没被这次归纳改写', after.filter((e) => e.body.startsWith('第')).length, 0)
+    }
+
+    // ── ⑦ P1-⑤：归纳等待期间用户删了某条 → 归纳结束后它仍是删除状态 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      for (let i = 0; i < 3; i++) writeMemory(`并发删除用例第${i}条-`.padEnd(110, 'd'), undefined, GLOBAL_SCOPE)
+      const entries = listMemories(GLOBAL_SCOPE)
+      const doomed = entries[1]
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      /*
+       * 模型在用户删除**之前**读到了它，结果里仍带着这条。
+       *
+       * 两种回法都要覆盖，因为它们是两条不同的复活路径：
+       *  a) 原 id 回（`{ id: doomed.id, title, body }`）—— 旧代码的 id 集合过滤恰好挡住了；
+       *  b) **id 填 null**（模型把它当新条目 / 合并产物吐出，`parseEntries` 会分配新 id）——
+       *     旧代码挡不住，已删除的内容会换个 id 复活。这是真正会漏的那条。
+       */
+      replyJson = JSON.stringify({
+        entries: [
+          { id: entries[0].id, type: 'user', title: '第 0 条已被模型精简', body: '' },
+          { id: null, type: doomed.type, title: '复活：被删条目的内容', body: doomed.body },
+          { id: entries[2].id, type: 'user', title: '第 2 条已被模型精简', body: '' }
+        ]
+      })
+      beforeReply = () => {
+        const d = deleteMemory(doomed.id, GLOBAL_SCOPE)
+        info('并发删除：等待期间的用户删除', JSON.stringify({ removed: !!d.deleted, written: d.written }))
+      }
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        skipped?: Array<{ id: string; reason: string; current: string | null }>
+      }
+      info('并发删除结果', JSON.stringify(r))
+      const after = listMemories(GLOBAL_SCOPE)
+      eq('并发删除：该条目仍是删除状态（不复活）', after.some((e) => e.id === doomed.id), false)
+      eq(
+        '并发删除：被删的内容没以任何 id 回到盘上（模型换新 id 吐回也不复活）',
+        after.some((e) => e.body === doomed.body),
+        false
+      )
+      eq('并发删除：整轮拒绝（ok=false）', r.ok, false)
+      eq('并发删除：原因码为 concurrent-change', (r as { code?: string }).code, 'concurrent-change')
+      eq('并发删除：被删的 id 被报出', (r as { changed?: string[] }).changed, [doomed.id])
+      eq('并发删除：其余两条也没被这次归纳改写', after.filter((e) => e.body.startsWith('第')).length, 0)
+    }
+
+    // ── ⑦b 同上，但模型按**原 id** 回那条已删除的条目 ──
+    {
+      for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+      for (let i = 0; i < 3; i++) writeMemory(`同 id 复活用例第${i}条-`.padEnd(110, 'e'), undefined, GLOBAL_SCOPE)
+      const entries = listMemories(GLOBAL_SCOPE)
+      const doomed = entries[1]
+      useModel()
+      await SEC.deleteSecret('qa-cond')
+      replyJson = JSON.stringify({
+        entries: [
+          { id: entries[0].id, type: 'user', title: '第 0 条已被模型精简', body: '' },
+          { id: doomed.id, type: doomed.type, title: doomed.title, body: doomed.body },
+          { id: entries[2].id, type: 'user', title: '第 2 条已被模型精简', body: '' }
+        ]
+      })
+      beforeReply = () => {
+        deleteMemory(doomed.id, GLOBAL_SCOPE)
+      }
+      const r = (await invokeCondense()) as {
+        ok: boolean
+        skipped?: Array<{ id: string; reason: string; current: string | null }>
+      }
+      info('同 id 复活结果', JSON.stringify(r))
+      const after = listMemories(GLOBAL_SCOPE)
+      eq('同 id 复活：该条目仍是删除状态', after.some((e) => e.id === doomed.id), false)
+      eq('同 id 复活：整轮拒绝（ok=false）', r.ok, false)
+      eq('同 id 复活：原因码为 concurrent-change', (r as { code?: string }).code, 'concurrent-change')
+    }
+
+    // ── ⑧ 第二批：整轮拒绝（改 / 删 / 新增），以及超限不提交 ──
+    {
+      const { memoryConcurrency } = await import('./memory-concurrency-tests')
+      await memoryConcurrency({
+        clear: () => {
+          for (const e of listMemories(GLOBAL_SCOPE)) deleteMemory(e.id, GLOBAL_SCOPE)
+        },
+        // v2 的条目是 type + title + body：把这些用例里的一句「content」放进**正文**，
+        // 标题取整句（并发用例的句子都远短于 60 字上限），断言因此仍按 content 那一列比。
+        write: (content: string) => {
+          const r = writeMemoryV2({ type: 'user', title: content, body: content }, undefined, GLOBAL_SCOPE)
+          if (!r.ok) throw new Error(`writeMemory failed: ${r.error}`)
+          return r.entry.id
+        },
+        update: (id: string, content: string) => {
+          const r = writeMemoryV2({ type: 'user', title: content, body: content }, id, GLOBAL_SCOPE)
+          if (!r.ok) throw new Error(`updateMemory failed: ${r.error}`)
+        },
+        list: () => listMemories(GLOBAL_SCOPE).map((e) => ({ id: e.id, content: e.body })),
+        setReply: (json: string) => {
+          replyJson = json
+        },
+        setBeforeReply: (fn: (() => void) | null) => {
+          beforeReply = fn
+        },
+        condense: () => invokeCondense(),
+        remove: (id: string) => {
+          deleteMemory(id, GLOBAL_SCOPE)
+        },
+        seed: (entries) => {
+          // v1 形状（id + content）→ v2；标题取 content 前 60 字，正文原样
+          const v2 = entries.map((e) => ({
+            id: e.id,
+            type: 'user' as const,
+            title: e.content.length <= 60 ? e.content : `${e.content.slice(0, 59)}…`,
+            body: e.content,
+            createdAt: e.createdAt,
+            updatedAt: e.updatedAt
+          }))
+          if (!replaceMemories(GLOBAL_SCOPE, v2)) throw new Error('seed failed')
+        },
+        eq
+      })
+    }
+
   } finally {
     /*
      * 关服务器这件事在 Windows 上有个坑：`close()` + 立刻 `process.exit()` 会撞上
@@ -5779,10 +6401,6 @@ async function scenarioWorktreeMerge(): Promise<void> {
 }
 
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
-  memberwt: async () => {
-    const { testMemberWorktree } = await import('./member-worktree-tests')
-    await testMemberWorktree({ dst: DST, makeRepo, eq, check })
-  },
   full: scenarioFull,
   sweep: scenarioSweep,
   memidem: scenarioMemIdem,
@@ -5798,6 +6416,8 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   keytri: scenarioKeyTriState,
   cfgcorrupt: scenarioConfigCorrupt,
   swapfail: scenarioSwapWriteFail,
+  swapindex: scenarioSwapIndexFail,
+  swapstale: scenarioSwapStaleCommit,
   kindcopy: scenarioKindCopy,
   swapws: scenarioSwapWhitespace,
   blockedturn: scenarioBlockedTurnNoTrace,
@@ -5816,6 +6436,16 @@ const SCENARIOS: Record<string, () => Promise<void> | void> = {
   rekey: scenarioSecretRekey,
   plugmgr: scenarioPluginManaged,
   sessync: scenarioSessionSync,
+  importactive: () => importActive(eq),
+  importhistory: () => importHistoryConflict(eq),
+  importretry: () => importDependencyRetry(eq),
+  importmedia: () => importMedia(eq),
+  cfgwrite: () => configWriteGuard(eq),
+  idxrecover: () => indexRecovery(eq),
+  swapidentity: () => swapIdentity(eq),
+  swapbinding: () => swapBinding(eq),
+  memreadfail: () => memoryReadFailure(eq),
+  mcpown: () => mcpOwnership(eq),
   wtmerge: scenarioWorktreeMerge,
   memcond: scenarioMemCondense,
   dangclass: scenarioDanglingClassify,

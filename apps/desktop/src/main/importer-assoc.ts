@@ -8,10 +8,9 @@ import type { AssocReport, Failure } from '../shared/import-protocol'
 /**
  * 导入第 ⑦ 步：四类附件（media / checkpoints / subagents / tool-results，约 170 MB）。
  *
- * ⚠️ **必须在会话落盘之后调用，且同一轮内完成**。启动时有三个清扫（index.ts 的 sweepCheckpoints /
- * sweepSubagents / sweepMedia）：它们删「id 不在会话列表里的」目录与「没被任何会话引用的」blob。
- * 先搬附件、会话还没到位的话，下次启动这些附件就被当垃圾清掉——不报错，用户只看到图片变成「数据已丢失」、
- * 回滚面板说「备份已缺失」。
+ * ⚠️ **与会话导入必须在同一轮内完成，且附件依赖先于会话主档发布**。`runImport` 在同一同步导入段先调用
+ * 本函数，随后 `importSessions` 验证主档实际引用的 compacted/media 依赖后才原子写入主档并 adopt 缓存。
+ * 若复制失败，对应会话不发布；两步之间没有应用启动清扫，因此不会把先准备的附件当垃圾删掉。
  *
  * ⚠️ **这三个清扫全按文件 mtime 判年龄**（checkpoints 保留 30 天、其余 1 小时宽限），而 `copyFileSync` 会
  * **保留源 mtime**。所以复制后必须把 mtime 刷成当前时间（见 copyFileFresh）——否则「源数据放了几个月再导入」

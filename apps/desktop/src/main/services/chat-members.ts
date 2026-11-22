@@ -6,8 +6,8 @@ import type {
   ChatModelConfig
 } from '../../shared/chat-protocol'
 import { publishSessionsChanged } from './chat-bus'
-import { statSync } from 'node:fs'
-import { randomUUID } from 'crypto'
+import { mkdirSync, statSync } from 'node:fs'
+import { isAbsolute } from 'node:path'
 import { type ContentPart, type StopReason } from '../providers/types'
 import { memberAddedRecord, type MemberListingItem } from './listing'
 import {
@@ -33,16 +33,9 @@ import {
 import { NEW_MEMBER_TOKENS } from '../../shared/mention'
 import { withoutQuotes } from '../../shared/quote'
 import { DEFAULT_PERSONA_ID, getPersona, listPersonas, resolvePersonaId } from './personas'
+import { roleHome } from './role-home'
 import { notifyReplyDone } from './reply-notify'
-import { ensureSession, getSession, save as saveProject, verifyMemberMirrorSaved, verifyMemberTransactionMarker, type StoredSession } from './chat-store'
-import { invalidateMemberBindingRequest } from './member-binding-state'
-import {
-  beginMemberBindingTransaction, bindingSnapshotMatches, clearMemberBindingTransaction,
-  makeMemberBindingSnapshot, persistBindingSnapshot, restoreBindingMemory,
-  commitMemberBindingTransaction, recoverMemberBindingTransaction
-} from './member-binding-transaction'
-import type { MemberWorktreeIdentity } from '../../shared/member-worktree-protocol'
-import type { MemberWorktreeBindingTransaction } from './member-binding-transaction'
+import { ensureSession, getSession, save as saveProject, type StoredSession } from './chat-store'
 import { isEn } from '../locale'
 import {
   browserHasHandoff
@@ -318,7 +311,8 @@ function addMember(
     prior.root = p.root ?? memberFolder(prior)
     saveProject(main.id)
     if (sub && p.root) {
-      if (!setMemberFolder(sub, p.root)) return '成员恢复目录未能保存，请重试'
+      sub.focusRoot = p.root
+      saveProject(sub.id)
     }
     return { ref: prior, restored: true }
   }
@@ -398,73 +392,51 @@ export function noteMemberDirectTask(sub: StoredSession, text: string): void {
   publishSessionsChanged()
 }
 
-/** 成员会话里用户亲自改了模型 / 思考等级：记到主对话名单上，此后派任务不再覆盖。 */
-export function markMemberSetting(sub: StoredSession, field: 'modelSet' | 'effortSet'): void {
+/**
+ * 成员会话里用户亲自改了模型 / 思考等级：记到主对话名单上，此后派任务不再覆盖。
+ *
+ * 返回「这条标记是否已经落实在磁盘上」（P2-10）。以前是 void + 忽略 `saveProject` 的结果：
+ * 父会话写盘失败时标记只活在内存里，重启后派任务又会用主对话的模型把成员的模型覆盖回去，
+ * 而批量替换那边已经把它计进「已替换」，用户看到的是「换成功了，下次派任务又变回去」。
+ *
+ * 不是成员会话 / 本来就有这个标记 → 视为已落实（没有需要写的东西）。
+ */
+export function markMemberSetting(sub: StoredSession, field: 'modelSet' | 'effortSet'): boolean {
   const main = sub.parentId ? getSession(sub.parentId) : undefined
   const ref = main?.members?.find((m) => m.sessionId === sub.id)
-  if (!main || !ref || ref[field]) return
+  if (!main || !ref) return true
+  if (ref[field]) return true
   ref[field] = true
-  saveProject(main.id)
+  return saveProject(main.id)
 }
 
 /**
  * 成员会话里挂载 / 卸载文件夹（null = 卸载，成员没有文件夹）：同步写回主对话名单（名单随消息下发，主智能体会收到更新）。
  */
+/**
+ * 改成员的目录。
+ *
+ * @param folder 新的 focusRoot；`null` = 解绑。
+ * @param identity 成员工作区身份（checkoutRoot / repoRoot / branch / relativePath）。
+ *   只有「绑到一个独立 worktree」时才给；普通目录绑定不给。它落进 `memberWorktreeIdentity`，
+ *   是绑定事务崩溃恢复时判断「这条绑定到底成没成」的凭据——所以必须与 focusRoot 同一次落盘。
+ */
 export function setMemberFolder(
   sub: StoredSession,
   folder: string | null,
-  identity?: MemberWorktreeIdentity
-): boolean {
+  identity?: import('../../shared/member-worktree-protocol').MemberWorktreeIdentity
+): void {
   const main = sub.parentId ? getSession(sub.parentId) : undefined
   const ref = main?.members?.find((m) => m.sessionId === sub.id)
-  if (!main || !ref || ref.removed) return false
-  if (!recoverMemberBindingTransaction(sub.id)) return false
-  invalidateMemberBindingRequest(sub.id)
-  const before = makeMemberBindingSnapshot(sub, ref.root ?? null)
-  const after = { focusRoot: folder, revision: (sub.memberBindingRevision ?? 0) + 1,
-    identity, recovery: undefined, mirrorRoot: folder }
-  const tx: MemberWorktreeBindingTransaction = {
-    operationId: randomUUID(), attemptedRoot: folder, at: Date.now(), phase: 'prepared', before, after
+  if (main && ref) {
+    ref.root = folder
+    saveProject(main.id)
   }
-  // 先写独立事务日志，崩溃或回滚失败后执行守卫据此 fail-closed，启动时核实两份JSON并恢复before。
-  if (!beginMemberBindingTransaction(sub.id, tx)) return false
-  sub.focusRoot = after.focusRoot
-  sub.memberBindingRevision = after.revision
-  if (identity) sub.memberWorktreeIdentity = identity; else delete sub.memberWorktreeIdentity
-  delete sub.memberWorktreeRecovery
-  sub.memberBindingTransaction = tx
-  ref.root = after.mirrorRoot
-  const forwardSaved = persistBindingSnapshot(sub, main, after, 'forward-sub', 'forward-main')
-  if (forwardSaved && bindingSnapshotMatches(sub, after) &&
-      verifyMemberMirrorSaved(main.id, sub.id, after.mirrorRoot)) {
-    // 清事务标记时journal仍是prepared，崩溃会安全回滚before；随后提交journal才可报告成功。
-    delete sub.memberBindingTransaction
-    saveProject(sub.id)
-    if (verifyMemberTransactionMarker(sub.id, undefined) && commitMemberBindingTransaction(sub.id, tx)) {
-      clearMemberBindingTransaction(sub.id)
-      publishSessionsChanged()
-      return true
-    }
-    sub.memberBindingTransaction = tx
-  }
-
-  restoreBindingMemory(sub, main, before)
-  sub.memberBindingTransaction = tx
-  const rolledBack = persistBindingSnapshot(sub, main, before, 'rollback-sub', 'rollback-main')
-  if (rolledBack && bindingSnapshotMatches(sub, before) && verifyMemberMirrorSaved(main.id, sub.id, before.mirrorRoot)) {
-    delete sub.memberBindingTransaction
-    saveProject(sub.id)
-    if (verifyMemberTransactionMarker(sub.id, undefined) && clearMemberBindingTransaction(sub.id)) {
-      publishSessionsChanged()
-      return false
-    }
-    sub.memberBindingTransaction = tx
-  }
-  // 无法确认的事务日志必须保留；主、子两端只要能持久化，就向守卫发布不可执行标记。
-  sub.memberBindingTransaction = tx
+  sub.focusRoot = folder
+  if (identity) sub.memberWorktreeIdentity = identity
+  else if (folder === null) delete sub.memberWorktreeIdentity
   saveProject(sub.id)
-  console.warn('[member-binding] 绑定事务无法核实，执行将 fail-closed，等待恢复', sub.id)
-  return false
+  publishSessionsChanged()
 }
 
 /**
@@ -478,15 +450,26 @@ function createMember(main: StoredSession, rawName: string, folder: string, duty
   if (name.length > 16 || /[\s@]/.test(name)) return fail('成员名请用 2～6 个字、不含空格和 @，如「前端」。')
   const mainRoot = main.focusRoot ?? null
   // 没给文件夹 = 不指定：成员没有工作目录（不跟随主对话），用户之后可以在成员的对话里为它选。
+  // 相对路径以主对话的当前工作目录为基准：挂载的工作区，没挂载时是主角色的默认工作区（同主对话的文件工具，见 role-home.ts）。
   let root: string | null = null
   if (folder.trim()) {
-    root = resolveMemberFolder(folder, mainRoot)
-    if (!root) return fail('当前对话没有挂载工作区，folder 请用绝对路径，或省略。')
+    root = resolveMemberFolder(folder, mainRoot ?? roleHome(main.personaId))
+    if (!root) return fail('folder 无法解析，请用绝对路径，或省略。')
     let isDir = false
     try {
       isDir = statSync(root).isDirectory()
     } catch {
       /* 不存在 */
+    }
+    // 相对路径（当前工作目录下的新分工，如 member-test/web）不存在就先建好，免得模型先失败一次再自己 mkdir 重试；
+    // 绝对路径不存在多半是写错了已有项目的位置，照旧报错。
+    if (!isDir && !isAbsolute(folder.trim())) {
+      try {
+        mkdirSync(root, { recursive: true })
+        isDir = true
+      } catch {
+        /* 建不了：照旧报错 */
+      }
     }
     if (!isDir) return fail(`文件夹不存在：${root}。请确认路径，或省略 folder。`)
   }
@@ -735,7 +718,7 @@ export async function mainMemberTool(
     // 不知道文件夹在哪：在对话里弹选择文件夹的卡片请用户点选（复用挂载卡），不让用户打字报路径。
     if (!folder && a.pick_folder === true) {
       const name = str('name').replace(/^@+/, '')
-      const picked = await requestMount(turnId, mainId, tc.name, '', name || '成员')
+      const picked = await requestMount(turnId, mainId, '', name || '成员')
       if (picked) folder = picked
     }
     return createMember(main, str('name'), folder, str('duty'))
