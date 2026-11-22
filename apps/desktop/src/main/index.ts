@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, Tray, Menu } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { getConfig, registerConfigIpc } from './services/config'
+import { getConfig, getDevaHome, registerConfigIpc } from './services/config'
 
 import { getAppIcon, getTrayIcon } from './services/tray-icon'
 import { registerWorkspaceIpc } from './services/workspace'
@@ -38,6 +38,7 @@ import { startScheduler } from './services/scheduler'
 import { registerRemoteIpc, stopAllChannels } from './services/remote'
 import { registerUpdaterIpc } from './services/updater'
 import { registerToastIdentity } from './services/portable'
+import { recordDevaHome } from './services/deva-home-registry'
 import { integrateAppImage } from './services/appimage'
 import {
   disposeAllPages,
@@ -335,6 +336,8 @@ if (!app.requestSingleInstanceLock()) {
   electronApp.setAppUserModelId('dev.lucel.devaplus')
   // 便携版没有开始菜单快捷方式：注册通知显示名与图标，否则通知标题是原始 ID（须早于第一条通知）
   registerToastIdentity('dev.lucel.devaplus')
+  // 数据根目录写进注册表：卸载器是独立进程，读不到 DEVA_HOME，只能靠这里留下的值
+  recordDevaHome(getDevaHome())
   // Linux AppImage：把 desktop 入口与图标写到用户目录，启动器里才找得到 DevaPlus（后台进行，不阻塞启动）
   void integrateAppImage()
   // Linux X11：窗口的 WM_CLASS 取自应用名（默认是 package.json 的 devaplus），与 devaplus.desktop 的
