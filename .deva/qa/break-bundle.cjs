@@ -125,7 +125,7 @@ console.log('\nD4 把密钥解析挪到替换用户数据之后…')
 {
   // 源码可能是 CRLF（Windows 检出），锚点要按实际换行符拼，否则永远找不到
   const nl = origImport.includes('\r\n') ? '\r\n' : '\n'
-  const call = `    const secretsPlan = await prepareSecrets(entries, manifest)${nl}`
+  const call = `    const secretsPlan = await prepareSecrets(secretsBuf, manifest)${nl}`
   const marker = `    report('replace', manifest.files.length, manifest.files.length)${nl}`
   if (!origImport.includes(call) || !origImport.includes(marker)) {
     bad('D4 注入失败', '找不到锚点')

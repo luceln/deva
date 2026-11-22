@@ -1,8 +1,7 @@
 import { existsSync, lstatSync, readlinkSync } from 'fs'
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'fs/promises'
+import { cp, lstat, mkdir, mkdtemp, readdir, rename, rm, symlink, utimes } from 'fs/promises'
 
 import { dirname, join } from 'path'
-import { unzipSync } from 'fflate'
 import {
   MANIFEST_NAME,
   SECRETS_ENC_NAME,
@@ -12,6 +11,7 @@ import {
   type SecretsRestore
 } from '../../shared/bundle-format'
 import { hashFile, isSafeEntryPath, validateManifest } from './bundle-manifest'
+import { extractTo, listEntriesFast, readEntriesFor } from './bundle-zip'
 import { getDevaHome, reloadConfigFromDisk } from './config'
 import { invalidateIndexOnly } from './chat-store'
 
@@ -193,37 +193,36 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
    */
   const stagingParent = dirname(home)
   let staging = ''
+  /** 密钥段的原始字节。第 2 步读取时顺带留下，避免第 5 步再解一遍包。 */
+  let secretsBuf: Buffer | null = null
 
   try {
-    // ---- 1. 读包并解压到内存 ----
-    //
-    // 这里用 unzipSync 而不是流式：包可能 600MB，全读进内存确实重。
-    // 但解压后**立刻**逐文件落盘并释放，且 fflate 的 sync 版对 600MB 的量级在桌面端可接受（约 1-2 秒）。
-    // 换取的是「解压前就能校验全部条目名」这个能力 —— 流式解压时条目是一个个来的，
-    // 发现 zip slip 时前面的字节可能已经写进磁盘了。
-    report('extract', 0, 1)
-    let zipBuf: Buffer
-    try {
-      zipBuf = await readFile(opts.bundlePath)
-    } catch (e) {
-      throw new RestoreError('extract-failed', `读不出备份包：${(e as Error)?.message ?? e}`)
-    }
-
-    let entries: Record<string, Uint8Array>
-    try {
-      entries = unzipSync(new Uint8Array(zipBuf))
-    } catch (e) {
-      throw new RestoreError(
-        'not-a-bundle',
-        `这个文件不是有效的备份包（解压失败）：${(e as Error)?.message ?? e}`
-      )
-    }
-
     /*
-     * 写任何文件之前先把所有条目名校验一遍。
-     * 不做「安全的先解、不安全的跳过」—— 那种部分成功比直接失败更糟，用户会以为还原完成了。
+     * ---- 1. 流式读包：第一遍只收条目名，验 zip slip ----
+     *
+     * 以前是 `unzipSync` 一把解完整包：600MB 的包峰值 RSS 实测 1872MB（包体积的 3.12 倍）。
+     * home 越大越危险，而"导出/还原"恰恰是数据最多时才要用的功能。
+     *
+     * 现在两遍都流式：
+     *   1. `listEntries` 只收名字（数据一个字节都不留），把 zip slip 全部验过；
+     *   2. 第 4 步 `extractTo` 边解边写 staging，一个条目写完就释放。
+     * 内存峰值从「包体积×3」降到「最大单条目」。
+     *
+     * 为什么必须先验名再解：部分成功比直接失败更糟 —— 用户会以为还原完成了。
      */
-    for (const name of Object.keys(entries)) {
+    report('extract', 0, 1)
+    /*
+     * 用 `listEntriesFast` 只读中央目录 —— 不解压任何数据。
+     * 流式的 `listEntries` 遇到不想要的条目仍然会走完 inflate 再丢弃，
+     * 600MB 的包光这一遍就白解 600MB（实测在 80MB 包上贡献了约 100MB 峰值）。
+     */
+    const listed = await listEntriesFast(opts.bundlePath)
+    if (!listed) {
+      throw new RestoreError('not-a-bundle', '这个文件不是有效的 zip（找不到中央目录），不是本应用导出的备份包')
+    }
+    const names = listed.names
+
+    for (const name of names) {
       if (!isSafeEntryPath(name)) {
         throw new RestoreError('unsafe-path', `备份包里含不安全的路径：${name}`)
       }
@@ -231,9 +230,18 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
     report('extract', 1, 1)
 
     // ---- 2. 校验清单 ----
-    const manifestRaw = entries[MANIFEST_NAME]
-    if (!manifestRaw) {
+    if (!names.includes(MANIFEST_NAME)) {
       throw new RestoreError('not-a-bundle', '备份包里没有 manifest.json，不是本应用导出的包')
+    }
+    let manifestRaw: Buffer
+    try {
+      const small = await readEntriesFor(opts.bundlePath, [MANIFEST_NAME, SECRETS_ENC_NAME])
+      const got = small.get(MANIFEST_NAME)
+      if (!got) throw new Error('manifest.json 读不出来')
+      manifestRaw = got
+      secretsBuf = small.get(SECRETS_ENC_NAME) ?? null
+    } catch (e) {
+      throw new RestoreError('not-a-bundle', `读不出备份包清单：${(e as Error)?.message ?? e}`)
     }
     let manifest: BundleManifest
     try {
@@ -269,16 +277,27 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
     const stageHome = join(staging, 'home')
     await mkdir(stageHome, { recursive: true })
 
+    /*
+     * 解压 + 逐文件验哈希，同一次流式遍历里做完。
+     *
+     * 先解到 staging 而不是直接写 home：哈希对不上时要能干净退出，不能留下半套已覆盖的数据。
+     */
+    const want = new Set(manifest.files.map((f) => `home/${f.path}`))
     report('verify', 0, manifest.files.length)
-    for (let i = 0; i < manifest.files.length; i++) {
-      const f = manifest.files[i]
-      const data = entries[`home/${f.path}`]
-      if (!data) {
+    try {
+      await extractTo(opts.bundlePath, staging, want, (done, total) => {
+        if (done % 32 === 0 || done === total) report('verify', done, total)
+      })
+    } catch (e) {
+      throw new RestoreError('extract-failed', `解压备份包失败：${(e as Error)?.message ?? e}`)
+    }
+
+    // 逐个核对哈希：缺文件与内容不符分开报，用户能据此判断是包坏了还是传输丢了
+    for (const f of manifest.files) {
+      const abs = join(stageHome, f.path)
+      if (!existsSync(abs)) {
         throw new RestoreError('corrupt', `备份包缺少清单里列出的文件：${f.path}`)
       }
-      const abs = join(stageHome, f.path)
-      await mkdir(dirname(abs), { recursive: true })
-      await writeFile(abs, data)
       const got = await hashFile(abs)
       if (got !== f.sha256) {
         throw new RestoreError(
@@ -289,7 +308,6 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
           )}…。包可能已损坏。`
         )
       }
-      if (i % 32 === 0) report('verify', i, manifest.files.length)
     }
     report('verify', manifest.files.length, manifest.files.length)
 
@@ -304,7 +322,7 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
      * 这条是 `verify-bundle-real.cjs` 的 E14 抓出来的。
      */
     report('secrets', 0, 1)
-    const secretsPlan = await prepareSecrets(entries, manifest)
+    const secretsPlan = await prepareSecrets(secretsBuf, manifest)
     report('secrets', 1, 1)
 
     // ---- 6. 替换 home 内容 ----
@@ -342,12 +360,33 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
       const f = manifest.files[i]
       const dst = join(home, f.path)
       await mkdir(dirname(dst), { recursive: true })
-      await cp(join(stageHome, f.path), dst, { force: true })
+      /*
+       * 用 `rename` 而不是 `cp`。
+       *
+       * staging 就建在 home 的**同级目录**（见上面 `stagingParent` 的选择），所以两者在
+       * 同一个卷上，rename 是原子的、不搬字节。换成 cp 等于把整包数据再复制一遍：
+       * 80MB 的包实测让峰值 RSS 从「单条目量级」涨到 2.08×，纯属白花。
+       *
+       * 跨卷时 rename 会抛 EXDEV（例如用户把 DEVA_HOME 指到另一个盘后又改了主意），
+       * 那时退回 cp —— 这种边缘情况才值得付复制的代价。
+       */
+      const src = join(stageHome, f.path)
+      try {
+        await rename(src, dst)
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException)?.code === 'EXDEV') {
+          await cp(src, dst, { force: true })
+        } else {
+          throw e
+        }
+      }
       /*
        * 统一刷 mtime —— 这一步不能省。
        *
        * 三个清扫器全部按 mtime 判过期：checkpoints 30 天（`checkpoints.ts:56-58`）、
-       * media 1 小时（`media-store.ts:28`）、subagents 1 小时。而 `cp` 会**保留源 mtime**。
+       * media 1 小时（`media-store.ts:28`）、subagents 1 小时。
+       * `rename` 会**保留源的 mtime**（staging 里那份是解压时写的，时间是对的，但它可能是
+       * 旧系统时钟或用户改过系统时间），所以仍然显式刷一遍。
        * 代码里记录过真实事故（`importer-assoc.ts:15-17`）：源数据放了 60 天再导入，
        * 2219 个 checkpoint 在导入后**第一次启动就被全删**。
        */
@@ -438,13 +477,12 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
  * 这样"包坏了"能在覆盖用户数据之前就被发现。
  */
 async function prepareSecrets(
-  entries: Record<string, Uint8Array>,
+  enc: Buffer | null,
   manifest: BundleManifest
 ): Promise<string | null> {
-  const enc = entries[SECRETS_ENC_NAME]
   if (!enc || !manifest.hasSecrets) return null
 
-  const plain = Buffer.from(enc).toString('utf8')
+  const plain = enc.toString('utf8')
   if (!plain.trim()) return null
 
   try {

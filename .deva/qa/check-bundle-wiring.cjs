@@ -114,8 +114,18 @@ need('B4c 拒绝绝对路径', srcManifest, /p\.startsWith\('\/'\)/, '没拒绝�
 need(
   'B4d 解压前校验全部条目名',
   srcImport,
-  /for \(const name of Object\.keys\(entries\)\)[\s\S]{0,200}isSafeEntryPath\(name\)/,
+  /for \(const name of names\)[\s\S]{0,200}isSafeEntryPath\(name\)/,
   '没在写文件前校验条目名'
+)
+/*
+ * B4e：条目名必须来自**中央目录**而非解压结果，否则「先验名再落盘」只是形式 ——
+ * 流式解压时条目是一个个来的，验到危险条目时前面的字节已经写进磁盘了。
+ */
+need(
+  'B4e 条目名来自中央目录（未解压数据）',
+  srcImport,
+  /const listed = await listEntriesFast\(/,
+  '没有用 listEntriesFast 读中央目录，可能仍在整包解压'
 )
 
 // ── B5 finally 清理 ──
@@ -183,7 +193,7 @@ forbid(
  * 用户剩下的唯一退路是那份自动备份。
  */
 {
-  const iPrepare = srcImport.indexOf('prepareSecrets(entries, manifest)')
+  const iPrepare = srcImport.indexOf('prepareSecrets(secretsBuf, manifest)')
   const iReplace = srcImport.indexOf("report('replace', 0, manifest.files.length)")
   if (iPrepare < 0 || iReplace < 0) fail('B9g 密钥解析在替换之前', '找不到判据锚点')
   else if (iPrepare < iReplace) pass('B9g 密钥解析在替换用户数据之前')

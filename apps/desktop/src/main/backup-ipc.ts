@@ -1,10 +1,9 @@
 import { ipcMain, dialog, type BrowserWindow } from 'electron'
-import { readFile } from 'fs/promises'
-import { unzipSync } from 'fflate'
 import { MANIFEST_NAME, SECRETS_ENC_NAME, type RestoreProgress } from '../shared/bundle-format'
 import { exportBundle } from './services/bundle-export'
 import { restoreBundle, RestoreError } from './services/bundle-import'
 import { validateManifest } from './services/bundle-manifest'
+import { listEntriesFast, readEntriesFor } from './services/bundle-zip'
 import { summarizeExcluded } from './services/bundle-manifest'
 import { acquireLock, releaseLock } from './importer-lock'
 import { getDevaHome } from './services/config'
@@ -125,11 +124,18 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
 
     const p = picked.filePaths[0]
     try {
-      const buf = await readFile(p)
-      const entries = unzipSync(new Uint8Array(buf))
-      const raw = entries[MANIFEST_NAME]
+      /*
+       * 只取 manifest 与密钥段这两个小条目，**不整包解压**。
+       *
+       * 以前是 `readFile` + `unzipSync`：用户只是想「看看里面有什么」，就要把 600MB 包
+       * 连同解压结果全塞进内存（实测峰值 1872MB）。探包这一步完全不需要包里的数据文件。
+       */
+      const listed = await listEntriesFast(p)
+      if (!listed) return { ok: false, code: 'not-a-bundle', message: '这个文件不是有效的 zip，不是本应用导出的备份包' }
+      const small = await readEntriesFor(p, [MANIFEST_NAME, SECRETS_ENC_NAME])
+      const raw = small.get(MANIFEST_NAME)
       if (!raw) return { ok: false, code: 'not-a-bundle', message: '这个包里没有 manifest.json，不是本应用导出的备份包' }
-      const parsed = validateManifest(JSON.parse(Buffer.from(raw).toString('utf8')))
+      const parsed = validateManifest(JSON.parse(raw.toString('utf8')))
       if (!parsed.ok) return { ok: false, code: 'not-a-bundle', message: parsed.reason }
       const m = parsed.manifest
       return {
@@ -140,7 +146,7 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
         platform: m.platform,
         files: m.files.length,
         bytes: m.files.reduce((a, f) => a + f.size, 0),
-        hasSecrets: m.hasSecrets && Boolean(entries[SECRETS_ENC_NAME]),
+        hasSecrets: m.hasSecrets && Boolean(small.get(SECRETS_ENC_NAME)),
         excluded: m.excluded,
         symlinks: m.symlinks.length
       }
