@@ -43,12 +43,15 @@ export interface WorktreeRecord {
   /** creating = 创建中（崩溃恢复用）；active = 可用。 */
   phase: 'creating' | 'active'
   /**
-   * Step 0 的探测结果，**失败清理的唯一准入凭据**。
-   *
-   * 为什么不直接假设 false：Step 0 保证拒绝已存在的情形，但崩溃恢复时 Step 0 早已不在内存里，
-   * 清理算法不能依赖「Step 0 跑过了」这个隐含前提（spec §3.2）。
+   * 创建意图与持久化归属凭据。不存在快照不足以证明资产属于本请求；
+   * 清理前还必须校验 ownership（独占目录身份 + 分支 CAS reflog），旧记录无凭据时保留告警。
    */
-  intent: { branchExistedAtStart: boolean; pathExistedAtStart: boolean }
+  intent: {
+    branchExistedAtStart: boolean
+    pathExistedAtStart: boolean
+    /** 独占 mkdir 的目录身份与原子创建分支的 reflog 标记；旧记录无凭据时只告警不破坏资产。 */
+    ownership?: { token: string; baseSha: string; dev: number; ino: number; birthtimeMs: number }
+  }
   deps: DepsState
   depsDetail?: string
   depsUpdatedAt?: number
@@ -82,16 +85,22 @@ function ensureLoaded(): Map<string, WorktreeRecord> {
   try {
     const raw = readFileSync(filePath(), 'utf8')
     const parsed = JSON.parse(raw) as { schemaVersion?: unknown; records?: unknown }
-    const list = Array.isArray(parsed?.records) ? (parsed.records as WorktreeRecord[]) : []
+    if (parsed?.schemaVersion !== SCHEMA || !Array.isArray(parsed.records))
+      throw new Error('无法识别工作区记录格式')
+    const list = parsed.records as WorktreeRecord[]
+    let invalidRecord = false
     for (const rec of list) {
-      // 逐条校验：坏记录跳过而不是整份报废（一份文件里有一条坏，不该让其余全部消失）
-      if (!rec || typeof rec !== 'object') continue
-      if (typeof rec.path !== 'string' || typeof rec.compareKey !== 'string') continue
-      if (typeof rec.branch !== 'string' || typeof rec.baseSha !== 'string') continue
-      if (rec.phase !== 'creating' && rec.phase !== 'active') continue
+      // 可展示其余有效记录，但不能把无法识别的记录当成“路径未占用”再覆盖写盘。
+      if (!rec || typeof rec !== 'object' || typeof rec.path !== 'string' ||
+          typeof rec.compareKey !== 'string' || typeof rec.repoRoot !== 'string' ||
+          typeof rec.branch !== 'string' || typeof rec.baseSha !== 'string' ||
+          (rec.phase !== 'creating' && rec.phase !== 'active')) {
+        invalidRecord = true
+        continue
+      }
       map.set(rec.compareKey, rec)
     }
-    loadState = 'ok'
+    loadState = invalidRecord ? 'corrupt' : 'ok'
   } catch (e) {
     if ((e as NodeJS.ErrnoException)?.code === 'ENOENT') {
       loadState = 'absent'

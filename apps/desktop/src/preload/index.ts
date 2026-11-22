@@ -42,6 +42,17 @@ import type {
   ContextUsage
 } from '../shared/chat-protocol'
 import type { ConfigChangedEvent, ConfigSetResult } from '../shared/config-protocol'
+import type {
+  MemberWorktreeBindReq,
+  MemberWorktreeBindResult,
+  MemberWorktreeCancelReq,
+  MemberWorktreeCancelResult,
+  MemberWorktreePrecheckReq,
+  MemberWorktreePrecheckResult,
+  MemberWorktreeRetryBindReq,
+  MemberWorktreeStateReq,
+  MemberWorktreeStateResult
+} from '../shared/member-worktree-protocol'
 // 二开独有的两块通道独立成模块（上游没有这些功能，搬出去可避免上游改动本文件时冲突）。
 import { importApi } from './import'
 import { worktreeApi } from './worktree'
@@ -933,6 +944,22 @@ const api = {
     /** 切换本对话模型并立即落库（不等下一次发送）。 */
     setModel: (req: ChatSetModelRequest): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('chat:set-model', req),
+    /*
+     * 成员工作区（给成员单独开一个 git worktree 当工作目录）。
+     *
+     * 五条通道的判定一律在主进程：预检、能不能绑、目录是否被换掉，都在那边算完再回。
+     * 渲染层只消费结果——两处各算一遍必然漂移，用户看到的是「界面说能用、绑的时候被拒」。
+     */
+    memberWorktreePrecheck: (req: MemberWorktreePrecheckReq): Promise<MemberWorktreePrecheckResult> =>
+      ipcRenderer.invoke('chat:member-worktree-precheck', req),
+    memberWorktreeBind: (req: MemberWorktreeBindReq): Promise<MemberWorktreeBindResult> =>
+      ipcRenderer.invoke('chat:member-worktree-bind', req),
+    memberWorktreeCancel: (req: MemberWorktreeCancelReq): Promise<MemberWorktreeCancelResult> =>
+      ipcRenderer.invoke('chat:member-worktree-cancel', req),
+    memberWorktreeState: (req: MemberWorktreeStateReq): Promise<MemberWorktreeStateResult> =>
+      ipcRenderer.invoke('chat:member-worktree-state', req),
+    memberWorktreeRetryBind: (req: MemberWorktreeRetryBindReq): Promise<MemberWorktreeBindResult> =>
+      ipcRenderer.invoke('chat:member-worktree-retry-bind', req),
     /**
      * 模型引用体检：本对话（主对话 + 未移除成员）里引用已失效的会话清单。只读。
      * 判定只在主进程做（可用性规则唯一一份），渲染层只消费结果、不复算。

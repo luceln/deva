@@ -39,6 +39,11 @@ import type { TodoEntry } from './todos'
  */
 
 export interface StoredSession {
+  /** 用户目录绑定的持久化版本；缺省兼容旧会话为 0。 */
+  memberBindingRevision?: number
+  memberWorktreeIdentity?: import('../../shared/member-worktree-protocol').MemberWorktreeIdentity
+  memberWorktreeRecovery?: import('../../shared/member-worktree-protocol').MemberWorktreeRecovery
+  memberBindingTransaction?: import('./member-binding-transaction').MemberWorktreeBindingTransaction
   id: string
   title: string
   createdAt: number
@@ -636,6 +641,75 @@ export function saveOutcome(id: string): SaveOutcome {
 /** 布尔投影：`saved` 以外都为 false（索引待重建对「列表能不能看到」在当下仍算不完整）。 */
 export function save(id: string): boolean {
   return saveOutcome(id) === 'saved'
+}
+
+/**
+ * 成员工作区绑定：读盘核对用。
+ *
+ * 这几条都是「**以磁盘为准**」的校验，不是读内存缓存：绑定过程中任何一步崩掉，
+ * 内存里的状态可能已经改了而盘上没落，只有重新读盘才知道真实结果。
+ * 调用方据此决定是「重试 / 回滚 / 让用户重来」，所以返回值必须是磁盘事实。
+ */
+export interface MemberBindingDiskSnapshot {
+  focusRoot: string | null
+  revision: number
+  identity?: import('../../shared/member-worktree-protocol').MemberWorktreeIdentity
+  recovery?: import('../../shared/member-worktree-protocol').MemberWorktreeRecovery
+  transaction?: import('./member-binding-transaction').MemberWorktreeBindingTransaction
+}
+
+function readMemberBindingSnapshot(sessionId: string): MemberBindingDiskSnapshot | null {
+  try {
+    const disk = JSON.parse(readFileSync(fileForId(sessionId), 'utf8')) as StoredSession
+    return {
+      focusRoot: disk.focusRoot ?? null,
+      revision: disk.memberBindingRevision ?? 0,
+      identity: disk.memberWorktreeIdentity,
+      recovery: disk.memberWorktreeRecovery,
+      transaction: disk.memberBindingTransaction
+    }
+  } catch {
+    return null
+  }
+}
+
+export function verifyMemberBindingSnapshot(sessionId: string, expected: MemberBindingDiskSnapshot): boolean {
+  const actual = readMemberBindingSnapshot(sessionId)
+  return (
+    !!actual &&
+    JSON.stringify([actual.focusRoot, actual.revision, actual.identity ?? null, actual.recovery ?? null]) ===
+      JSON.stringify([expected.focusRoot, expected.revision, expected.identity ?? null, expected.recovery ?? null])
+  )
+}
+
+export function verifyMemberTransactionMarker(
+  sessionId: string,
+  expected: StoredSession['memberBindingTransaction']
+): boolean {
+  try {
+    const disk = JSON.parse(readFileSync(fileForId(sessionId), 'utf8')) as StoredSession
+    return JSON.stringify(disk.memberBindingTransaction ?? null) === JSON.stringify(expected ?? null)
+  } catch {
+    return false
+  }
+}
+
+export function verifyMemberBindingSaved(s: StoredSession): boolean {
+  return verifyMemberBindingSnapshot(s.id, {
+    focusRoot: s.focusRoot ?? null,
+    revision: s.memberBindingRevision ?? 0,
+    identity: s.memberWorktreeIdentity,
+    recovery: s.memberWorktreeRecovery
+  })
+}
+
+export function verifyMemberMirrorSaved(mainId: string, subId: string, root: string | null): boolean {
+  try {
+    const disk = JSON.parse(readFileSync(fileForId(mainId), 'utf8')) as StoredSession
+    return disk.members?.some((m) => m.sessionId === subId && m.root === root) === true
+  } catch {
+    return false
+  }
 }
 
 /** 全部会话清单（无分桶——对话优先外壳一次列全部，按 updatedAt 倒序）。 */

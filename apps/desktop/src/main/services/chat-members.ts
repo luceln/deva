@@ -413,7 +413,19 @@ export function markMemberSetting(sub: StoredSession, field: 'modelSet' | 'effor
 /**
  * 成员会话里挂载 / 卸载文件夹（null = 卸载，成员没有文件夹）：同步写回主对话名单（名单随消息下发，主智能体会收到更新）。
  */
-export function setMemberFolder(sub: StoredSession, folder: string | null): void {
+/**
+ * 改成员的目录。
+ *
+ * @param folder 新的 focusRoot；`null` = 解绑。
+ * @param identity 成员工作区身份（checkoutRoot / repoRoot / branch / relativePath）。
+ *   只有「绑到一个独立 worktree」时才给；普通目录绑定不给。它落进 `memberWorktreeIdentity`，
+ *   是绑定事务崩溃恢复时判断「这条绑定到底成没成」的凭据——所以必须与 focusRoot 同一次落盘。
+ */
+export function setMemberFolder(
+  sub: StoredSession,
+  folder: string | null,
+  identity?: import('../../shared/member-worktree-protocol').MemberWorktreeIdentity
+): void {
   const main = sub.parentId ? getSession(sub.parentId) : undefined
   const ref = main?.members?.find((m) => m.sessionId === sub.id)
   if (main && ref) {
@@ -421,6 +433,8 @@ export function setMemberFolder(sub: StoredSession, folder: string | null): void
     saveProject(main.id)
   }
   sub.focusRoot = folder
+  if (identity) sub.memberWorktreeIdentity = identity
+  else if (folder === null) delete sub.memberWorktreeIdentity
   saveProject(sub.id)
   publishSessionsChanged()
 }
