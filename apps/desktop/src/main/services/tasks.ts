@@ -76,18 +76,27 @@ function normalizeRecord(t: TaskRecord): TaskRecord {
   }
 }
 
-/** 原子回写 tasks.json + 广播 tasks:changed（所有 CRUD 变更的唯一落盘点）。 */
-function persist(): void {
+/**
+ * 原子回写 tasks.json + 广播 tasks:changed（所有 CRUD 变更的唯一落盘点）。
+ *
+ * 返回是否真的落盘。以前一律 void + 静默吞异常：内存态改了、计划列表界面也刷新了，磁盘上还是旧内容，
+ * 重启后「任务又用回旧模型」。批量替换那条路会把结果并进报告，故必须能回传。
+ * 其余调用方不检查返回值是可接受的（它们的语义是「尽快存」，不是向用户承诺某个批量操作已完成）。
+ */
+function persist(): boolean {
   const file = tasksFile()
   const payload: TasksFile = { version: 1, tasks: [...cache.values()] }
+  let ok = true
   try {
     const tmp = `${file}.tmp`
     writeFileSync(tmp, JSON.stringify(payload, null, 2), 'utf8')
     renameSync(tmp, file)
   } catch {
-    /* 落盘失败静默：内存态仍可用，下次成功保存即自愈 */
+    ok = false
+    /* 落盘失败：内存态仍可用，下次成功保存即自愈（但调用方可据此如实报告） */
   }
   emitChanged()
+  return ok
 }
 
 const changeListeners = new Set<() => void>()
@@ -317,7 +326,7 @@ export function setTaskSessionPurger(fn: ((sessionId: string) => void) | null): 
  * 任务对话里切换了模型（chat:set-model）：同步为任务的模型——两边以同一个为准（反向见 updateTask）。
  * 空串 = 跟随全局默认（modelRef null）。不是任务对话 / 没变化则什么都不做。
  */
-export function syncTaskModel(sessionId: string, modelRef: string): void {
+export function syncTaskModel(sessionId: string, modelRef: string): boolean {
   ensureLoaded()
   const ref = modelRef || null
   for (const t of cache.values()) {
@@ -325,10 +334,13 @@ export function syncTaskModel(sessionId: string, modelRef: string): void {
     if (t.auth.modelRef !== ref) {
       t.auth = sanitizeAuth({ ...t.auth, modelRef: ref })
       t.updatedAt = Date.now()
-      persist()
+      return persist()
     }
-    return
+    // 已经是这个值：没有要写的东西，算成功。
+    return true
   }
+  // 不是任务对话：没有绑定需要同步，按成功处理（调用方只关心「绑定有没有落实」）。
+  return true
 }
 
 /**

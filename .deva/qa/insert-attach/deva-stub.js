@@ -12,8 +12,38 @@
  * 本用例不验浏览器等功能，故把 `BrowserCapsule` 整个替换掉了（见 stub-browsercapsule.ts），
  * 不让那些分支有机会被走到。
  */
+
+/*
+ * 语言：默认钉成 zh-CN，让本地与 CI 跑的是同一个界面语言。
+ *
+ * i18n 的 detectLocale 依次看 window.deva.config.getSync().locale → localStorage → navigator.language，
+ * 所以这里三层都钉：config 桩显式返回 zh-CN，localStorage 清掉（本机可能残留上次的选择），
+ * navigator.language 也定义成 zh-CN（万一 config 桩被绕过）。
+ *
+ * 但断言本身**不再依赖** zh-CN：test.ts 从词条表取当前 locale 的期望文案，所以
+ * `?locale=en` 打开页面也能 6/6（run.cjs 用 DEVA_TEST_LOCALE=en 走这条）。
+ */
+const TEST_LOCALE = new URLSearchParams(location.search).get('locale') || 'zh-CN'
+try {
+  Object.defineProperty(navigator, 'language', { get: () => TEST_LOCALE, configurable: true })
+  Object.defineProperty(navigator, 'languages', { get: () => [TEST_LOCALE], configurable: true })
+} catch {
+  /* 定义失败就退回 config 桩 */
+}
+try {
+  localStorage.removeItem('deva.locale')
+} catch {
+  /* ignore */
+}
+
 const real = {
   platform: 'win32',
+  /** i18n 的 detectLocale 读这里；钉住语言，避免跟随跑测机器的系统语言。 */
+  config: {
+    getSync: () => ({ locale: TEST_LOCALE }),
+    get: async () => ({ locale: TEST_LOCALE }),
+    set: async () => undefined
+  },
   /** 粘贴 / 拖入落盘过的文件（断言用）。 */
   __pasted: [],
   /** `pickAttachments` 下一次返回什么。 */

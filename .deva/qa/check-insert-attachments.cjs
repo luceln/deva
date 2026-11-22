@@ -34,7 +34,9 @@ const esbuild = require('esbuild')
 const REPO = path.resolve(__dirname, '..', '..')
 const CHAT = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'store', 'chat.tsx')
 const COMPOSER = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'Composer.tsx')
-const MSG = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'i18n', 'messages.ts')
+// 词条不再从 `messages.ts` 的文本里抠：二开词条已搬到 `i18n/fork.ts`（由 messages.ts 深合并），
+// 扫文本会在拆分后静默失效。改读运行时值，见 lib/i18n-source。
+const { readI18n, checkKeys } = require('./lib/i18n-source.cjs')
 
 const passes = []
 const problems = []
@@ -51,13 +53,19 @@ const read = (p) => {
 
 const chat = read(CHAT)
 const comp = read(COMPOSER)
-const msg = read(MSG)
 for (const [p, v] of [
   [CHAT, chat],
-  [COMPOSER, comp],
-  [MSG, msg]
+  [COMPOSER, comp]
 ]) {
   if (v === null) bad('A0 读得到源码', p)
+}
+
+/** i18n 词条（运行时值）。读失败给 null，依赖它的检查会如实报红而不是静默跳过。 */
+let i18n = null
+try {
+  i18n = readI18n()
+} catch (e) {
+  bad('A0 读得到 i18n 词条', String(e && e.message))
 }
 
 /** 取一段文本中 `needle` 之后 `span` 字符的窗口。 */
@@ -66,7 +74,7 @@ const around = (text, needle, span = 900) => {
   return i === -1 ? null : text.slice(i, i + span)
 }
 
-if (chat !== null && comp !== null && msg !== null) {
+if (chat !== null && comp !== null && i18n !== null) {
   // ── A1：接口签名接受 attachments ──
   if (!/insert:\s*\(text:\s*string,\s*attachments\?:/.test(chat)) {
     bad('A1 insert 接口签名接受 attachments', '没有 `insert: (text: string, attachments?: ...)`')
@@ -77,7 +85,7 @@ if (chat !== null && comp !== null && msg !== null) {
   // ── A2：请求体带 attachments ──
   const insReq = around(chat, 'window.deva.chat.insert({', 700)
   if (!insReq) bad('A2 chat.insert 请求体带 attachments', '找不到调用')
-  else if (!/attachments:\s*atts\.length/.test(insReq)) {
+  else if (!/attachments:\s*atts\.length|attachments:\s*atts(?![\w$])/.test(insReq)) {
     bad('A2 chat.insert 请求体带 attachments', '请求体里没有 attachments')
   } else {
     ok('A2 chat.insert 请求体带 attachments', 'attachments: atts.length ? ... : undefined')
@@ -101,12 +109,12 @@ if (chat !== null && comp !== null && msg !== null) {
   // ── A4：insertNow 把附件交给 onInsert ──
   const insNow = around(comp, 'const insertNow', 1200)
   if (!insNow) bad('A4 insertNow 传附件给 onInsert', '找不到 insertNow')
-  else if (!/onInsert\(full,\s*toSendAttachments\(atts\)\)/.test(insNow)) {
+  else if (!/onInsert\(full,\s*(?:toSendAttachments\()?atts\)?/.test(insNow)) {
     bad('A4 insertNow 传附件给 onInsert', 'onInsert 没带附件')
-  } else if (!/atts\s*=\s*pending\.filter\(\(p\)\s*=>\s*p\.supported\)/.test(insNow)) {
-    bad('A4 insertNow 取受支持的附件', '没有 pending.filter(supported)')
+  } else if (!/atts\s*=\s*(?:sendable\(\)|pending\.filter\(\(p\)\s*=>\s*p\.supported\))/.test(insNow)) {
+    bad('A4 insertNow 取受支持的附件', '没有 sendable() 或 pending.filter(supported)')
   } else {
-    ok('A4 insertNow 传附件给 onInsert', 'onInsert(full, toSendAttachments(atts))')
+    ok('A4 insertNow 传附件给 onInsert', 'onInsert(full, atts)')
   }
 
   // ── A5：三个入口都不再在 streaming 时拦截 ──
@@ -133,16 +141,26 @@ if (chat !== null && comp !== null && msg !== null) {
   } else ok('A5 拖入不再被 streaming 挡住', '')
 
   // ── A6：restoreToComposer 接受附件 ──
-  if (!/export function restoreToComposer\(\s*sessionId: string,\s*text: string,\s*attachments\?: string\[\]\s*\)/.test(comp)) {
+  // 附件类型已从 `string[]` 升级为结构化的 `SendAttachment[]`（InsertAttachment 一路传下来），
+  // 且现在带默认值 `= []`。判据只要求「有这个参数且是附件数组」，不锁死具体类型名与默认值写法。
+  if (
+    !/export function restoreToComposer\(\s*sessionId: string,\s*text: string,\s*attachments\??\s*:\s*\w+\[\]\s*(?:=\s*\[\])?\s*\)/.test(
+      comp
+    )
+  ) {
     bad('A6 restoreToComposer 接受附件', '签名里没有 attachments')
-  } else if (!/mergeDraftAttachments\(/.test(around(comp, 'export function restoreToComposer', 1200) ?? '')) {
+  } else if (
+    // 「并回草稿」的实现在上游结构升级后换成了 `mergePicked(back, cur)`（按 path 去重、back 在前），
+    // 与旧 `mergeDraftAttachments` 语义相同。两者都算满足；关键是不能一个都没有。
+    !/mergePicked\(|mergeDraftAttachments\(/.test(around(comp, 'export function restoreToComposer', 1200) ?? '')
+  ) {
     bad('A6 restoreToComposer 接受附件', '没有把附件并回草稿')
   } else {
     ok('A6 restoreToComposer 接受附件', '')
   }
 
   // ── A7：withdraw 返回附件、调用点传回 ──
-  if (!/withdrawInserts:\s*\(\)\s*=>\s*Promise<\{ text: string; attachments: string\[\] \}>/.test(chat)) {
+  if (!/withdrawInserts:\s*\(\)\s*=>\s*Promise<\{ text: string; attachments: \w+\[\] \}>/.test(chat)) {
     bad('A7 withdrawInserts 返回附件', '返回类型仍只有 text')
   } else {
     ok('A7 withdrawInserts 返回附件', '')
@@ -155,7 +173,8 @@ if (chat !== null && comp !== null && msg !== null) {
     ok('A7 撤回时把附件传回输入框', 'restoreToComposer(sessionId, back.text, back.attachments)')
   }
   // 退回事件也带附件
-  if (!/cb\(sid,\s*ev\.text,\s*ev\.attachments\s*\?\?\s*\[\]\)/.test(chat)) {
+  // 实际写法是 `cb(sid, ev.text, ev.attachments)`（上游把 attachments 定为必填，不再需要 `?? []`）。
+  if (!/cb\(sid,\s*ev\.text,\s*ev\.attachments(\s*\?\?\s*\[\])?\s*\)/.test(chat)) {
     bad('A7 inserts_returned 事件把附件交给订阅者', '回调没带 ev.attachments')
   } else {
     ok('A7 inserts_returned 事件把附件交给订阅者', '')
@@ -167,10 +186,11 @@ if (chat !== null && comp !== null && msg !== null) {
   } else {
     ok('A8 界面说明「附件随这条插话带进去」', '')
   }
-  const hits = [...msg.matchAll(/withAttachments:\s*'([^']*)'/g)]
-  if (hits.length < 2) bad('A8 withAttachments 中英各一条', `只找到 ${hits.length} 条`)
-  else if (hits.some((h) => h[1].trim().length === 0)) bad('A8 withAttachments 非空', '有空串')
-  else ok('A8 withAttachments 中英各一条且非空', hits.map((h) => h[1].slice(0, 20)).join(' | '))
+  // 读运行时值：每个语言都必须有 `cf.insert.withAttachments` 且非空。
+  // （原实现扫文本找 `withAttachments: '…'` 两处，词条搬到 fork.ts 后会一处也找不到。）
+  const r = checkKeys(['cf.insert.withAttachments'])
+  if (!r.ok) bad('A8 withAttachments 中英各一条且非空', r.detail)
+  else ok('A8 withAttachments 中英各一条且非空', r.detail)
 }
 
 /*

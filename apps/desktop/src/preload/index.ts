@@ -10,6 +10,7 @@ import type {
   ChatSendRequest,
   ChatInsertRequest,
   ChatInsertResult,
+  TakenInserts,
   ChatCompactRequest,
   ChatCreateSessionRequest,
   ChatSetModelRequest,
@@ -40,21 +41,10 @@ import type {
   ModelSwapResult,
   ContextUsage
 } from '../shared/chat-protocol'
-import type { GateResult, ImportProgress, ImportReport } from '../shared/import-protocol'
 import type { ConfigChangedEvent, ConfigSetResult } from '../shared/config-protocol'
-import type {
-  WorktreeBriefView,
-  WorktreeCreateFail,
-  WorktreeCreateOk,
-  WorktreeCreateReq,
-  WorktreeInstallResult,
-  WorktreePrecheckFail,
-  WorktreePrecheckOk,
-  WorktreePrecheckReq,
-  WorktreeProgress,
-  WorktreeSizeUpdate,
-  WorktreeSnapshot
-} from '../shared/worktree-protocol'
+// 二开独有的两块通道独立成模块（上游没有这些功能，搬出去可避免上游改动本文件时冲突）。
+import { importApi } from './import'
+import { worktreeApi } from './worktree'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
 export type {
@@ -62,6 +52,7 @@ export type {
   ChatSendRequest,
   ChatInsertRequest,
   ChatInsertResult,
+  TakenInserts,
   ChatCompactRequest,
   ChatCreateSessionRequest,
   ChatSetModelRequest,
@@ -290,6 +281,8 @@ export interface PersonaRecord {
   avatarImage: string
   /** 偏好模型引用 `"providerId:modelId"`；空串 = 跟随主对话默认。 */
   model: string
+  /** 工作区（绝对路径；空串 = 用角色的默认工作区）。设了则绑定此角色的新对话一开始就挂载它。 */
+  workspace: string
   /** 正文 = 追加进主智能体系统提示词的内容。 */
   prompt: string
   enabled: boolean
@@ -305,28 +298,42 @@ export interface UserProfile {
   avatarImage: string
 }
 
-/** 记忆条目（全局 / 项目私有共用，与 services/memory.ts 对齐）。 */
+/** 记忆类型：user 用户 / feedback 做事方式 / project 进展 / reference 资料（与 services/memory.ts 对齐）。 */
+export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
+/** 记忆条目（全局 / 角色 / 项目共用，与 services/memory.ts 对齐）。 */
 export interface MemoryEntry {
   id: string
-  content: string
+  type: MemoryType
+  /** 一句话标题（进索引）。 */
+  title: string
+  /** 正文，可为空。 */
+  body: string
   createdAt: number
   updatedAt: number
 }
 export interface MemorySnapshot {
   entries: MemoryEntry[]
-  /** 当前总字数（与注入系统提示词同一口径）。 */
+  /** 当前索引总字数（与随消息下发同一口径）。 */
   used: number
-  /** 总字数上限：写入后超出即拒写。 */
+  /** 索引总字数上限：写入后超出即拒写。 */
   budget: number
   maxEntries: number
-  maxChars: number
+  maxTitle: number
+  maxBody: number
 }
+/** 记忆作用域：省略 = 全局；字符串 = 该工作区的项目记忆；`{ personaId }` = 该角色的记忆。 */
+export type MemoryScopeArg = string | { personaId: string }
 /**
  * 记忆写入的失败码（主进程 `services/memory.ts` 的 `MemoryErrorCode` 必须与这里一致）。
  *
  * `writeFailed` = 输入没问题但**没落盘**（磁盘满 / 无权限 / 文件被占）。与其余几个码性质不同：那些是
  * 「改一改输入就能写」，这个是「稍后重试」。界面要给它单独文案——漏了它会显示成 `cf.profile.err.writeFailed`
  * 原文（渲染层对未知码直接 `t(code)`）。
+ *
+ * `readFailed` = **读取**失败（文件被占用 / 无权限 / 半截 JSON）→ 为免覆盖盘上原有内容，主进程拒绝了本次写入。
+ * 与 `writeFailed` 分开：那条是「重试即可」，这条是「盘上有什么都不知道」，要用户先检查文件。
+ *
+ * `memory-changed` = 归纳期间这条记忆被改 / 被删，本次写入作废（与 `notFound` 分开：它曾经存在）。
  */
 export type MemoryErrorCode =
   | 'empty'
@@ -335,13 +342,63 @@ export type MemoryErrorCode =
   | 'budget'
   | 'notFound'
   | 'duplicate'
+  | 'badType'
   | 'writeFailed'
-  /**
-   * **读取**失败（文件被占用 / 无权限 / 半截 JSON）→ 为免覆盖盘上原有内容，主进程拒绝了本次写入。
-   * 与 `writeFailed` 分开：那条是「重试即可」，这条是「盘上有什么都不知道」，要用户先检查文件。
-   */
   | 'readFailed'
+  | 'memory-changed'
 export type MemoryIpcResult = { ok: true; snapshot: MemorySnapshot } | { ok: false; code: MemoryErrorCode }
+
+/**
+ * 「一键整理记忆」的结果（`memory:condense`）。
+ *
+ * ⚠️ 这是**破坏性操作**：会改 / 删用户的记忆条目。所以成功分支把「动了什么」全带出来——
+ * 界面必须如实显示，尤其是 `freedSpace === false` 时**不要说**「已腾出空间」。
+ *
+ * `ok: false` 的 `code`：
+ *  - `empty`：这个作用域还没有条目，没什么可整理；
+ *  - `model-unavailable`：没有可用的默认模型（不存在 / 被停用 / 密钥读不出来）。`reason` 已是一句
+ *    可直接显示的话，`detail` 是技术定位。这类**没有修改任何记忆**；
+ *  - `failed`：模型跑失败（网络 / 超时 / 返回不可解析 / 写盘失败）。同样没有修改记忆；
+ *  - `aborted`：被中止；
+ *  - `concurrent-change`：等待模型期间记忆被改 / 删 / 新增，**整轮没提交**（记忆未动），可再点一次；
+ *  - `over-limit`：模型给出的集合仍超限，未提交（记忆未动），需要先删几条再整理。
+ */
+export type MemoryCondenseResult =
+  | {
+      ok: true
+      before: { count: number; used: number }
+      after: { count: number; used: number }
+      /** 腾出多少字（负数表示反而变多）。 */
+      freed: number
+      /** 被改动或删除的旧条目数。 */
+      changed: number
+      /** 是否真的腾出了空间。`false` 时界面不能说「已腾出空间」。 */
+      freedSpace: boolean
+      /**
+       * 整理结果里被跳过的条目：等模型返回期间，用户改过（`modified`）或删掉（`deleted`）了这几条。
+       *
+       * 跳过的意思是「这次整理对这几条没生效」——已删除的不复活、已改动的不顶掉用户版本。
+       * 界面应如实提示，否则用户会以为整理没跑。
+       */
+      skipped: Array<{
+        id: string
+        reason: 'deleted' | 'modified'
+        /** 归纳结果原本想写成的样子（`null` = 归纳结果里没有这条，原本要删掉它）。 */
+        content: string | null
+        /** 当前存储里的样子（`deleted` 时为 `null`）。 */
+        current: string | null
+      }>
+      /** 用哪个模型做的（`providerId:modelId`）。 */
+      model: string
+    }
+  | {
+      ok: false
+      code: 'empty' | 'model-unavailable' | 'failed' | 'aborted' | 'concurrent-change' | 'over-limit' | 'readFailed'
+      reason: string
+      detail?: string
+      /** 只有 `concurrent-change` 带：被改动 / 删除 / 新增的条目 id。 */
+      changed?: string[]
+    }
 
 /** Agent 提示词新建/更新入参（有 id 覆盖，无 id 新建）。 */
 export interface PersonaUpsertInput {
@@ -350,6 +407,8 @@ export interface PersonaUpsertInput {
   description?: string
   avatar?: string
   model?: string
+  /** 工作区（空串 = 改回默认工作区；缺省 = 保持原值）。 */
+  workspace?: string
   prompt?: string
   enabled?: boolean
 }
@@ -746,21 +805,7 @@ const api = {
       return () => ipcRenderer.removeListener('skills:changed', listener)
     }
   },
-  /**
-   * 从原版 Deva（~/.deva）导入数据：服务商 / 角色 / 记忆 / 技能 / 会话 / 附件。
-   * 只补 DevaPlus 没有的，已存在的一律跳过 —— 天然幂等，点多少次结果一致；原版全程只读。
-   * probe 用于按钮置灰（原版在跑 / 找不到源），run 返回逐条结果，onProgress 订阅长任务进度。
-   */
-  import: {
-    probe: (): Promise<GateResult> => ipcRenderer.invoke('import:probe'),
-    run: (): Promise<ImportReport | { error: string }> => ipcRenderer.invoke('import:run'),
-    /** 订阅 import:progress（附件上百 MB，靠事件推进度而不是轮询），返回取消订阅函数。 */
-    onProgress: (cb: (p: ImportProgress) => void): (() => void) => {
-      const listener = (_e: unknown, p: ImportProgress): void => cb(p)
-      ipcRenderer.on('import:progress', listener)
-      return () => ipcRenderer.removeListener('import:progress', listener)
-    }
-  },
+  import: importApi,
   /** 本机用户资料（个人资料面板）：头像 spec 存 config.json，图片另存 ~/.deva-plus/profile/。 */
   profile: {
     get: (): Promise<UserProfile> => ipcRenderer.invoke('profile:get'),
@@ -772,15 +817,27 @@ const api = {
   },
   /**
    * 记忆：查看 / 增改删 / 清空，与模型的 memory_* 工具同一套校验。
-   * 末位可选 root：省略 = 全局记忆（~/.deva-plus/memory.json）；给出 = 该工作区的项目私有记忆（~/.deva-plus/projects/<key>/）。
+   * 末位可选 scope：省略 = 全局记忆（~/.deva-plus/memory.json）；字符串 = 该工作区的项目记忆（~/.deva-plus/projects/<key>/）；
+   * `{ personaId }` = 该角色的记忆（~/.deva-plus/personas/memory/<id>.json）。
    */
   memory: {
-    list: (root?: string): Promise<MemorySnapshot> => ipcRenderer.invoke('memory:list', root),
-    /** 无 id 新增，有 id 覆盖更新。 */
-    write: (content: string, id?: string, root?: string): Promise<MemoryIpcResult> =>
-      ipcRenderer.invoke('memory:write', content, id, root),
-    remove: (id: string, root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:delete', id, root),
-    clear: (root?: string): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', root)
+    list: (scope?: MemoryScopeArg): Promise<MemorySnapshot> => ipcRenderer.invoke('memory:list', scope),
+    /** 无 id 新增（type、title 必填），有 id 更新（省略的字段保持原值）。 */
+    write: (
+      input: { type?: MemoryType; title?: string; body?: string },
+      id?: string,
+      scope?: MemoryScopeArg
+    ): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:write', input, id, scope),
+    remove: (id: string, scope?: MemoryScopeArg): Promise<MemoryIpcResult> =>
+      ipcRenderer.invoke('memory:delete', id, scope),
+    clear: (scope?: MemoryScopeArg): Promise<MemoryIpcResult> => ipcRenderer.invoke('memory:clear', scope),
+    /**
+     * 用当前默认模型把已有条目精简一遍腾空间，**不新增任何内容**（二开独有，上游没有这个入口）。
+     *
+     * 破坏性（会改 / 删条目，归纳前自动备份）。模型不可用时**不会跑一半**——点下去就返回
+     * `code: 'model-unavailable'` 并说明原因。
+     */
+    condense: (scope?: MemoryScopeArg): Promise<MemoryCondenseResult> => ipcRenderer.invoke('memory:condense', scope)
   },
   /** Agent 提示词（全局 ~/.deva-plus/personas）：列出 / 读取 / 新建更新 / 删除 / 启停。 */
   personas: {
@@ -861,11 +918,11 @@ const api = {
     /** 回合进行中插入一条消息（见 ChatInsertRequest）。 */
     insert: (req: ChatInsertRequest): Promise<ChatInsertResult> => ipcRenderer.invoke('chat:insert', req),
     /**
-     * 撤回某对话全部待送达的插入消息，返回合并后的原文 + 附件（没有则为空串 / 空数组）。
+     * 撤回某对话全部待送达的插入消息，返回合并后的原文（没有则为空串）与附件（结构化，带 name / kind / size）。
      *
      * 附件必须一起回：用户插话发的截图不能因为点「撤回」就凭空消失。
      */
-    withdrawInserts: (sessionId: string): Promise<{ text: string; attachments: string[] }> =>
+    withdrawInserts: (sessionId: string): Promise<TakenInserts> =>
       ipcRenderer.invoke('chat:withdraw-inserts', sessionId),
     /** 手动压缩历史（/compact）：无后续模型轮，只回发 compacted + done 事件。 */
     compact: (req: ChatCompactRequest): Promise<{ turnId: string }> =>
@@ -1011,67 +1068,8 @@ const api = {
       return () => ipcRenderer.removeListener('chat:remote-change', listener)
     }
   },
-  /**
-   * git worktree 并行工作区。
-   *
-   * 判定一律在主进程（`main/services/worktree/`），渲染层只消费结果——两套规则迟早漂移，
-   * 而漂移的后果是静默的：界面说能建、主进程拒绝，或反过来。
-   */
-  worktree: {
-    /** 创建前探测（**无副作用**：不建目录、不建分支、不写记录）。 */
-    precheck: (req: WorktreePrecheckReq): Promise<WorktreePrecheckOk | WorktreePrecheckFail> =>
-      ipcRenderer.invoke('worktree:precheck', req),
-    /** 创建（Step 1 写意图 → Step 2 add → 失败清理 → Step 3 校验定稿）。 */
-    create: (req: WorktreeCreateReq): Promise<WorktreeCreateOk | WorktreeCreateFail> =>
-      ipcRenderer.invoke('worktree:create', req),
-    /**
-     * 全部已登记的工作区的**快照**（`state` / `deps` / `sessionCount` / `sizeBytes` / `lockHolder`
-     * 都由主进程算好）。
-     *
-     * `sizeBytes` 首次可能是 null（后台统计中）：算完主进程会推 `onChanged`，届时重取即可。
-     * 别在渲染层自己写「降级探测」——那只是 `onChanged` 没接上时的权宜，会让体积永远停在「统计中…」。
-     */
-    list: (): Promise<WorktreeSnapshot> => ipcRenderer.invoke('worktree:list'),
-    /**
-     * 安装依赖（「重试安装」/「重新安装」/「安装依赖」三个入口共用）。
-     *
-     * 立刻返回、不等安装完成（安装几分钟）：成功发起后进度走 `onProgress`，
-     * 终态（ready / failed）等 `onChanged` 重取列表。
-     */
-    installDeps: (path: string): Promise<WorktreeInstallResult> =>
-      ipcRenderer.invoke('worktree:install-deps', path),
-    /** 某个 focusRoot 对应的边界信息；不是工作区则 null。只用于显示标签。 */
-    brief: (focusRoot: string | null): Promise<WorktreeBriefView | null> =>
-      ipcRenderer.invoke('worktree:brief', focusRoot),
-    /**
-     * 订阅「列表该重取了」。
-     *
-     * 主进程在会改变快照的任何事之后发它：依赖装完、`sizeBytes` 后台算完、创建/删除成功。
-     * 少了它，`sizeBytes` 会永远停在 null（界面显示「统计中…」），用户以为体积算不出来。
-     */
-    onChanged: (cb: () => void): (() => void) => {
-      const listener = (): void => cb()
-      ipcRenderer.on('worktree:changed', listener)
-      return () => ipcRenderer.removeListener('worktree:changed', listener)
-    },
-    /**
-     * 订阅「某个工作区的体积算好了」（增量）。
-     *
-     * 收到后按 `compareKey` 就地把那一条的 `sizeBytes` 补上，**不要重拉列表**——
-     * 整表重拉一轮是 4N+1 次 git，后台逐步回填 N 个体积会让打开列表的开销翻倍。
-     */
-    onSize: (cb: (u: WorktreeSizeUpdate) => void): (() => void) => {
-      const listener = (_e: unknown, u: WorktreeSizeUpdate): void => cb(u)
-      ipcRenderer.on('worktree:size', listener)
-      return () => ipcRenderer.removeListener('worktree:size', listener)
-    },
-    /** 订阅长操作进度（等锁超过 5 秒 / 依赖安装中）。 */
-    onProgress: (cb: (p: WorktreeProgress) => void): (() => void) => {
-      const listener = (_e: unknown, p: WorktreeProgress): void => cb(p)
-      ipcRenderer.on('worktree:progress', listener)
-      return () => ipcRenderer.removeListener('worktree:progress', listener)
-    }
-  },
+  /** git worktree 并行工作区（二开独有）：通道实现在 ./worktree.ts，说明随模块搬走了。 */
+  worktree: worktreeApi,
   /** 集成终端：列出已装 shell、建 PTY、写输入、改尺寸、销毁；订阅数据/退出事件。 */
   terminal: {
     /** 本机可用 shell 清单（PowerShell / cmd / Git Bash / pwsh 等，按平台探测） */
@@ -1247,6 +1245,12 @@ const api = {
     /** 在系统文件管理器中显示并选中该文件。 */
     reveal: (sessionId: string, toolUseId: string, index: number): Promise<{ ok: boolean }> =>
       ipcRenderer.invoke('deliverables:reveal', sessionId, toolUseId, index)
+  },
+  /** 角色的默认工作区（没挂载工作区时的落点，见 main/services/role-home.ts）：角色编辑页用。 */
+  workspace: {
+    /** 角色的默认工作区路径（还没写过文件时 exists 为 false）。 */
+    roleHome: (personaId: string): Promise<{ path: string; exists: boolean }> =>
+      ipcRenderer.invoke('workspace:role-home', personaId)
   },
   /**
    * 检查更新（设置 → 关于）。状态由主进程持有，经 onState 推送；check / download / install 只负责触发。

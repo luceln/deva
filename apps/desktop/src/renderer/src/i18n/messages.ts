@@ -9,6 +9,24 @@ export interface MessageTree {
   [key: string]: string | MessageTree
 }
 
+/** 二开独有词条（设置 › 导入、设置 › 工作区）。单独成文件，合并上游时不再撞同一个大文件。 */
+import { forkEn, forkZhCN } from './fork'
+
+/**
+ * 深合并：把 fork 子树按层级并入基础字典，同层对象递归、叶子以 fork 为准。
+ *
+ * 必须是深合并而不是 `{ ...base, ...fork }`：`settings.import` 挂在 `settings` 下面，
+ * 浅合并会用 fork 的 `settings` 整个覆盖掉基础字典的 `settings`，把主题、语言、更新等词条一起丢掉。
+ */
+function mergeFork(base: MessageTree, fork: MessageTree): MessageTree {
+  const out: MessageTree = { ...base }
+  for (const [key, value] of Object.entries(fork)) {
+    const prev = out[key]
+    out[key] = typeof value === 'object' && typeof prev === 'object' ? mergeFork(prev, value) : value
+  }
+  return out
+}
+
 const zhCN: MessageTree = {
   app: { name: 'DevaPlus', tagline: '' },
   activity: {
@@ -234,22 +252,14 @@ const zhCN: MessageTree = {
         max: '不计成本地深想，最慢最贵'
       },
       on: '开启',
-      onHint: '开启思考（该模型无法设置思考等级）',
-      unsupported: '不支持'
+      onHint: '开启思考（该模型无法设置思考等级）'
     },
-    // 输入框模型面板：上下文占用 + 模型 / 思考等级入口（redesign/ModelPanel.tsx）
+    // 输入框上下文圆环与卡片（redesign/ContextRing.tsx）
     panel: {
-      context: '上下文',
+      context: '上下文容量',
       approx: '约 {n}',
-      used: '已用 {used} / 窗口 {window}',
-      left: '再用约 {n} 后自动压缩较早的对话',
-      soon: '下次发送时会先自动压缩较早的对话',
-      over: '已超出这个模型的窗口，下次发送时会先自动压缩较早的对话',
-      estimated: '估算值，下次发送后按实际用量更新',
-      autoCompact: '自动压缩',
-      empty: '发送第一条消息后显示上下文占用',
-      allProviders: '全部服务商',
-      providers: '服务商'
+      usage: '{used}/{window} ({pct})',
+      autoCompact: '自动压缩'
     },
     empty: '有什么可以帮你？',
     emptyHint: '描述任务，Deva 会读写项目文件、按需请求授权来完成。',
@@ -303,6 +313,7 @@ const zhCN: MessageTree = {
       memoryDelete: '删除记忆',
       todoWrite: '更新待办清单',
       presentFiles: '交付文件',
+      mountWorkspace: '挂载工作区',
       createMember: '添加成员',
       memberSend: '派给成员',
       memberStop: '中止成员任务',
@@ -329,6 +340,7 @@ const zhCN: MessageTree = {
       revealOther: '在文件夹中显示',
       copyPath: '复制路径',
       missing: '文件已不存在',
+      roleHome: '{name} 的工作区',
       expand: '展开其余 {n} 个',
       collapse: '收起',
       // 整张卡收起时标题后的摘要：{name}=首个文件名，{n}=总数，{rest}=其余个数
@@ -387,6 +399,7 @@ const zhCN: MessageTree = {
         memoryDelete: '已删除记忆',
         todoWrite: '已更新待办清单',
         presentFiles: '已交付',
+        mountWorkspace: '挂载工作区',
         createMember: '已添加成员',
         memberSend: '已交给',
         memberStop: '已中止',
@@ -439,6 +452,7 @@ const zhCN: MessageTree = {
         memoryDelete: '正在删除记忆',
         todoWrite: '正在更新待办清单',
         presentFiles: '正在交付',
+        mountWorkspace: '正在等你挂载工作区',
         createMember: '正在添加成员',
         memberSend: '正在交给',
         memberStop: '正在中止',
@@ -491,6 +505,7 @@ const zhCN: MessageTree = {
         memoryDelete: '删除记忆',
         todoWrite: '更新待办清单',
         presentFiles: '交付',
+        mountWorkspace: '挂载工作区',
         createMember: '添加成员',
         memberSend: '交给',
         memberStop: '中止',
@@ -535,8 +550,6 @@ const zhCN: MessageTree = {
         cancelled: '计划已取消'
       },
       mount: {
-        mounted: '已挂载工作区',
-        skipped: '未挂载工作区',
         memberPicked: '已为成员 {name} 选择文件夹',
         memberSkipped: '成员 {name} 未指定文件夹'
       }
@@ -681,15 +694,11 @@ const zhCN: MessageTree = {
       feedbackLabel: '回复'
     },
     mount: {
-      cardTitle: '需要挂载工作区',
-      reasonPath: '当前对话未挂载工作区，无法确定相对路径的落点：',
-      reasonScan: '当前对话未挂载工作区，扫描类操作没有默认的项目根可用。',
-      byTool: '触发于工具',
-      pick: '挂载工作区…',
+      // 模型调用 mount_workspace 时的挂载卡（问句缺省时用 ask）
+      ask: '要处理哪个文件夹？',
+      sub: '这个对话还没挂载工作区。挂载后在其中读写文件，并读取它的项目说明（AGENTS.md）。',
+      pick: '选择文件夹…',
       skip: '暂不挂载',
-      mounted: '已挂载',
-      skipped: '暂不挂载',
-      doneHint: '已挂载工作区：',
       // 为成员选择文件夹（create_member 的 pick_folder）
       memberTitle: '为成员「{name}」选择文件夹',
       memberHint: '选择它负责的文件夹，可以在任何位置。',
@@ -851,140 +860,6 @@ const zhCN: MessageTree = {
     models: '模型',
     about: '关于',
     version: '版本',
-    // 设置 › 导入：从原版 Deva 搬数据过来（一次性迁移）。文案里的「原版」指上游 Deva，本应用是 DevaPlus。
-    import: {
-      title: '导入',
-      desc: '把原版 Deva 里的对话、服务商、角色、记忆与技能搬到这里。只补本地没有的，已有的一律不动，重复执行也安全。',
-      unavailable: '当前版本还没接通导入通道，请重启应用后再试。',
-      source: '原版数据目录',
-      sourceHint: '只读，不会修改原版任何文件',
-      probing: '正在检查…',
-      overview: '原版数据',
-      overviewHint: '含应用自带的服务商与角色；实际只导入你自己加的那些',
-      gateRunning: '原版 Deva 正在运行，请先退出它再导入。',
-      gateNoSource: '没有找到原版 Deva 的数据目录，可能还没用过原版。',
-      recheck: '重新检查',
-      reprobe: '刷新状态',
-      run: '开始导入',
-      runAgain: '再次导入',
-      running: '正在导入…',
-      runFailed: '导入没能开始：',
-      stepHint: '复制期间请勿退出应用；已复制的部分下次会直接跳过。',
-      done: '导入完成',
-      doneWithFailures: '导入完成，但有 {n} 条失败',
-      noop: '无新增，跳过 {n} 个（之前已经导入过了）',
-      countCopied: '新增 {n}',
-      countSkipped: '跳过 {n}',
-      countFailed: '失败 {n}',
-      showDetail: '明细',
-      hideDetail: '收起',
-      moreDetail: '…还有 {n} 条，已省略',
-      failures: '失败条目',
-      failureCount: '{n} 条',
-      failureCountCapped: '共 {total} 条，显示前 {shown} 条',
-      failureExpand: '展开看全部 {n} 条',
-      failureCollapse: '收起，只看前几条',
-      failureHint: '这些条目没有被写入。记忆类失败通常是总量或条数已达上限——删掉几条不再需要的记忆后重新导入即可补齐。',
-      reason: {
-        budget: '记忆总量已达上限，拒写',
-        full: '记忆条数已达上限，拒写',
-        tooLong: '单条记忆超长，拒写',
-        missingRoot: '这个项目没有记录路径，无法确定归属，已跳过',
-        importedProviderMissing:
-          '导入的服务商没有留在配置里，可能被其他写入覆盖了，请重新导入一次补上',
-        configWriteFailed: '配置写盘失败，权限或磁盘异常',
-        linkFailed: '建立链接失败，可能缺少权限',
-        // 写目标失败（mkdir / 复制 / 建链接）。原始 Node 错误串（含本机绝对路径）只进后台日志，不进界面。
-        targetWriteFailed: '写入目标位置失败（权限、磁盘或路径异常），这一项没有导入',
-        noEncryption: '这台机器无法保存密钥，需要手动重填',
-        targetBlocked: '目标位置被同名文件夹或文件占住，没有写入',
-        targetUnreadable: '目标位置有个同名条目读不出来（可能被其他程序占用），没有覆盖它',
-        copyTruncated: '文件复制不完整（写入被中断），已丢弃半截副本，请重新导入一次',
-        sourceSecretsCorrupt: '原版密钥文件内容损坏、解析不了，密钥一个都没导入，请检查该文件',
-        sourceSecretsUnreadable: '原版密钥文件读不出来（可能被其他程序占用），密钥一个都没导入，请稍后重试',
-        sourceMcpUnreadable: '原版 MCP 配置文件读不出来（可能被其他程序占用），MCP 服务一个都没导入，请稍后重试',
-        sourceMcpCorrupt: '原版 MCP 配置文件内容损坏、解析不了，MCP 服务一个都没导入，请检查 mcp.json',
-        sourceMcpEnabledUnknown: 'MCP 服务已导入，但原版配置读不出来，无法得知它原本是开还是关——请到 MCP 页面按需打开',
-        mcpWriteFailed: 'MCP 配置没能写入本地文件（权限或磁盘异常），重启后这条配置会丢失',
-        mcpUnsafeId: '原版这个 MCP 服务的 id 不能用作配置键（含冒号或分隔符），没有导入。请在原版里改个名字后重导',
-        sourceConfigUnreadable: '原版配置文件读不出来（可能被占用），服务商一个都没能导入，请稍后重试',
-        sourceConfigCorrupt: '原版配置文件内容损坏、解析不了，服务商一个都没能导入，请检查 config.json',
-        sourceMemoryUnreadable: '原版记忆文件读不出来（可能被占用），这个范围下的记忆没有导入，请稍后重试',
-        sourceMemoryCorrupt: '原版记忆文件内容损坏、解析不了，这个范围下的记忆没有导入，请检查 memory.json',
-        sourceDirUnreadable: '原版这个目录读不出来，里面的数据一个都没有导入。请检查权限，或关掉占用它的程序后重新导入',
-        sourceFileUnreadable: '原版这个文件读不出来（可能被占用），这一条没有导入。请稍后重新导入一次',
-        sourceNotAFile: '原版这个位置不是普通文件（可能是同名文件夹占了位置），这一条搬不了。请检查原版数据',
-        secretsWriteFailed: '密钥没能写入本地密钥文件（权限或磁盘异常）',
-        secretsStoreUnreadable:
-          '本地密钥文件本身读不出来（内容损坏或被占用），为避免覆盖掉里面的其它密钥，这次一条都没写。请检查 secrets.json',
-        avatarCopyFailed: '角色头像没能复制，角色本身已导入，可以使用'
-      },
-      // 密钥行的附加说明（见 ImportPane 的 secretsRow）。{n} 是条数。
-      secretNote: {
-        noEncryption: '这台机器存不了密钥，请手动重填 {n} 个',
-        invalid: '{n} 个密钥在源里是空值或坏值',
-        skipped: '{n} 个已存在，保留本地',
-        ignored: '{n} 个不适用，已忽略',
-        failed: '{n} 个没能写入',
-        rekeyed: '其中 {n} 条之前用不了，这次修好了'
-      },
-      // 密钥明细里按分类列 id 时的分组标题
-      secretGroup: {
-        noEncryption: '需手动重填',
-        invalid: '源里是空值',
-        skipped: '已存在，保留本地',
-        ignored: '不适用',
-        failed: '写入失败',
-        rekeyed: '已修好'
-      },
-      // 「N 条密钥需要重新填写」：面板级警告，不是失败。{n} 是条数。
-      unrecoverable: {
-        title: '{n} 条密钥需要重新填写',
-        hint: '这几条是原版加密的，本应用读不出来。去「设置 › 模型」把对应的密钥重新填一遍就能用；别的都已导入，不用重来。',
-        more: '还有 {n} 条',
-        goSettings: '去设置 › 模型重填'
-      },
-      steps: {
-        gate: '检查原版状态',
-        providers: '服务商',
-        secrets: 'API 密钥',
-        personas: '角色',
-        personaEnabled: '启用角色',
-        memories: '记忆',
-        skills: '技能',
-        sessions: '对话记录',
-        assoc: '附件',
-        // 附件按类细分（主进程的 step 是 `assoc:<kind>`）：失败清单据此分组，用户一眼看出是哪一类出的错
-        'assoc:media': '附件（媒体）',
-        'assoc:checkpoints': '附件（回滚面板）',
-        'assoc:subagents': '附件（子智能体记录）',
-        'assoc:toolResults': '附件（工具结果）',
-        cache: '刷新会话列表',
-        done: '收尾',
-        // 整轮级别的异常：失败发生在哪一步已无法确定，主进程记成 unknown
-        unknown: '整轮导入',
-        // 导入期间暂存的用户配置改动，收尾时回写失败（id 形如 user-patch#1）
-        config: '配置回写'
-      },
-      idWholeRun: '整轮导入',
-      idDir: '目标目录',
-      idConfig: '配置文件',
-      idUnsafeId: '不能用作配置键的 id：',
-      assoc: {
-        media: '图片附件',
-        checkpoints: '回滚检查点',
-        subagents: '子智能体记录',
-        toolResults: '工具结果'
-      },
-      stat: {
-        sessions: '对话',
-        providers: '服务商',
-        personas: '角色',
-        memories: '记忆',
-        skills: '技能',
-        attachments: '附件'
-      }
-    },
     update: {
       check: '检查更新',
       checking: '正在检查…',
@@ -1024,6 +899,19 @@ const zhCN: MessageTree = {
     apiKey: 'API 密钥',
     apiKeyPlaceholder: '在此填写 API Key',
     apiHost: 'API 地址',
+    advanced: '高级设置',
+    headers: '自定义请求头',
+    headersHint: '随每个请求发送，同名时覆盖默认值（如 User-Agent）。',
+    noHeaders: '暂无请求头，点击「添加请求头」新增',
+    headerName: '名称，如 originator',
+    headerValue: '值',
+    addHeader: '添加请求头',
+    removeHeader: '移除',
+    headerIssue: {
+      name: '名称含不支持的字符，不会发送。',
+      reserved: '该请求头由应用管理，不会发送。',
+      value: '值仅支持英文、数字和符号，不会发送。'
+    },
     getKey: '获取密钥',
     modelList: '模型',
     addModel: '添加模型',
@@ -1232,7 +1120,7 @@ const zhCN: MessageTree = {
     filterNoFolder: '未挂载文件夹',
     filterClear: '清除筛选',
     clearSearch: '清除搜索和筛选',
-    archive: '归档对话',
+    archive: '归档',
     unarchive: '移回对话列表',
     archivedTag: '已归档',
     archivedChats: '已归档对话',
@@ -1252,7 +1140,7 @@ const zhCN: MessageTree = {
     defaultModelHint: '使用最近一次选择的模型',
     viewProfile: '查看资料',
     mountHint: '挂载一个文件夹，让当前对话聚焦其中',
-    unmountHint: '卸载文件夹，回到全机通用助手',
+    unmountHint: '卸载工作区，回到默认工作区',
     resizeSidebar: '拖动调整宽度，双击恢复默认',
     resizeComposer: '拖动调整输入框高度，双击恢复默认',
     mountWorkspace: '挂载工作区',
@@ -1311,8 +1199,8 @@ const zhCN: MessageTree = {
       },
       waitFold: '收起，稍后再处理',
       // 选文件夹卡问句下面的说明（「不限」的意思）
-      noLimitNone: '可以在任何位置。选「不限」则不指定文件夹。',
-      noLimitPaths: '可以在任何位置。选「不限」则{name}改用完整路径工作。',
+      noLimitNone: '可以在任何位置。选「不限」则在默认工作区里工作。',
+      noLimitPaths: '可以在任何位置。选「不限」则{name}继续在默认工作区里工作。',
       // 处理完的回执（约 1 秒后淡出）
       doneAsk: '已回答{name}',
       doneAskSkip: '已跳过{name}的提问',
@@ -1422,6 +1310,19 @@ const zhCN: MessageTree = {
       skippedN: '跳过 {n} 个',
       // 写盘失败的那些：界面必须与「已替换」分开说，否则重启后全部变回且零提示
       failedN: '{n} 个没能写入',
+      // 索引待重建：**不是失败**，数据已经落盘，只是列表要再读一次才准。
+      indexStaleN: '{n} 个已保存，索引待重建',
+      indexStale: '已保存',
+      indexStaleHint: '模型的改动已经写进磁盘，没有丢。这一批会话的列表索引还没重建，刷新一次列表就会显示正确。',
+      // 被放弃的项：既不是成功也不是失败，必须明说「这一项没改」以及它现在用的是哪个模型。
+      supersededN: '{n} 个未改动（期间被改过或成员已移除）',
+      supersededKept: '未改动，现在用的是{ref}',
+      supersededHint: '点替换之后、写进去之前，这几项的状态变了（你自己换了模型，或成员被移除），所以没有覆盖。下面显示的是它们现在实际使用的模型：',
+      refUnknown: '（未指定模型）',
+      // 查不到名字的引用（模型已被删 / 手改进去的）：给一句人话，原始引用只进 title。
+      refOther: '另一个模型',
+      // 摘要分隔符：英文不能用全角逗号（实测会渲染成「1 switched，1 skipped」）。
+      listSep: '，',
       skipped: '跳过',
       skippedHint: '以下会话用的是别的模型，未改动：',
       showSkipped: '查看跳过的会话',
@@ -1538,6 +1439,7 @@ const zhCN: MessageTree = {
       // 附件与正文同路：让用户看出贴的图是随这条插话带进去的，而不是留在输入框等下一轮。
       withAttachments: '{n} 个附件也会一起带进去',
       count: '{n} 条',
+      files: '{n} 个附件',
       withdraw: '撤回'
     },
     newline: '换行',
@@ -1555,6 +1457,10 @@ const zhCN: MessageTree = {
     save: '保存',
     profileTabChats: '对话',
     profileTabCaps: '能力',
+    profileTabMemory: '记忆',
+    // 记忆详情页（MemoryDetail）：标题与正文的占位
+    memTitle: '标题',
+    memBody: '正文',
     capDisabled: '已停用',
     startChat: '开始对话',
     quickStartTitle: '快速开启对话',
@@ -1563,12 +1469,12 @@ const zhCN: MessageTree = {
     rosterEmptyHint: '从左侧选择一个角色，查看资料或发起对话',
     editPersona: '编辑角色',
     delete: '删除',
-    deleteChat: '删除对话',
+    deleteChat: '删除',
     renameChat: '重命名',
     renameChatTitle: '重命名对话',
     renamePlaceholder: '留空则恢复默认标题',
     pinTop: '置顶',
-    deletePersona: '删除角色',
+    deletePersona: '删除',
     deleteChatConfirm: '删除后该对话的所有消息将被永久移除，无法恢复。',
     // 删主对话时连带删除的东西（成员、绑定的定时任务及它们的对话）
     deleteChatCascade: '会一并删除：{items}。',
@@ -1576,6 +1482,13 @@ const zhCN: MessageTree = {
     deleteChatTasksAlone: '在这个会话中运行的 {n} 个定时任务（{names}）会改为独立运行。',
     select: '选择',
     selCancel: '取消',
+    multiSelect: '多选',
+    selectAll: '全选',
+    selectNone: '取消全选',
+    selectExit: '退出多选',
+    deleteChatsConfirm: '删除后这些对话的所有消息将被永久移除，无法恢复。',
+    deleteChatsMembers: '其中 {n} 位成员及其对话会一并删除。',
+    deleteChatsTasks: '在这些会话中运行的 {n} 个定时任务会改为独立运行。',
     selectToDelete: '删除对话',
     quote: '引用',
     quoteRemove: '取消引用',
@@ -1608,21 +1521,23 @@ const zhCN: MessageTree = {
       memTitle: '全局记忆',
       memPage: '第 {n}/{total} 页',
       memEmpty: '还没有记忆。对话说「记住……」即可。',
-      memEdit: '编辑',
+      memDetail: '记忆',
       memDelete: '删除',
       memDeleteConfirm: '确定删除这条记忆吗？\n「{content}」',
       memClear: '清空全部记忆',
       memClearConfirm: '确定清空全部记忆吗？Deva 将忘记关于你的所有习惯与偏好，此操作不可撤销。',
       err: {
-        empty: '内容不能为空',
-        tooLong: '单条最多 {max} 字，请精简成一句话',
+        empty: '标题不能为空',
+        tooLong: '标题最多 {max} 字，请精简成一句话',
         full: '记忆已达 {entries} 条上限，请先删除或合并旧条目',
-        budget: '记忆总量已达 {budget} 字上限，请先精简、合并或删除旧条目',
+        budget: '记忆标题总量已达 {budget} 字上限，请先精简、合并或删除旧条目',
         notFound: '该记忆已不存在（可能刚被删除），列表已刷新',
-        duplicate: '已有内容相同的记忆，无需重复保存',
+        duplicate: '已有同标题的记忆，请改一个标题',
+        badType: '记忆类型无效',
         writeFailed: '记忆没能写入磁盘（磁盘空间或权限问题），本次修改未保存',
         readFailed:
           '记忆文件读不出来（可能被占用或内容损坏），为避免覆盖原有记忆，本次没有写入。请稍后重试或检查 memory.json',
+        'memory-changed': '这条记忆在归纳期间被改动或删除，本次没有写入以免覆盖你的修改，可重试一次',
         failed: '操作失败，请重试'
       }
     },
@@ -1661,7 +1576,13 @@ const zhCN: MessageTree = {
     },
     fSpecialty: '专长',
     fModel: '偏好模型',
+    fWorkspace: '默认工作区',
+    wsPending: '保存后自动创建',
+    wsChange: '更换',
+    wsReset: '恢复默认',
     fPrompt: '系统提示词',
+    promptEmpty: '未填写，点此编辑',
+    promptCount: '{n} 字',
     extEmpty: '暂无扩展',
     kindSkill: '技能',
     kindMcp: 'MCP',
@@ -1670,77 +1591,6 @@ const zhCN: MessageTree = {
     skillDeleteConfirm: '技能文件夹（含其中的脚本与资料）将移到回收站，可从回收站还原。',
     skillDeleteConfirmMac: '技能文件夹（含其中的脚本与资料）将移到废纸篓，可从废纸篓还原。',
     skillDeleteFailed: '删除失败：技能文件夹可能正被占用，可稍后重试或在文件夹中手动删除。',
-    // 设置 › 工作区（worktree 列表）。文案口径见 spec §7.4，含 {占位符} 的在组件里替换。
-    wt: {
-      paneTitle: '工作区',
-      paneHint: '每个工作区是一个独立目录，有自己的一份依赖，改动互不影响。',
-      refresh: '刷新',
-      empty: '还没有独立工作区。在新建会话时选「独立工作区」即可创建。',
-      loadFailed: '读取工作区列表失败：{msg}',
-      storeUnreadable: '工作区记录文件读不出来，下面显示的不是全部工作区。可以在设置里重试，或检查 ~/.deva 下的记录文件。',
-      notWired: '这个操作还没接通',
-      detached: '分离头指针',
-      unmanagedTitle: 'git 里登记、但不是 Deva 建的',
-      unmanagedHint: '只做展示，不参与任何操作。',
-      baseLabel: '切出自 {label}',
-      lockedBy: '{label} 正在操作这个目录的 git',
-      mergeInProgress: '合并进行中，还有 {n} 个冲突待处理',
-      sizePending: '统计中…',
-      sizeUnknown: '占用未知',
-      noSession: '无关联会话',
-      sessionCount: '{n} 个会话',
-      dirtyMeta: '{n} 个未提交改动',
-      // dirtyCount 的 null 与 0 语义不同：null 是「目录不在、无法统计」，0 是「干净」。
-      dirtyUnknown: '无法统计改动',
-      dirtyClean: '没有未提交改动',
-      memoryShared: '与主仓库 {repoRoot} 共享项目私有记忆',
-      rebuild: '重建',
-      state: {
-        ok: '正常',
-        dirMissing: '工作区目录已缺失',
-        prunable: '工作区目录已缺失（git 登记可清理）',
-        branchMismatch: '工作区已被切到 {actual}，不再是 {branch}'
-      },
-      deps: {
-        pending: '待安装依赖',
-        installing: '安装中',
-        ready: '依赖就绪',
-        failed: '依赖安装失败',
-        skipped: '无需安装依赖',
-        retry: '重试安装',
-        // §7.7 屏⑤：失败时必须与明细同屏出现。只说失败不说还能用，用户会以为整个工作区废了。
-        stillUsable: '会话仍可使用，只是 pnpm / npm 之类的命令会失败。',
-        retryReason: {
-          'not-found': '找不到这个工作区，可能已被删除。',
-          'already-installing': '依赖正在安装，等这一轮结束再看。',
-          'no-lockfile': '没有 lockfile，无处可装依赖。',
-          'unsupported-language': '这个项目不是 Node 工程，Deva 不代为安装依赖。',
-          'write-failed': '写记录失败，稍后再试。',
-          error: '发起安装失败，稍后再试。'
-        }
-      },
-      remove: {
-        title: '删除工作区',
-        installing: '正在安装依赖，等它结束或失败后再删。',
-        prune: '移除登记',
-        pruneHint: '不删除任何文件（目录本来就不存在），只清理 git 登记。',
-        branchKept: '分支 {branch} 会保留。'
-      },
-      merge: {
-        merge: '合并',
-        title: '合并回 {target}',
-        // 四个 blocker 与主进程 `MergeBlocker` 一一对应（`Record<MergeBlocker, string>` 兜住漏配）。
-        // 每句都说清「为什么不能合并」，而不是只说「不能合并」——用户要的是下一步该做什么。
-        blocker: {
-          targetNotSet: '还不能合并：还没指定要合回哪个分支。先在合并面板里选一个目标分支。',
-          sourceMissing: '还不能合并：工作区目录已不存在。',
-          sourceBranchChanged: '还不能合并：工作区已不在它原来的分支上。',
-          installing: '还不能合并：依赖还在安装，装完再合并。'
-        },
-        resolve: '处理冲突'
-      },
-      reveal: '在文件管理器打开'
-    },
     // 新建会话（spec §7.7、原型面 1 五屏）。三条硬要求见 NewSessionDialog.tsx 文件头。
     new: {
       title: '新建会话',
@@ -2055,21 +1905,13 @@ const en: MessageTree = {
         max: 'Thinks as hard as it can; slowest and most expensive'
       },
       on: 'On',
-      onHint: 'Turn thinking on (this model has no thinking levels)',
-      unsupported: 'Not supported'
+      onHint: 'Turn thinking on (this model has no thinking levels)'
     },
     panel: {
       context: 'Context',
       approx: '~{n}',
-      used: '{used} of {window} used',
-      left: 'Older messages are compacted after about {n} more',
-      soon: 'Older messages will be compacted before the next request',
-      over: "Exceeds this model's window; older messages will be compacted before the next request",
-      estimated: 'Estimated; updates with actual usage after the next message',
-      autoCompact: 'Auto-compact',
-      empty: 'Context usage appears after the first message',
-      allProviders: 'All providers',
-      providers: 'Providers'
+      usage: '{used} / {window} ({pct})',
+      autoCompact: 'Auto-compact'
     },
     empty: 'How can I help?',
     emptyHint: 'Describe a task; Deva reads and writes project files, asking permission as needed.',
@@ -2129,6 +1971,7 @@ const en: MessageTree = {
       memoryDelete: 'Forget memory',
       todoWrite: 'Update todo list',
       presentFiles: 'Deliver files',
+      mountWorkspace: 'Mount workspace',
       createMember: 'Add member',
       memberSend: 'Assign to member',
       memberStop: 'Stop member task',
@@ -2154,6 +1997,7 @@ const en: MessageTree = {
       revealOther: 'Show in folder',
       copyPath: 'Copy path',
       missing: 'File no longer exists',
+      roleHome: "{name}'s workspace",
       expand: 'Show {n} more',
       collapse: 'Show less',
       collapsedMany: '{name} and {rest} more'
@@ -2201,6 +2045,7 @@ const en: MessageTree = {
         memoryDelete: 'Forgot memory',
         todoWrite: 'Updated todo list',
         presentFiles: 'Delivered',
+        mountWorkspace: 'Mount workspace',
         createMember: 'Added member',
         memberSend: 'Assigned to',
         memberStop: 'Stopped',
@@ -2253,6 +2098,7 @@ const en: MessageTree = {
         memoryDelete: 'Forgetting memory',
         todoWrite: 'Updating todo list',
         presentFiles: 'Delivering',
+        mountWorkspace: 'Waiting for a workspace',
         createMember: 'Adding member',
         memberSend: 'Assigning to',
         memberStop: 'Stopping',
@@ -2305,6 +2151,7 @@ const en: MessageTree = {
         memoryDelete: 'Forget memory',
         todoWrite: 'Update todo list',
         presentFiles: 'Deliver',
+        mountWorkspace: 'Mount workspace',
         createMember: 'Add member',
         memberSend: 'Assign to',
         memberStop: 'Stop',
@@ -2348,8 +2195,6 @@ const en: MessageTree = {
         cancelled: 'Plan cancelled'
       },
       mount: {
-        mounted: 'Mounted workspace',
-        skipped: 'Skipped mounting workspace',
         memberPicked: 'Picked a folder for member {name}',
         memberSkipped: 'No folder for member {name}'
       }
@@ -2491,17 +2336,10 @@ const en: MessageTree = {
       feedbackLabel: 'Reply'
     },
     mount: {
-      cardTitle: 'Workspace needed',
-      reasonPath:
-        'No workspace is mounted for this chat, so this relative path has no base directory: ',
-      reasonScan:
-        'No workspace is mounted for this chat, so a scan has no project root to start from.',
-      byTool: 'Triggered by tool',
-      pick: 'Mount workspace…',
+      ask: 'Which folder should I work in?',
+      sub: 'No workspace is mounted for this chat. Once mounted, files are read and written there, and its project notes (AGENTS.md) are followed.',
+      pick: 'Choose folder…',
       skip: 'Not now',
-      mounted: 'Mounted',
-      skipped: 'Skipped',
-      doneHint: 'Workspace mounted: ',
       memberTitle: 'Pick a folder for member “{name}”',
       memberHint: 'Choose the folder it’s responsible for — it can be anywhere.',
       memberAsk: 'Which folder should {name} work in?',
@@ -2665,148 +2503,6 @@ const en: MessageTree = {
     models: 'Models',
     about: 'About',
     version: 'Version',
-    import: {
-      title: 'Import',
-      desc: 'Bring conversations, providers, personas, memories and skills over from the original Deva. Only missing items are added — nothing existing is touched, so running it twice is safe.',
-      unavailable: 'This build isn’t wired for importing yet. Restart the app and try again.',
-      source: 'Source data folder',
-      sourceHint: 'Read-only — the original app’s files are never modified',
-      probing: 'Checking…',
-      overview: 'In the original app',
-      overviewHint: 'Built-in providers and personas included; only your own additions are imported',
-      gateRunning: 'The original Deva is running — quit it before importing.',
-      gateNoSource: 'No original Deva data folder found. Perhaps you never used it.',
-      recheck: 'Check again',
-      reprobe: 'Refresh',
-      run: 'Start import',
-      runAgain: 'Import again',
-      running: 'Importing…',
-      runFailed: 'The import couldn’t start:',
-      stepHint: 'Don’t quit while copying; anything already copied is skipped next time.',
-      done: 'Import finished',
-      doneWithFailures: 'Import finished with {n} failures',
-      noop: 'Nothing new — {n} skipped (already imported before)',
-      countCopied: '{n} added',
-      countSkipped: '{n} skipped',
-      countFailed: '{n} failed',
-      showDetail: 'Details',
-      hideDetail: 'Hide',
-      moreDetail: '…and {n} more',
-      failures: 'Failed items',
-      failureCount: '{n} items',
-      failureCountCapped: '{total} items, showing the first {shown}',
-      failureExpand: 'Show all {n}',
-      failureCollapse: 'Collapse to the first few',
-      failureHint:
-        'These items were not written. Memory failures are usually quota limits — delete a few memories you no longer need and import again to pick them up.',
-      reason: {
-        budget: 'Memory budget reached — not written',
-        full: 'Memory entry limit reached — not written',
-        tooLong: 'Memory entry too long — not written',
-        missingRoot: 'This project has no recorded path, so its memories were skipped',
-        importedProviderMissing:
-          'An imported provider is no longer in the config — something else likely overwrote it. Import again to restore it.',
-        configWriteFailed: 'Couldn’t write config — check permissions or disk space',
-        linkFailed: 'Couldn’t create the link — permission likely denied',
-        targetWriteFailed: 'Couldn’t write to the destination (permissions, disk or path) — this item was not imported',
-        noEncryption: 'This machine can’t store keys — add them again by hand',
-        targetBlocked: 'The destination is taken by a folder or file of the same name — nothing written',
-        targetUnreadable:
-          'Something with that name is there but can’t be read (another app may have it open) — it was not overwritten',
-        copyTruncated: 'The copy came out incomplete (the write was interrupted); the partial file was discarded — import again',
-        sourceSecretsCorrupt:
-          'The upstream secrets file is corrupt and couldn’t be parsed — no keys were imported. Check the file',
-        sourceSecretsUnreadable:
-          'The upstream secrets file can’t be read (it may be in use) — no keys were imported. Try again later',
-        sourceMcpUnreadable:
-          'The upstream MCP config can’t be read (it may be in use) — no MCP servers were imported. Try again later',
-        sourceMcpCorrupt:
-          'The upstream MCP config is corrupt and couldn’t be parsed — no MCP servers were imported. Check mcp.json',
-        sourceMcpEnabledUnknown:
-          'The MCP server was imported, but the upstream config can’t be read, so whether it was on is unknown — enable it on the MCP page if you need it',
-        mcpWriteFailed:
-          'The MCP config couldn’t be written to disk (permissions or disk full) — this entry will be lost after a restart',
-        mcpUnsafeId:
-          'This MCP server’s id can’t be used as a config key (it contains a colon or separator), so it wasn’t imported. Rename it upstream and import again',
-        sourceConfigUnreadable:
-          'The upstream config file can’t be read (it may be in use) — no providers were imported. Try again later',
-        sourceConfigCorrupt:
-          'The upstream config file is corrupt and couldn’t be parsed — no providers were imported. Check config.json',
-        sourceMemoryUnreadable:
-          'The upstream memory file can’t be read (it may be in use) — memories in this scope were not imported. Try again later',
-        sourceMemoryCorrupt:
-          'The upstream memory file is corrupt and couldn’t be parsed — memories in this scope were not imported. Check memory.json',
-        sourceDirUnreadable:
-          'This upstream folder can’t be read, so none of its data was imported. Check permissions or close the app using it, then import again',
-        sourceFileUnreadable:
-          'This upstream file can’t be read (it may be in use) — this item was not imported. Try importing again later',
-        sourceNotAFile:
-          'This upstream entry is not a regular file (a folder with the same name may be in the way) — it can’t be imported. Check the upstream data',
-        secretsWriteFailed: 'The key couldn’t be written to the local secrets file — check permissions or disk space',
-        secretsStoreUnreadable:
-          'The local secrets file itself can’t be read (corrupted or in use). Nothing was written so the other keys inside are not overwritten — check secrets.json',
-        avatarCopyFailed: 'The avatar couldn’t be copied — the persona itself was imported and is usable'
-      },
-      secretNote: {
-        noEncryption: 'This machine can’t store keys — {n} to add by hand',
-        invalid: '{n} keys were empty or corrupt in the source',
-        skipped: '{n} already present, kept yours',
-        ignored: '{n} not applicable, ignored',
-        failed: '{n} couldn’t be written',
-        rekeyed: '{n} of them were unusable before and are fixed now'
-      },
-      secretGroup: {
-        noEncryption: 'Add by hand',
-        invalid: 'Empty in source',
-        skipped: 'Already present',
-        ignored: 'Not applicable',
-        failed: 'Write failed',
-        rekeyed: 'Fixed now'
-      },
-      unrecoverable: {
-        title: '{n} keys need to be entered again',
-        hint: 'These were encrypted by the original app and can’t be read here. Add the matching keys again under Settings › Models and they will work — everything else was imported, no need to start over.',
-        more: '{n} more',
-        goSettings: 'Go to Settings › Models'
-      },
-      steps: {
-        gate: 'Checking the original app',
-        providers: 'Providers',
-        secrets: 'API keys',
-        personas: 'Personas',
-        personaEnabled: 'Enabling personas',
-        memories: 'Memories',
-        skills: 'Skills',
-        sessions: 'Conversations',
-        assoc: 'Attachments',
-        'assoc:media': 'Attachments (media)',
-        'assoc:checkpoints': 'Attachments (rollback panels)',
-        'assoc:subagents': 'Attachments (subagent records)',
-        'assoc:toolResults': 'Attachments (tool results)',
-        cache: 'Refreshing the conversation list',
-        done: 'Finishing up',
-        unknown: 'Whole run',
-        config: 'Config write-back'
-      },
-      idWholeRun: 'Whole run',
-      idDir: 'Target folder',
-      idConfig: 'Config file',
-      idUnsafeId: 'ID that can’t be used as a config key:',
-      assoc: {
-        media: 'Images',
-        checkpoints: 'Checkpoints',
-        subagents: 'Subagent records',
-        toolResults: 'Tool results'
-      },
-      stat: {
-        sessions: 'Conversations',
-        providers: 'Providers',
-        personas: 'Personas',
-        memories: 'Memories',
-        skills: 'Skills',
-        attachments: 'Attachments'
-      }
-    },
     update: {
       check: 'Check for updates',
       checking: 'Checking…',
@@ -2852,6 +2548,19 @@ const en: MessageTree = {
     apiKey: 'API Key',
     apiKeyPlaceholder: 'Enter your API key',
     apiHost: 'API Host',
+    advanced: 'Advanced settings',
+    headers: 'Custom headers',
+    headersHint: 'Sent with every request; same-name headers replace the defaults (e.g. User-Agent).',
+    noHeaders: 'No headers yet — click "Add header"',
+    headerName: 'Name, e.g. originator',
+    headerValue: 'Value',
+    addHeader: 'Add header',
+    removeHeader: 'Remove',
+    headerIssue: {
+      name: 'Unsupported characters in the name. Not sent.',
+      reserved: 'This header is managed by the app. Not sent.',
+      value: 'Only ASCII letters, digits and symbols are supported. Not sent.'
+    },
     getKey: 'Get key',
     modelList: 'Models',
     addModel: 'Add model',
@@ -3080,7 +2789,7 @@ const en: MessageTree = {
     defaultModelHint: 'Uses the most recently selected model',
     viewProfile: 'View profile',
     mountHint: 'Mount a folder to focus this conversation inside it',
-    unmountHint: 'Unmount the folder and return to the whole-machine assistant',
+    unmountHint: 'Unmount the workspace and go back to the default workspace',
     resizeSidebar: 'Drag to resize, double-click to reset',
     resizeComposer: 'Drag to resize the input box, double-click to reset',
     mountWorkspace: 'Mount workspace',
@@ -3133,8 +2842,8 @@ const en: MessageTree = {
         other: '{name} is waiting for you on a web page'
       },
       waitFold: 'Collapse and handle later',
-      noLimitNone: 'It can be anywhere. “Any” means no specific folder.',
-      noLimitPaths: 'It can be anywhere. With “Any”, {name} uses full paths instead.',
+      noLimitNone: 'It can be anywhere. With “Any”, it works in the default workspace.',
+      noLimitPaths: 'It can be anywhere. With “Any”, {name} keeps working in the default workspace.',
       doneAsk: 'Answered {name}',
       doneAskSkip: 'Skipped {name}’s question',
       doneApprove: 'Approved {name}’s plan',
@@ -3236,6 +2945,17 @@ const en: MessageTree = {
       appliedN: '{n} switched',
       skippedN: '{n} skipped',
       failedN: '{n} couldn’t be saved',
+      indexStaleN: '{n} saved, list index pending',
+      indexStale: 'Saved',
+      indexStaleHint:
+        'The model changes are written to disk and nothing was lost. The conversation-list index for these was not rebuilt yet — refresh the list once and it will be correct.',
+      supersededN: '{n} not changed (edited meanwhile or member removed)',
+      supersededKept: 'Not changed — now using {ref}',
+      supersededHint:
+        'Between clicking Switch and writing, these changed (you picked another model, or the member was removed), so they were left alone. Each row shows the model it actually uses now:',
+      refUnknown: '(no model set)',
+      refOther: 'another model',
+      listSep: ', ',
       skipped: 'Skipped',
       skippedHint: 'These use a different model and were left alone:',
       showSkipped: 'Show skipped conversations',
@@ -3345,6 +3065,7 @@ const en: MessageTree = {
       pendingHint: 'Delivered after the current step',
       withAttachments: '{n} attachments go with it',
       count: '{n} messages',
+      files: '{n} attachments',
       withdraw: 'Withdraw'
     },
     newline: 'newline',
@@ -3361,6 +3082,9 @@ const en: MessageTree = {
     save: 'Save',
     profileTabChats: 'Chats',
     profileTabCaps: 'Capabilities',
+    profileTabMemory: 'Memory',
+    memTitle: 'Title',
+    memBody: 'Details',
     capDisabled: 'Disabled',
     startChat: 'Start chat',
     quickStartTitle: 'Start a conversation',
@@ -3369,12 +3093,12 @@ const en: MessageTree = {
     rosterEmptyHint: 'Select a persona on the left to view its profile or start a chat',
     editPersona: 'Edit persona',
     delete: 'Delete',
-    deleteChat: 'Delete conversation',
+    deleteChat: 'Delete',
     renameChat: 'Rename',
     renameChatTitle: 'Rename conversation',
     renamePlaceholder: 'Leave empty to restore the default title',
     pinTop: 'Pin to top',
-    deletePersona: 'Delete persona',
+    deletePersona: 'Delete',
     deleteChatConfirm:
       'This conversation and all its messages will be permanently removed. This cannot be undone.',
     deleteChatCascade: 'Also removes {items}.',
@@ -3382,6 +3106,14 @@ const en: MessageTree = {
     deleteChatTasksAlone: ' {n} scheduled tasks running in this chat ({names}) will run on their own.',
     select: 'Select',
     selCancel: 'Cancel',
+    multiSelect: 'Select',
+    selectAll: 'Select all',
+    selectNone: 'Deselect all',
+    selectExit: 'Exit selection',
+    deleteChatsConfirm:
+      'These conversations and all their messages will be permanently removed. This cannot be undone.',
+    deleteChatsMembers: ' {n} member(s) and their chats will be removed too.',
+    deleteChatsTasks: ' {n} scheduled task(s) running in these chats will run on their own.',
     selectToDelete: 'Delete conversation',
     quote: 'Quote',
     quoteRemove: 'Remove quote',
@@ -3416,22 +3148,25 @@ const en: MessageTree = {
       memTitle: 'What Deva remembers about you',
       memPage: 'Page {n} of {total}',
       memEmpty: 'No memories yet. Just tell "remember…".',
-      memEdit: 'Edit',
+      memDetail: 'Memory',
       memDelete: 'Delete',
       memDeleteConfirm: 'Delete this memory?\n“{content}”',
       memClear: 'Clear all memories',
       memClearConfirm:
         'Clear all memories? Deva will forget all your habits and preferences. This cannot be undone.',
       err: {
-        empty: 'Content cannot be empty',
-        tooLong: 'Each entry is limited to {max} characters — keep it to one sentence',
+        empty: 'Title cannot be empty',
+        tooLong: 'Titles are limited to {max} characters — keep it to one sentence',
         full: 'Memory is full ({entries} entries). Delete or merge old entries first',
         budget: 'Memory has reached its {budget}-character limit. Trim, merge or delete old entries first',
         notFound: 'This memory no longer exists (it may have just been deleted); list refreshed',
-        duplicate: 'An identical memory already exists — no need to save it again',
+        duplicate: 'A memory with this title already exists — use a different title',
+        badType: 'Invalid memory type',
         writeFailed: 'Couldn’t write the memory to disk (disk space or permissions) — this change was not saved',
         readFailed:
           'The memory file can’t be read (it may be in use or corrupt). Nothing was written, to avoid overwriting your existing memories — try again later or check memory.json',
+        'memory-changed':
+          'This memory was changed or deleted while consolidating, so nothing was written in order not to overwrite your edit — try again',
         failed: 'Operation failed, please try again'
       }
     },
@@ -3470,7 +3205,13 @@ const en: MessageTree = {
     },
     fSpecialty: 'Specialty',
     fModel: 'Preferred model',
+    fWorkspace: 'Default workspace',
+    wsPending: 'Created when saved',
+    wsChange: 'Change',
+    wsReset: 'Use default',
     fPrompt: 'System prompt',
+    promptEmpty: 'Empty — click to edit',
+    promptCount: '{n} chars',
     extEmpty: 'No extensions',
     kindSkill: 'Skill',
     kindMcp: 'MCP',
@@ -3482,72 +3223,6 @@ const en: MessageTree = {
       'The skill folder, including its scripts and files, will be moved to the Trash, where you can restore it.',
     skillDeleteFailed:
       'Could not delete the skill. The folder may be in use; try again later or delete it manually.',
-    wt: {
-      paneTitle: 'Worktrees',
-      paneHint: 'Each worktree is its own folder with its own dependencies; changes do not affect each other.',
-      refresh: 'Refresh',
-      empty: 'No worktrees yet. Pick "separate worktree" when starting a new chat to create one.',
-      loadFailed: 'Could not load worktrees: {msg}',
-      storeUnreadable: 'The worktree record file could not be read, so this is not the full list. Retry, or check the record file under ~/.deva.',
-      notWired: 'This action is not wired up yet',
-      detached: 'detached HEAD',
-      unmanagedTitle: 'Registered in git but not created by Deva',
-      unmanagedHint: 'Shown for reference only; no actions apply.',
-      baseLabel: 'from {label}',
-      lockedBy: '{label} is running git in this folder',
-      mergeInProgress: 'Merge in progress, {n} conflicts left',
-      sizePending: 'Measuring…',
-      sizeUnknown: 'Size unknown',
-      noSession: 'No linked chats',
-      sessionCount: '{n} chats',
-      dirtyMeta: '{n} uncommitted changes',
-      dirtyUnknown: 'Changes unknown',
-      dirtyClean: 'No uncommitted changes',
-      memoryShared: 'Shares project memory with the main repo {repoRoot}',
-      rebuild: 'Rebuild',
-      state: {
-        ok: 'Healthy',
-        dirMissing: 'Worktree folder is missing',
-        prunable: 'Worktree folder is missing (git entry can be cleaned up)',
-        branchMismatch: 'Switched to {actual}, no longer on {branch}'
-      },
-      deps: {
-        pending: 'Dependencies pending',
-        installing: 'Installing',
-        ready: 'Dependencies ready',
-        failed: 'Dependency install failed',
-        skipped: 'No dependencies needed',
-        retry: 'Retry install',
-        stillUsable: 'The chat is still usable; only pnpm / npm style commands will fail.',
-        retryReason: {
-          'not-found': 'This worktree no longer exists.',
-          'already-installing': 'Dependencies are installing; check again when this run finishes.',
-          'no-lockfile': 'No lockfile, so there is nothing to install.',
-          'unsupported-language': 'This is not a Node project, so Deva will not install dependencies for it.',
-          'write-failed': 'Could not write the record; try again later.',
-          error: 'Could not start the install; try again later.'
-        }
-      },
-      remove: {
-        title: 'Remove worktree',
-        installing: 'Dependencies are installing; wait for it to finish or fail.',
-        prune: 'Remove git entry',
-        pruneHint: 'Deletes no files (the folder is already gone); only cleans the git entry.',
-        branchKept: 'Branch {branch} is kept.'
-      },
-      merge: {
-        merge: 'Merge',
-        title: 'Merge back into {target}',
-        blocker: {
-          targetNotSet: 'Cannot merge yet: no target branch is set. Pick one in the merge panel.',
-          sourceMissing: 'Cannot merge yet: the worktree folder no longer exists.',
-          sourceBranchChanged: 'Cannot merge yet: this worktree is no longer on its original branch.',
-          installing: 'Cannot merge yet: dependencies are still installing.'
-        },
-        resolve: 'Resolve conflicts'
-      },
-      reveal: 'Show in file manager'
-    },
     new: {
       title: 'New chat',
       sub: 'Pick the folder this chat runs in',
@@ -3635,4 +3310,7 @@ const en: MessageTree = {
   }
 }
 
-export const messages: Record<Locale, MessageTree> = { 'zh-CN': zhCN, en }
+export const messages: Record<Locale, MessageTree> = {
+  'zh-CN': mergeFork(zhCN, forkZhCN),
+  en: mergeFork(en, forkEn)
+}

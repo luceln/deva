@@ -1,8 +1,9 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
-import { getConfig, getDevaHome, setConfig } from './services/config'
+import { getConfig, getConfigLoadKind, getDevaHome, setConfig } from './services/config'
 import { readSecret, setSecret } from './services/secrets'
 import { decryptAsLegacy } from './services/secret-rekey'
+import { isPluginManagedKey, pluginManagedProviderIds } from './services/plugin-managed'
 import { isPresetProviderId } from '../shared/preset-providers'
 import type { SecretsStat, StepStat } from '../shared/import-protocol'
 
@@ -26,6 +27,14 @@ export interface ProviderMergeStat extends StepStat {
   kept: string[]
   /** 必填（覆盖 StepStat 的可选）：本模块总会填，调用方不必再判空。 */
   builtin: string[]
+  /**
+   * 必填（覆盖 StepStat 的可选）：本模块总会填，调用方不必再判空。
+   *
+   * 为什么要覆盖成必填：`report.providers` 直接把这里的结果抄过去（importer.ts），若留可选，
+   * 漏填时协议层不会报错，界面拿到的就是 undefined——「N 个服务商归插件管」那行会静默消失。
+   * 宁可让本模块编译期就发现漏填。
+   */
+  pluginManaged: string[]
   /** 本次一并带过来的「最近使用模型」（`<providerId>:<modelId>`）；没带则为空。 */
   activeModelId?: string
   /**
@@ -125,13 +134,45 @@ function targetMcpIds(): McpIdRead {
  * 同一条判据也用于处理合并本身（预置 id 照常保留本地那份），只是不进入用户的计数。
  */
 export function mergeProviders(srcHome: string, opts?: { excludeIds?: string[] }): ProviderMergeStat {
-  const stat: ProviderMergeStat = { copied: [], skipped: [], kept: [], builtin: [] }
+  const stat: ProviderMergeStat = { copied: [], skipped: [], kept: [], builtin: [], pluginManaged: [] }
   const exclude = new Set(opts?.excludeIds ?? [])
+  /**
+   * 归外部插件托管的服务商 id（源侧与本应用侧取并集，见 `services/plugin-managed.ts`）。
+   *
+   * 判定放在**合并之前**：这类 id 即便被并进来了，也要让界面知道「它归插件管」，
+   * 否则用户看到「新增 1 个服务商」却不知道那个是插件塞的、密钥也不用他填。
+   * 它与 copied 不互斥——插件托管的 provider 该并进来（否则 magpie 在二开版里直接不可用），
+   * 只是密钥那一步会跳过它的 key（见 copySecrets）。
+   */
+  const pluginIds = pluginManagedProviderIds([srcHome, getDevaHome()])
   const srcRead = readJson(join(srcHome, 'config.json'))
   // 读不出来 / 内容坏：**必须记失败**，不能落到「0 个服务商」那种「原版没配过」的显示上
-  if (srcRead.kind === 'unreadable') return { copied: [], skipped: [], kept: [], builtin: [], failed: [{ step: 'providers', id: '<config.json>', reason: srcRead.reason }] }
+  if (srcRead.kind === 'unreadable') return { copied: [], skipped: [], kept: [], builtin: [], pluginManaged: [], failed: [{ step: 'providers', id: '<config.json>', reason: srcRead.reason }] }
   const srcProviders = providersOf(srcRead.kind === 'ok' ? srcRead.cfg : null)
   if (!srcProviders.length) return stat
+
+  /*
+   * ⚠️ 目标配置读不出来时**一律不写**（P1-④）。
+   *
+   * `getConfig()` 在载入失败时回落成 `{}` 并 `loaded = true`；若照常合并再 `setConfig`，写回的就是
+   * 「空配置 + 这次导入的几项」——用户原本的 providers / 偏好被整份抹掉，且没有任何备份。文件在但读不出
+   * 不等于它真的空（半截 JSON 通常可修、EACCES/被占用时往往完全正常）。
+   *
+   * 这里返回可见失败而不是静默跳过：用户要知道「原版服务商这次一个都没进来，因为本应用配置读不出来」，
+   * 而不是看到「0 个服务商、ok:true」。磁盘字节保持原样，留给用户/后续修复。
+   */
+  /*
+   * ⚠️ 目标配置读不出来时**一律不写**（P1-④）。
+   *
+   * `getConfig()` 在载入失败时回落成 `{}` 并 `loaded = true`；若照常合并再 `setConfig`，写回的就是
+   * 「空配置 + 这次导入的几项」——用户原本的 providers / 偏好被整份抹掉，且没有任何备份。文件在但读不出
+   * 不等于它真的空（半截 JSON 通常可修、EACCES/被占用时往往完全正常）。
+   *
+   * 这里返回可见失败而不是静默跳过：用户要知道「原版服务商这次一个都没进来，因为本应用配置读不出来」，
+   * 而不是看到「0 个服务商、ok:true」。磁盘字节保持原样，留给用户/后续修复。
+   */
+  if (getConfigLoadKind() === 'corrupt')
+    return { ...stat, failed: [...(stat.failed ?? []), { step: 'providers', id: '<config.json>', reason: 'target-config-unreadable' }] }
 
   const dstCfg = getConfig() as Cfg
   const dstModels = (dstCfg.models && typeof dstCfg.models === 'object' ? dstCfg.models : {}) as Cfg
@@ -152,6 +193,20 @@ export function mergeProviders(srcHome: string, opts?: { excludeIds?: string[] }
      * 收尾那次补回会把用户刚删掉的服务商又装回去——用户会觉得「删了它自己回来了」。
      */
     if (exclude.has(id)) continue
+    /*
+     * 插件托管的 provider：**有意不导入**。
+     *
+     * 理由：这类 provider 由插件自己写进目标 config.json（插件安装时会做），导入再并一次会和插件打架
+     * ——插件按自己的网关约定维护它（apiHost 指向本机网关、apiKey 由插件生成），原版那份地址/密钥搬过来
+     * 只会让插件配置错位。用户装插件时它自然就有了，不需要我们从原版搬。
+     *
+     * 不并进 copied / skipped：那不是「因为已存在而跳过」，是「它不归导入管」。
+     * 单列 `pluginManaged`，界面据此说「N 个服务商归插件管，装插件后自动出现」。
+     */
+    if (pluginIds.has(id)) {
+      stat.pluginManaged.push(id)
+      continue
+    }
     const preset = isPresetProviderId(id)
     if (preset) stat.builtin.push(id)
     if (existing.has(id)) {
@@ -256,6 +311,7 @@ export async function copySecrets(srcHome: string): Promise<SecretsStat> {
     noEncryption: [],
     invalid: [],
     unrecoverable: [],
+    pluginManaged: [],
     rekeyed: []
   }
   const file = join(srcHome, 'secrets.json')
@@ -301,6 +357,15 @@ export async function copySecrets(srcHome: string): Promise<SecretsStat> {
    *    「MCP 密钥判断不了，因为目标 mcp.json 读不出来」。
    */
   const mcpRead = targetMcpIds()
+  /**
+   * 归外部插件托管的 provider id（源侧与本应用侧取并集，见 `services/plugin-managed.ts`）。
+   *
+   * 这类 provider 的密钥**不归用户管**：由插件按自己的网关约定生成并写回 secrets.json。
+   * 所以既不该搬（搬过来的旧密文可能指向已失效的 key），也**绝不能归进 `unrecoverable`**
+   * ——那一栏的界面语义是「去设置 › 模型重填」，而这些 provider 在设置页里没有可编辑的密钥输入框，
+   * 用户照做会扑空。单列 `pluginManaged`，界面改为提示「请去插件里配置」。
+   */
+  const pluginIds = pluginManagedProviderIds([srcHome, getDevaHome()])
   /*
    * ────────── 第一阶段：挑出该搬的 key，收集 (key, 密文) ──────────
    *
@@ -333,6 +398,18 @@ export async function copySecrets(srcHome: string): Promise<SecretsStat> {
      *  - 其余 → 首段当 providerId（`remote` 这类命名空间天然不在 provider 集合里）。
      * 先判 `mcp` 再判 provider 是必须的：`mcp` 本身不是 provider，顺序反了会把 MCP 密钥全归成无主密文。
      */
+    /*
+     * 插件托管的密钥：单列一栏，**在 owned 判定之前**。
+     *
+     * 顺序很关键：插件托管的 provider 有意不并进目标（见 mergeProviders），所以它不在 `providerIds` 里，
+     * 按 owned 判会被当成无主密文丢进 ignored——界面会说「搬了也用不上」，
+     * 而实际语义是「它归插件管，插件自己会写一条能用的进去」。两者用户动作不同，必须分开。
+     * 也不能归 `unrecoverable`：那会指向设置页里不存在的密钥输入框。
+     */
+    if (ns !== 'mcp' && isPluginManagedKey(key, pluginIds)) {
+      stat.pluginManaged.push(key)
+      continue
+    }
     let owned = false
     if (ns === 'mcp') {
       if (mcpRead.kind === 'unknown') {

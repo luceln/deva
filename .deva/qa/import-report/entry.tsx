@@ -9,11 +9,26 @@
  */
 import { createRoot } from 'react-dom/client'
 import { ImportPane } from 'E:/deva/apps/desktop/src/renderer/src/redesign/ImportPane'
+import { __resetImportSession } from 'E:/deva/apps/desktop/src/renderer/src/redesign/importSession'
 import { I18nProvider } from 'E:/deva/apps/desktop/src/renderer/src/i18n/i18n'
 import { ToastProvider } from 'E:/deva/apps/desktop/src/renderer/src/components/ToastProvider'
 
 let root = null
 let host = null
+
+window.__resetImportSession = __resetImportSession
+
+/** 只卸载、不重挂：「切到别的设置页」用，验报告是否还在。 */
+window.__unmountOnly = () => {
+  if (root) {
+    root.unmount()
+    root = null
+  }
+  if (host) {
+    host.remove()
+    host = null
+  }
+}
 
 window.__mountImport = () => {
   if (root) {

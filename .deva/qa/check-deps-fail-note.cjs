@@ -24,7 +24,9 @@ const path = require('path')
 
 const REPO = path.resolve(__dirname, '..', '..')
 const PANE = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'WorktreePane.tsx')
-const MSG = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'i18n', 'messages.ts')
+// 词条不再从 `messages.ts` 的文本里抠：二开词条已搬到 `i18n/fork.ts`（由 messages.ts 深合并），
+// 扫文本会在拆分后静默失效（CI 报 “F3 只找到 0 处”，而词条其实还在）。改读运行时值，见 lib/i18n-source。
+const { readI18n, checkKeys } = require('./lib/i18n-source.cjs')
 
 const passes = []
 const problems = []
@@ -40,9 +42,15 @@ const read = (p) => {
 }
 
 const pane = read(PANE)
-const msg = read(MSG)
 if (pane === null) bad('F0 读得到 WorktreePane.tsx', PANE)
-if (msg === null) bad('F0 读得到 messages.ts', MSG)
+
+/** i18n 词条（运行时值）。读失败时给 null，F3 会如实报红而不是静默跳过。 */
+let i18n = null
+try {
+  i18n = readI18n()
+} catch (e) {
+  bad('F0 读得到 i18n 词条', String(e && e.message))
+}
 
 /** 取某个 `{ ... }` 块的文本（从 openIdx 处的 `{` 起，按花括号配对）。取不到返回 null。 */
 function blockAt(text, openIdx) {
@@ -70,7 +78,7 @@ function failedBlock(text) {
   return blocks
 }
 
-if (pane !== null && msg !== null) {
+if (pane !== null && i18n !== null) {
   // ── F1：存在 failed 分支 ──
   const blocks = failedBlock(pane)
   if (blocks.length === 0) {
@@ -97,15 +105,15 @@ if (pane !== null && msg !== null) {
     else ok('F2 两者在**同一个**分支里同时出现', `${both.length} 处`)
   }
 
-  // ── F3：中英词条都在且非空 ──
-  const stillRe = /stillUsable:\s*'([^']*)'/g
-  const stillHits = [...msg.matchAll(stillRe)]
-  if (stillHits.length < 2) {
-    bad('F3 stillUsable 词条中英各一条', `只找到 ${stillHits.length} 处`)
-  } else {
-    const empty = stillHits.filter((h) => h[1].trim().length === 0)
-    if (empty.length > 0) bad('F3 stillUsable 词条非空', '有空串')
-    else ok('F3 stillUsable 词条中英各一条且非空', stillHits.map((h) => h[1].slice(0, 30)).join(' | '))
+  // ── F3：中英词条都在且非空（读运行时值，不扫源码文本）──
+  //
+  // 原实现扫 `messages.ts` 找 `stillUsable: '…'` 两处。i18n 拆分后这条词条搬进了 `fork.ts`，
+  // 正则一处也找不到 → 报「只找到 0 处」，而词条其实完好。改为按 key 取运行时值：
+  // 每个语言必须都有一条且非空，语义比原来的「文本里出现 ≥2 次」更准（原来是靠同名子串计数的）。
+  {
+    const r = checkKeys(['cf.wt.deps.stillUsable'])
+    if (!r.ok) bad('F3 stillUsable 词条中英各一条且非空', r.detail)
+    else ok('F3 stillUsable 词条中英各一条且非空', r.detail)
   }
 
   // ── F4：不是折叠/悬停才有的 ──

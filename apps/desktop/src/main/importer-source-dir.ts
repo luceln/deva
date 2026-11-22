@@ -110,6 +110,13 @@ export const SOURCE_FILE_UNREADABLE = 'source-file-unreadable'
 /** 源里那个名字下不是普通文件（例如 `.md` 位置被同名目录占住）：源数据异常，不是「跳过」。 */
 export const SOURCE_NOT_A_FILE = 'source-not-a-file'
 /**
+ * 源会话文件在，但**解析不出会话**（半截 JSON / 没有 id）。区别于 `SOURCE_FILE_UNREADABLE`（打不开）：
+ * 这里读得到字节、只是内容坏了。
+ *
+ * 处置是「原样复制过去 + 如实标注」：数据不能因为解析不了就消失，但用户必须知道那条会话是坏的。
+ */
+export const SOURCE_SESSION_BROKEN = 'source-session-broken'
+/**
  * 写目标失败（mkdir / copyFile / symlink 之类）。
  *
  * **不把 Node 的原始 message 透给界面**：`EEXIST: file already exists, mkdir 'C:\Users\...\data\chats'`

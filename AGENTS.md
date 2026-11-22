@@ -44,3 +44,9 @@ feat: 新增回复完成与等待输入的系统通知 / add system notification
 - **改写会话历史的操作**（删轮、压缩、回滚、开始回合）要先检查 `historyLocked()`。
 - **配置类文件写盘**用 `writeFileAtomic()`（`main/services/atomic-write.ts`）。
 - **渲染层**：外壳的新功能单独建文件放进 `renderer/src/redesign/`，`ChatFirstShell.tsx` 只负责组合；读对话状态时用范围最小的 `useChatActions` / `useChatState` / `useChatStream`。
+
+## 分支与合并
+
+- **任何合并都先开临时分支**（`merge/<来源>-into-<目标>`），在它上面解冲突、跑验证，通过后才回目标分支合并它；用完即删。不许在 `dev` / `main` 上直接 `git merge`。
+- **三个方向不许弄反**：回灌 `dev` → `feat/*`（进行中，随时）；合入 `feat/*` → `dev`（做完且验收通过）；发版 `dev` → `main`（用户明确说要发版）。详见 `docs/development-branches.md`。
+- **未完成的功能不进 `dev`，也不进 `main`。** 合入前逐条核对 `docs/development-branches.md` 的四项条件，缺一项就不合。CI 绿只是必要条件。

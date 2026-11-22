@@ -1,7 +1,7 @@
 import { app, shell, BrowserWindow, ipcMain, nativeTheme, Tray, Menu } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
-import { getConfig, registerConfigIpc } from './services/config'
+import { getConfig, getDevaHome, registerConfigIpc } from './services/config'
 
 import { getAppIcon, getTrayIcon } from './services/tray-icon'
 import { registerWorkspaceIpc } from './services/workspace'
@@ -19,6 +19,7 @@ import { registerSkillsIpc, startSkillsWatcher } from './services/skills'
 import { ensureSeededPersonas, pinAutoAvatarShapes, pruneOrphanExtRoles, registerPersonasIpc } from './services/personas'
 import { registerProfileIpc } from './services/profile'
 import { registerMemoryIpc } from './services/memory'
+import { registerMemoryCondenseIpc } from './services/memory-condense-ipc'
 import {
   autoConnectEnabledServers,
   disconnectAllServers,
@@ -31,11 +32,13 @@ import { sweepOnStartup } from './services/worktree/sweep'
 import { registerGitIpc } from './services/git'
 import { registerClipboardIpc } from './services/clipboard'
 import { registerDeliverablesIpc } from './services/deliverables'
+import { registerRoleHomeIpc } from './services/role-home'
 import { registerTasksIpc } from './services/tasks'
 import { startScheduler } from './services/scheduler'
 import { registerRemoteIpc, stopAllChannels } from './services/remote'
 import { registerUpdaterIpc } from './services/updater'
 import { registerToastIdentity } from './services/portable'
+import { recordDevaHome } from './services/deva-home-registry'
 import { integrateAppImage } from './services/appimage'
 import {
   disposeAllPages,
@@ -333,6 +336,8 @@ if (!app.requestSingleInstanceLock()) {
   electronApp.setAppUserModelId('dev.lucel.devaplus')
   // 便携版没有开始菜单快捷方式：注册通知显示名与图标，否则通知标题是原始 ID（须早于第一条通知）
   registerToastIdentity('dev.lucel.devaplus')
+  // 数据根目录写进注册表：卸载器是独立进程，读不到 DEVA_HOME，只能靠这里留下的值
+  recordDevaHome(getDevaHome())
   // Linux AppImage：把 desktop 入口与图标写到用户目录，启动器里才找得到 DevaPlus（后台进行，不阻塞启动）
   void integrateAppImage()
   // Linux X11：窗口的 WM_CLASS 取自应用名（默认是 package.json 的 devaplus），与 devaplus.desktop 的
@@ -417,6 +422,7 @@ if (!app.requestSingleInstanceLock()) {
   registerPersonasIpc()
   registerProfileIpc()
   registerMemoryIpc()
+  registerMemoryCondenseIpc()
 
   // MCP 服务（全局 ~/.deva-plus/mcp.json；主进程内起真实客户端，工具命名空间化后并入 Agent 工具表，默认 ask 过闸）
   registerMcpIpc(() => mainWindow)
@@ -449,6 +455,9 @@ if (!app.requestSingleInstanceLock()) {
 
   // 交付卡（present_files）：文件信息与缩略图、用默认应用打开、在文件夹中显示（只作用于该对话里交付的文件）
   registerDeliverablesIpc()
+
+// 角色的默认工作区（没挂载工作区时的落点）：角色编辑页「工作区」一栏用
+  registerRoleHomeIpc()
 
   // 定时任务 / 自动任务（全局 ~/.deva-plus/tasks.json；创建时批准、执行时零交互）。
   registerTasksIpc(() => mainWindow)

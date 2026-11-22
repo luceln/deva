@@ -147,10 +147,6 @@ const ALLOW = [
   {
     key: 'importer-assoc.ts::const st = statSync(to)',
     why: 'isStaleTarget：刷 mtime 前的探测。返失败 → false → 不刷 mtime（幂等优先），既不覆盖内容也不改时间戳。删掉这条会判 BARE，而「读不出就不刷」是本场景的正确方向，所以留'
-  },
-  {
-    key: 'importer-sessions.ts::statSync(join(srcDir, name))',
-    why: '源 compacted 尺寸：读失败会抛到本文件 catch 记 failure（有通道，不在扫描窗口内）。删掉会判 BARE，而这里确实有通道，所以留'
   }
 ]
 

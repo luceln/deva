@@ -27,12 +27,31 @@ const path = require('path')
 
 const REPO = path.resolve(__dirname, '..', '..')
 const PANE = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'WorktreePane.tsx')
-const MSG = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'i18n', 'messages.ts')
+// 词条不再从 `messages.ts` 的文本里抠：二开词条已搬到 `i18n/fork.ts`（由 messages.ts 深合并），
+// 扫文本会在拆分后静默失效（「找不到 block」→ 报红，或更坏：同名子串还在→假 PASS）。改读运行时值。
+const { readI18n, checkKeys } = require('./lib/i18n-source.cjs')
 
 const passes = []
 const problems = []
 const ok = (n, d) => passes.push(d ? `${n} —— ${d}` : n)
 const bad = (n, d) => problems.push(d ? `${n} —— ${d}` : n)
+
+/**
+ * 从 `from`（指向 `{` 的位置）起按花括号配平，返回含外层花括号的整段。
+ * 配不平（到文件尾还没闭合）返回 null —— 那说明源码本身是坏的，不该当成「找到了」。
+ */
+function sliceBraced(text, from) {
+  if (text[from] !== '{') return null
+  let depth = 0
+  for (let i = from; i < text.length; i++) {
+    if (text[i] === '{') depth++
+    else if (text[i] === '}') {
+      depth--
+      if (depth === 0) return text.slice(from, i + 1)
+    }
+  }
+  return null
+}
 
 const read = (p) => {
   try {
@@ -43,35 +62,56 @@ const read = (p) => {
 }
 
 const pane = read(PANE)
-const msg = read(MSG)
 if (pane === null) bad('G0 读得到 WorktreePane.tsx', PANE)
-if (msg === null) bad('G0 读得到 messages.ts', MSG)
+
+/** i18n 词条（运行时值）。读失败给 null，依赖它的检查会如实报红。 */
+let i18n = null
+try {
+  i18n = readI18n()
+} catch (e) {
+  bad('G0 读得到 i18n 词条', String(e && e.message))
+}
 
 const BLOCKERS = ['target-not-set', 'source-missing', 'source-branch-changed', 'installing']
 
-if (pane !== null && msg !== null) {
+if (pane !== null && i18n !== null) {
   // ── G1：合并按钮的 disabled 绑 mergeGate.mayMerge ──
-  // 找合并按钮那一段（`onClick={() => onNotWired('merge')}` 之前 400 字符内），检查 disabled 表达式。
-  const mergeIdx = pane.indexOf("onNotWired('merge')")
+  /*
+   * 锚点不能写死成某个占位字符串：`onNotWired('merge')` 只在按钮**还没接上**时存在，
+   * 真接上（`onClick={() => setMergeOpen(true)}`）之后它就没了——检查会从「按钮接得对不对」
+   * 退化成「按钮是不是还没接」，界面做完了反而报红。
+   *
+   * 改为按语义找：`disabled` 直接读 `mergeGate.mayMerge` 的那个按钮就是合并按钮。
+   * 这恰好也是 G1 要验的东西（可用性只能由主进程的 mergeGate 决定），
+   * 所以找不到它本身就是失败，不需要另设锚点。
+   */
+  const mergeBtn = /disabled=\{([^}]*mergeGate\s*\.\s*mayMerge[^}]*)\}/.exec(pane)
+  const mergeIdx = mergeBtn ? mergeBtn.index : -1
   if (mergeIdx === -1) {
-    bad('G1 找得到合并按钮', "没有 onNotWired('merge')")
+    bad(
+      'G1 找得到合并按钮',
+      '没有 disabled 读 mergeGate.mayMerge 的按钮（合并按钮未接，或可用性改成界面自己算）'
+    )
   } else {
-    const seg = pane.slice(Math.max(0, mergeIdx - 600), mergeIdx)
-    const dis = seg.match(/disabled=\{([^}]*)\}/)
-    if (!dis) {
-      bad('G1 合并按钮的 disabled 绑 mergeGate', '没找到 disabled 属性（按钮永远可点）')
-    } else if (/mergeGate\s*\.\s*mayMerge/.test(dis[1]) && /!\s*view\s*\.\s*mergeGate\s*\.\s*mayMerge/.test(dis[1])) {
-      ok('G1 合并按钮的 disabled 绑 mergeGate', dis[1].trim())
+    const seg = pane.slice(Math.max(0, mergeIdx - 600), mergeIdx + 900)
+    const expr = mergeBtn[1].trim()
+    if (/mergeGate\s*\.\s*mayMerge/.test(expr) && /!\s*view\s*\.\s*mergeGate\s*\.\s*mayMerge/.test(expr)) {
+      ok('G1 合并按钮的 disabled 绑 mergeGate', expr)
     } else {
-      bad('G1 合并按钮的 disabled 绑 mergeGate', `实际是 ${dis[1].trim()}`)
+      bad('G1 合并按钮的 disabled 绑 mergeGate', `实际是 ${expr}`)
     }
 
     // ── G2：title 从 blocker 取文案 ──
-    const title = seg.match(/title=\{([\s\S]{0,300}?)\}\n/)
-    if (!title) bad('G2 合并按钮的 title 取 blocker 文案', '没找到 title')
-    else if (/mergeGate\s*\.\s*blocker/.test(seg) && /BLOCKER_KEY\[/.test(seg)) {
-      ok('G2 合并按钮的 title 取 blocker 文案', seg.includes('BLOCKER_KEY[') ? 'BLOCKER_KEY[...]' : '')
-    } else bad('G2 合并按钮的 title 取 blocker 文案', '没有引用 mergeGate.blocker / BLOCKER_KEY')
+    /*
+     * 不写死「`}` 后紧跟换行」：title 表达式跨多行、后面还跟着别的属性时那种形状就匹配不上，
+     * 会报「没找到 title」——而 title 其实好好地在。改为从 `title={` 起按花括号配平取到闭合处。
+     */
+    const titleStart = seg.indexOf('title={')
+    const titleExpr = titleStart === -1 ? null : sliceBraced(seg, titleStart + 'title='.length)
+    if (titleExpr === null) bad('G2 合并按钮的 title 取 blocker 文案', '没找到 title')
+    else if (/mergeGate\s*\.\s*blocker/.test(titleExpr) && /BLOCKER_KEY\[/.test(titleExpr)) {
+      ok('G2 合并按钮的 title 取 blocker 文案', 'mergeGate.blocker → BLOCKER_KEY[...]')
+    } else bad('G2 合并按钮的 title 取 blocker 文案', `实际是 ${titleExpr.slice(0, 120)}`)
   }
 
   // ── G6：不按 state 自己推算合并可用性（A48 的另一半）──
@@ -114,39 +154,17 @@ if (pane !== null && msg !== null) {
     bad('G3 BLOCKER_KEY 有 4 个 key', `实际 ${keyNames.length}`)
   } else {
     const flat = keyNames.map((k) => k.replace('cf.wt.merge.blocker.', ''))
-    // 取中英各一个 blocker 块：`blocker: {` 之后到配对的 `}` 之前。
-    const blockerBlocks = []
-    const reB = /blocker:\s*\{/g
-    let mb
-    while ((mb = reB.exec(msg)) !== null) {
-      let depth = 0
-      for (let i = mb.index + mb[0].length - 1; i < msg.length; i++) {
-        if (msg[i] === '{') depth++
-        else if (msg[i] === '}') {
-          depth--
-          if (depth === 0) {
-            blockerBlocks.push(msg.slice(mb.index, i + 1))
-            break
-          }
-        }
-      }
-    }
-    if (blockerBlocks.length < 2) {
-      bad('G3 找得到中英两个 blocker 块', `只找到 ${blockerBlocks.length} 个`)
-    } else {
-      const missing = []
-      for (const n of flat) {
-        // 每个块里都要有一条 `n: '...'`，且键名精确（`installingRenamed:` 不算）。
-        const re = new RegExp(`(?<![\\w$])${n}:\\s*'([^']*)'`, 'g')
-        for (const [i, blk] of blockerBlocks.entries()) {
-          const hits = [...blk.matchAll(re)]
-          if (hits.length !== 1) missing.push(`${n} 在第 ${i + 1} 个块里 ${hits.length} 条`)
-          else if (hits[0][1].trim().length === 0) missing.push(`${n} 在第 ${i + 1} 个块里是空串`)
-        }
-      }
-      if (missing.length > 0) bad('G3 四个 blocker 中英文案各一条且非空', missing.join('、'))
-      else ok('G3 四个 blocker 中英文案各一条且非空', `${flat.join(', ')}（中英两块各一条）`)
-    }
+    /*
+     * 读运行时值：每个 blocker key 必须在**所有语言**里都存在且非空。
+     *
+     * 原实现靠两个文本特征：`blocker: {` 出现两次（中英各一块）、每块里 `n: '…'` 恰好一条。
+     * 那套判据绑死了「词条住在同一个文件、中英各写一块、缩进形状不变」。词条搬进 fork.ts、
+     * 或上游调整了字典嵌套，就会误报「找不到 block」。改为按 key 取值后，语义反而更准：
+     * 「四个 blocker 在每种语言里各有一条且非空」。
+     */
+    const r = checkKeys(keyNames)
+    if (!r.ok) bad('G3 四个 blocker 中英文案各一条且非空', r.detail)
+    else ok('G3 四个 blocker 中英文案各一条且非空', `${flat.join(', ')}（${i18n.locales.join('/')} 各一条）`)
   }
 
   // ── G4：dirtyCount 三态分别渲染 ──
@@ -164,8 +182,9 @@ if (pane !== null && msg !== null) {
     const nullK = pane.match(/dirtyCount\s*===\s*null[\s\S]{0,200}?t\('(cf\.wt\.\w+)'\)/)
     const cleanK = pane.match(/dirtyClean/)
     if (nullK && cleanK) {
-      const zeroLiteral = msg.includes('dirtyClean:')
-      if (!zeroLiteral) bad('G4 null 与 0 用不同词条', 'dirtyClean 词条不存在')
+      // 读运行时值判断 `cf.wt.dirtyClean` 是否存在（原来在 messages.ts 文本里找 `dirtyClean:`）
+      const zeroLiteral = i18n.locales.every((loc) => Object.hasOwn(i18n.entry('cf.wt.dirtyClean') ?? {}, loc))
+      if (!zeroLiteral) bad('G4 null 与 0 用不同词条', 'cf.wt.dirtyClean 词条不存在')
       else ok('G4 null 与 0 用不同词条', `null → ${nullK[1]}，0 → cf.wt.dirtyClean`)
     }
   }

@@ -313,3 +313,9 @@ InstallDir "$LOCALAPPDATA\Programs\${APP_FILENAME}"
     ${endif}
   FunctionEnd
 !macroend
+
+; ─────────────────────────────────────────────────────────────────────────────
+; 卸载时可选的「移除所有记录」——全部在 installer-uninstall.nsh 里
+; （单独成文件是为了让「只装不卸」的编译不引用未使用的 un. 函数，-WX 下会直接失败）
+; ─────────────────────────────────────────────────────────────────────────────
+!include installer-uninstall.nsh
