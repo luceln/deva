@@ -20,6 +20,7 @@ import type {
   MergeBlocker,
   WorktreeInstallResult,
   WorktreeListItem,
+  WorktreeRebuildResult,
   WorktreeState
 } from '../../../shared/worktree-protocol'
 import './worktree-pane.css'
@@ -34,9 +35,9 @@ import './worktree-pane.css'
  * 两处各算一遍，迟早一处说能、一处拒绝，而用户只会看到「按钮能点，点了报错」。
  *
  * 合并按钮就是这条的实例：`disabled` 只读 `mergeGate.mayMerge`，`title` 只读 `mergeGate.blocker`。
- * 主进程已经算好四个 blocker 的优先级，界面连「哪个先」都不判。真正的 `worktree:merge` IPC 还没落地（P2），
- * 所以 `mayMerge` 为真时点下去给的是「还没接通」——这两种状态必须能区分：一个是「你需要先做点什么」，
- * 另一个是「这个功能还没做」。
+ * 主进程已经算好四个 blocker 的优先级，界面连「哪个先」都不判。`mayMerge` 为真时打开合并面板走真实
+ * `worktree:merge`；`mayMerge` 为假时按钮禁用并显示 blocker 原因——这两种状态必须能区分：
+ * 一个是「你需要先做点什么」，另一个是「这个功能还没做」。
  *
  * ## 「无关联会话」与 `state` 正交（§2.5 / A54）
  *
@@ -102,6 +103,19 @@ const BLOCKER_KEY: Record<MergeBlocker, string> = {
   installing: 'cf.wt.merge.blocker.installing'
 }
 
+/**
+ * 重建失败原因 → 文案。`reason` 缺席时按 `add-failed` 兜底（协议里 `ok:false` 必然带一个原因，
+ * 这里只是让类型闭合，不是「猜一个」）。
+ */
+const REBUILD_FAIL_KEY: Record<NonNullable<WorktreeRebuildResult['reason']>, string> = {
+  'not-found': 'cf.wt.rebuildFail.notFound',
+  'dir-exists': 'cf.wt.rebuildFail.dirExists',
+  'branch-missing': 'cf.wt.rebuildFail.branchMissing',
+  installing: 'cf.wt.rebuildFail.installing',
+  'add-failed': 'cf.wt.rebuildFail.addFailed',
+  'verify-failed': 'cf.wt.rebuildFail.verifyFailed'
+}
+
 /** 字节数 → 人读的形态。`null` 由调用方区分「统计中」与「占用未知」，不在这里兜。 */
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -125,9 +139,11 @@ export function WorktreePane(): React.JSX.Element {
   const unmanaged = snapshot?.unmanaged ?? []
 
   /*
-   * 删除 / 重建 / prune / 合并的 IPC（T3.1 / T3.3 / T2.x）还没落地，故这里**不假装成功**：
-   * 点下去只提示「这个操作还没接通」，不弹「已删除」这种假 toast。
-   * IPC 到位后把这些换成真实调用即可，卡片结构与样式都不用动。
+   * 还没接通的操作只在这里留一个：`conflicts`（冲突处理窗口，P2 未做）与 `reveal`（打开目录，
+   * 需要新增一条主进程通道）。**不假装成功**：点下去只提示「这个操作还没接通」，
+   * 不弹「已删除」这种假 toast。
+   *
+   * 删除 / 重建 / prune / 合并都已在下面用真实 IPC 接好，不要再往这里加。
    */
   const notWired = (name: string): void => {
     setPending(name)
@@ -212,6 +228,8 @@ function WorktreeCard({
   const dialog = useDialog()
   /** 合并面板是否打开（合并是两步：先看检查结果，再决定合不合 / 怎么处理覆盖）。 */
   const [mergeOpen, setMergeOpen] = useState(false)
+  /** 重建 / 移除登记这类会改磁盘的操作进行中：期间禁掉同组按钮，避免重复点。 */
+  const [busy, setBusy] = useState(false)
   // 合并成功后要让主进程重算 targetBranch / mergeGate：直接复用 store 的 refresh。
   const { refresh } = useWorktree()
 
@@ -257,6 +275,57 @@ function WorktreeCard({
     // 用 warning 而不是 success：这些是没做到的部分。
     for (const w of res.warnings) toast.show({ variant: 'warning', message: w })
     toast.show({ variant: 'success', message: t('cf.wt.remove.done') })
+  }
+
+  /**
+   * 重建（T3.3）：目录被手工删掉后，按原分支重新 `git worktree add` 出来。
+   *
+   * 只在 `state === 'dir-missing'` 时出现——`prunable` 走的是「移除登记」而不是重建：
+   * 前者是目录真的没了要重新拉，后者是 git 还记着一条已经无效的登记。
+   *
+   * 失败原因**逐条如实报**：`dir-exists`（有人又建回去了）、`branch-missing`（分支被删了，
+   * 重建等于新开分支，不能默认替用户做）、`verify-failed`（建完回读对不上，最该让人知道）。
+   */
+  const rebuild = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const res = await window.deva.worktree.rebuild({ path: view.path })
+      if (!res.ok) {
+        toast.show({
+          variant: 'error',
+          message: res.message ?? t(REBUILD_FAIL_KEY[res.reason ?? 'add-failed'])
+        })
+        return
+      }
+      toast.show({ variant: 'success', message: t('cf.wt.rebuildDone') })
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /**
+   * 移除登记（A33 / `state === 'prunable'`）：目录已经不在，只清掉 git 里那条失效的 worktree 登记。
+   *
+   * 复用 `worktree:remove` 而不另开通道：主进程对「目录不在」的分支本来就是只清登记。
+   * 但**必须显式传 `deleteBranch: false`**：`remove` 的默认语义是「用户要删掉整个工作区」，
+   * 于是 `deleteBranch !== false` → 默认连分支一起删。分支上是用户还没合走的提交，
+   * 清一条失效登记不该把它们带走（这是 A33 与「分支保留」的分界）。
+   */
+  const prune = async (): Promise<void> => {
+    setBusy(true)
+    try {
+      const res = await window.deva.worktree.remove({ path: view.path, deleteBranch: false })
+      if (!res.ok) {
+        toast.show({ variant: 'error', message: res.message ?? t('cf.wt.remove.failed') })
+        return
+      }
+      for (const w of res.warnings) toast.show({ variant: 'warning', message: w })
+      toast.show({ variant: 'success', message: t('cf.wt.remove.pruneDone') })
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
   }
 
   const stateKey = STATE_KEY[view.state]
@@ -393,7 +462,12 @@ function WorktreeCard({
         </button>
         {/* 重建只对「目录不在」有意义；prunable 走「移除登记」（A33：必须用户点） */}
         {view.state === 'dir-missing' && (
-          <button type="button" className="btn btn--ghost" onClick={() => onNotWired('rebuild')}>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            disabled={busy || installing}
+            onClick={() => void rebuild()}
+          >
             <RotateCcw size={13} />
             {t('cf.wt.rebuild')}
           </button>
@@ -402,8 +476,9 @@ function WorktreeCard({
           <button
             type="button"
             className="btn btn--ghost"
+            disabled={busy || installing}
             title={t('cf.wt.remove.pruneHint')}
-            onClick={() => onNotWired('prune')}
+            onClick={() => void prune()}
           >
             <Scissors size={13} />
             {t('cf.wt.remove.prune')}

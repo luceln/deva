@@ -194,6 +194,15 @@ export const forkZhCN = {
       dirtyClean: '没有未提交改动',
       memoryShared: '与主仓库 {repoRoot} 共享项目私有记忆',
       rebuild: '重建',
+      rebuildDone: '工作区已重建',
+      rebuildFail: {
+        notFound: '找不到这条工作区记录，可能已被移除。',
+        dirExists: '目录已经存在，不需要重建。',
+        branchMissing: '分支已经不在了。重建等于新开一个同名分支，需要你先决定分支怎么处理。',
+        installing: '正在安装依赖，等它结束或失败后再重建。',
+        addFailed: 'git worktree add 失败，详见日志。',
+        verifyFailed: '建出来了，但回读核对不上（目录 / 分支 / git 登记有一项不符），请先手工确认再使用。'
+      },
       state: {
         ok: '正常',
         dirMissing: '工作区目录已缺失',
@@ -229,7 +238,8 @@ export const forkZhCN = {
         dirtyConfirm: '这个工作区里还有 {n} 处未提交的改动，删除会把它们一起丢掉，无法找回。确定继续吗？',
         force: '仍然删除',
         failed: '删除失败',
-        done: '工作区已删除'
+        done: '工作区已删除',
+        pruneDone: 'git 登记已清理'
       },
       merge: {
         merge: '合并',
@@ -482,6 +492,15 @@ export const forkEn = {
       dirtyClean: 'No uncommitted changes',
       memoryShared: 'Shares project memory with the main repo {repoRoot}',
       rebuild: 'Rebuild',
+      rebuildDone: 'Worktree rebuilt',
+      rebuildFail: {
+        notFound: 'This worktree record no longer exists.',
+        dirExists: 'The folder already exists, so there is nothing to rebuild.',
+        branchMissing: 'The branch is gone. Rebuilding would create a new branch of the same name, so you need to decide how to handle the branch first.',
+        installing: 'Dependencies are installing; wait for it to finish or fail before rebuilding.',
+        addFailed: 'git worktree add failed; see the log.',
+        verifyFailed: 'It was created, but the read-back check did not match (folder / branch / git entry); verify it manually before use.'
+      },
       state: {
         ok: 'Healthy',
         dirMissing: 'Worktree folder is missing',
@@ -516,7 +535,8 @@ export const forkEn = {
         dirtyConfirm: 'This worktree has {n} uncommitted changes. Removing it will discard them for good. Continue?',
         force: 'Remove anyway',
         failed: 'Could not remove the worktree',
-        done: 'Worktree removed'
+        done: 'Worktree removed',
+        pruneDone: 'Git entry cleaned up'
       },
       merge: {
         merge: 'Merge',
