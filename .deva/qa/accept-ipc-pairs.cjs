@@ -68,6 +68,40 @@ info('主进程有、preload 没暴露', String(unexposed.length) + ' ' + JSON.s
 
 ok('没有「preload 能调但主进程没实现」的通道', missingHandler.length === 0, JSON.stringify(missingHandler))
 
-// unexposed 不一定是错（主进程内部用 on() 收事件 / 渲染层用别的桥），只报告不判失败
+/*
+ * 「主进程注册了、preload 没暴露」= 用户点不到、模型也调不到的死通道。
+ *
+ * 这类问题曾经只记 INFO 不判失败，代价很具体：`chat:member-worktree-return-original`
+ * 主进程写了 24 行完整逻辑（含目录身份校验），preload 里一行都没有，界面上那个
+ * 「返回原目录」按钮的 onReturnToOriginal 永远是 undefined —— 功能整个不存在，
+ * 而所有检查全绿。它混在上面那两个历史例外里被静默放过了。
+ *
+ * 但也不能一律判失败：有些通道本来就不该出现在 preload 里
+ * （`config:get-sync` 由 preload 通过其它方式取、`app:get-platform` 同理）。
+ * 所以：**历史例外白名单 + 新增即失败**。白名单只允许缩小，加新条目要在下面写明理由。
+ */
+const UNEXPOSED_ALLOWED = new Map([
+  ['app:get-platform', 'preload 自己用 process.platform，不需要经 IPC'],
+  ['config:get-sync', 'preload 的 config.getSync 走别的桥（同步取值），不经 invoke']
+])
+
+const unexposedNew = unexposed.filter((c) => !UNEXPOSED_ALLOWED.has(c))
+const unexposedAllowed = unexposed.filter((c) => UNEXPOSED_ALLOWED.has(c))
+// 白名单里已经不需要豁免的（通道删了或补上 preload 了）：提示清理，但不判失败
+const staleAllow = [...UNEXPOSED_ALLOWED.keys()].filter((c) => !unexposed.includes(c))
+
+info('豁免的悬空通道', String(unexposedAllowed.length) + ' ' + JSON.stringify(unexposedAllowed))
+if (staleAllow.length)
+  info('白名单可清理（这些通道已不再悬空）', JSON.stringify(staleAllow))
+
+ok(
+  '没有「主进程注册了但 preload 没暴露」的新增死通道',
+  unexposedNew.length === 0,
+  unexposedNew.length
+    ? JSON.stringify(unexposedNew) +
+      ' —— 要么在 preload 里暴露它，要么从主进程摘掉；确属设计如此就加进 UNEXPOSED_ALLOWED 并写理由'
+    : ''
+)
+
 console.log(`=== 结束：FAIL ${fails} ===`)
 process.exit(fails > 0 ? 1 : 0)

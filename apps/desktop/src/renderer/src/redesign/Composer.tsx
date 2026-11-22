@@ -354,6 +354,7 @@ export const Composer = memo(function Composer({
   streaming,
   focusRoot,
   onMount,
+  onOpenWorktree,
   onSend,
   onStop,
   showJump,
@@ -372,6 +373,7 @@ export const Composer = memo(function Composer({
   streaming: boolean
   focusRoot: string | null
   onMount: (path: string | null) => void
+  onOpenWorktree?: () => void
   onSend: (text: string, attachments?: SendAttachment[]) => Promise<boolean>
   onStop: () => void
   showJump: boolean
@@ -1024,11 +1026,15 @@ export const Composer = memo(function Composer({
               >
                 <WorkspaceMenu root={focusRoot} />
                 <GitWidget root={focusRoot} streaming={streaming} />
+                {onOpenWorktree && (
+                  <button type="button" className="cf-wschip__x" title={t('cf.member.memberWorktree.title')} aria-label={t('cf.member.memberWorktree.title')} disabled={streaming} onClick={onOpenWorktree}>⋯</button>
+                )}
                 <button
                   type="button"
                   className="cf-wschip__x"
                   title={t('cf.unmountHint')}
                   aria-label={t('cf.unmountHint')}
+                  disabled={!!onOpenWorktree && streaming}
                   onClick={() => onMount(null)}
                 >
                   <X size={13} />
@@ -1038,11 +1044,12 @@ export const Composer = memo(function Composer({
               <button
                 type="button"
                 className="cf-wschip"
-                title={t('cf.mountHint')}
-                onClick={pickWorkspace}
+                title={onOpenWorktree ? t('cf.member.memberWorktree.title') : t('cf.mountHint')}
+                disabled={!!onOpenWorktree && streaming}
+                onClick={onOpenWorktree ?? pickWorkspace}
               >
                 <FolderPlus size={15} />
-                {t('cf.mountWorkspace')}
+                {onOpenWorktree ? t('cf.member.memberWorktree.title') : t('cf.mountWorkspace')}
               </button>
             )}
             <ModelPanel />

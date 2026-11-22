@@ -1,6 +1,7 @@
 /**
  * 回合编排：发起一轮（用户发送 / 定时任务 / 通知唤醒）、轮前与轮中压缩、进行中插话、中止与收尾落盘。
  */
+import { assertMemberExecution } from './member-worktree-guard'
 import type {
   AvailabilityKind,
   ChatInsertRequest,
@@ -557,6 +558,8 @@ export async function runTurn(
   let blockedBeforeStart = false
 
   try {
+    try { await assertMemberExecution(sessionId) }
+    catch (e) { blockedBeforeStart = true; throw e }
     // 轮前体检：本对话存的模型引用若已失效（模型被删 / 服务商被禁用 / 密钥丢了），这一轮注定发不出去。与其让
     // provider 层抛一句 400/401，不如先拦下来、说清是哪一类，把用户引到输入框上方那个标红的模型胶囊去换模型。
     // 只管「本对话自己存的引用」——空串（尚未定格，跟随全局默认）交给下面的 resolveModelRef 兜底，不算失效。
@@ -579,7 +582,7 @@ export async function runTurn(
     const handoffOwner = ownerSession ? personaName(ownerSession) : null
     // 聚焦工作区：本对话若挂载文件夹，用它作有效根（受信/在工作区内判定、终端 cwd、系统提示词聚焦、
     // 权限模式键均据此）；未挂载 → 回落 workspaceRoot（对话优先外壳恒 null，即全机通用助手）。
-    const effectiveRoot = session.focusRoot ?? workspaceRoot
+    const effectiveRoot = session.parentId ? (session.focusRoot ?? null) : (session.focusRoot ?? workspaceRoot)
     /*
      * **项目记忆根**（spec §1.4 的 M2）：worktree 会话里是主仓库根，其余情况恒等于 effectiveRoot。
      *

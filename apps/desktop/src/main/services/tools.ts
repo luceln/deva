@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { assertMemberExecution } from './member-worktree-guard'
 import { describeNetError, httpFetch } from '../http'
 import { spawn } from 'node:child_process'
 import { existsSync, promises as fs, type Dirent } from 'fs'
@@ -1895,6 +1896,8 @@ export async function executeTool(
   const run = Object.prototype.hasOwnProperty.call(toolHandlers, name) ? toolHandlers[name] : undefined
   if (!run) return { content: `未知工具：${name}`, summary: '未知工具', isError: true }
   try {
+    // 每次执行重新核实：起轮后目录也可能被移动/删除，不能退回 home 或重建无 Git 的目录树。
+    await assertMemberExecution(ctx.sessionId, ctx.workspaceRoot)
     return await run(a, ctx)
   } catch (e) {
     const msg = (e as Error)?.message ?? String(e)

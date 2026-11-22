@@ -47,6 +47,7 @@ import {
   ConvMessage
 } from './ConvMessage'
 import { type SlashCommand, type ComposerPrefill, MemberProgressNotice, Composer } from './Composer'
+import { MemberWorktreeDialog } from './MemberWorktreeDialog'
 
 /**
  * 「回到底部」按钮的显隐阈值：距底 ≤ 此像素即隐藏按钮（= 视为已在底部）。
@@ -279,6 +280,7 @@ export function Conversation({
   const scrollRef = useRef<HTMLDivElement>(null)
   // 成员在内置浏览器里等你操作（登录、验证等）：同提问 / 计划，在对话末尾放一枚胶囊提醒（见 MemberAsks）。
   const browserState = useBrowserState()
+  const [worktreeTarget, setWorktreeTarget] = useState<{ sessionId: string; name: string } | null>(null)
   // 在本对话中运行的定时任务名（小写）：主角色的 member_send / member_status 也能点到它们（见 blocks.tsx TaskNamesContext）。
   // 与成员同名的让给成员（主进程同样先找成员）。
   const taskNames = useMemo(() => {
@@ -1184,6 +1186,7 @@ export function Conversation({
           streaming={streaming}
           focusRoot={focusRoot}
           onMount={onMount}
+          onOpenWorktree={memberView ? () => setWorktreeTarget({ sessionId: memberView.entry.meta.sessionId, name: memberView.entry.meta.name }) : undefined}
           onSend={stableSend}
           onStop={onStop}
           showJump={!atBottom && messages.length > 0}
@@ -1194,6 +1197,15 @@ export function Conversation({
         />
       )}
 
+      {worktreeTarget && (
+        <MemberWorktreeDialog
+          key={worktreeTarget.sessionId}
+          name={worktreeTarget.name}
+          sessionId={worktreeTarget.sessionId}
+          busy={!!sessionStates[worktreeTarget.sessionId]?.streaming}
+          onClose={() => setWorktreeTarget(null)}
+        />
+      )}
       {rewind && (
         <RewindModal
           sessionId={currentSessionId}

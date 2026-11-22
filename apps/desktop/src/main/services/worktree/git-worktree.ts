@@ -1,4 +1,5 @@
-import { readFileSync, readdirSync, rmSync, statSync } from 'fs'
+import { readFileSync, readdirSync, rmSync, statSync, lstatSync } from 'fs'
+import type { WorktreeRecord } from './store'
 import { join } from 'path'
 import { runGitRaw } from '../git'
 import { normalizeWorktreePath } from './paths'
@@ -88,9 +89,13 @@ export async function addWorktree(
   repoRoot: string,
   path: string,
   branch: string,
-  baseSha: string
+  baseSha: string,
+  reservedBranch = false
 ): Promise<{ ok: boolean; stderr: string }> {
-  const r = await runGitRaw(repoRoot, ['worktree', 'add', '-b', branch, path, baseSha], ADD_TIMEOUT)
+  const args = reservedBranch
+    ? ['worktree', 'add', path, branch]
+    : ['worktree', 'add', '-b', branch, path, baseSha]
+  const r = await runGitRaw(repoRoot, args, ADD_TIMEOUT)
   return { ok: r.code === 0, stderr: r.stderr.trim() }
 }
 
@@ -145,12 +150,11 @@ export interface CleanupResult {
 /**
  * **失败清理算法（spec §3.4，六步逐字实现）**。
  *
- * 准入凭据只有 `intent`：
- *  - `intent.branchExistedAtStart === false` 才允许删分支；
- *  - `intent.pathExistedAtStart === false` 才允许删目录。
- *
- * **不得**用「现在目录里有什么」替代这个凭据：那会把「用户原本就有的目录」判成本次新建。
- * `intent` 恒为 false（Step 0 已拒绝已存在的情形），但仍记录它——崩溃恢复时 Step 0 早已不在内存里。
+ * `intent` 的不存在快照只是必要条件，不再单独授权删除：
+ *  - 目录必须匹配本请求排他 mkdir 后记录的 dev/ino/birthtime；
+ *  - 分支必须匹配 CAS 创建的唯一 reflog 标记，且 HEAD 仍是创建时 SHA；
+ *  - 解登记还要求路径/分支对应且目录身份有效。
+ * 没有凭据的旧记录仅告警，不凭同仓库身份推断所有权；合法半创建资产仍逐项清理。
  *
  * 顺序必须是「先解登记 → 再删目录 → 再删分支」（spec 给了理由）：git 删分支会检查「该分支是否被
  * 某个 worktree 检出」，登记还在就报 `cannot delete branch used by worktree`。
@@ -159,7 +163,7 @@ export async function cleanupFailedCreate(opts: {
   repoRoot: string
   path: string
   branch: string
-  intent: { branchExistedAtStart: boolean; pathExistedAtStart: boolean }
+  intent: WorktreeRecord['intent']
 }): Promise<CleanupResult> {
   const warnings: string[] = []
   const res: CleanupResult = {
@@ -170,9 +174,47 @@ export async function cleanupFailedCreate(opts: {
     warnings
   }
 
-  // ── 第 1 步：解登记 ──
-  const entries = await listWorktrees(opts.repoRoot)
+  // 任何破坏性步骤之前先核实本次独占资产凭据；旧的“不存在”快照不足以授权删除。
+  const owner = opts.intent.ownership
+  if (!owner) {
+    warnings.push('目录未删：缺少本次创建归属凭据，保留目录、登记和分支供人工核对')
+    return res
+  }
+  let directoryOwned = false
+  let directoryGone = false
+  try {
+    const st = lstatSync(opts.path)
+    directoryOwned = st.isDirectory() && !st.isSymbolicLink() && st.dev === owner.dev &&
+      st.ino === owner.ino && st.birthtimeMs === owner.birthtimeMs
+  } catch (e) {
+    directoryGone = (e as NodeJS.ErrnoException).code === 'ENOENT'
+  }
+  const ref = `refs/heads/${opts.branch}`
+  const tip = await runGitRaw(opts.repoRoot, ['rev-parse', '--verify', ref])
+  const log = await runGitRaw(opts.repoRoot, ['reflog', 'show', '-1', '--format=%H%x00%gs', ref])
+  const branchOwned = tip.code === 0 && tip.stdout.trim() === owner.baseSha && log.code === 0 &&
+    log.stdout.trim() === `${owner.baseSha}\0deva-create:${owner.token}`
+  if (!directoryOwned && !directoryGone) {
+    warnings.push('目标目录身份已变化或无法核实，保留全部资产')
+    return res
+  }
+
+  // ── 第 1 步：解登记。必须同时有目录身份和分支创建标记，且登记分支一致。 ──
+  const listed = await runGitRaw(opts.repoRoot, ['worktree', 'list', '--porcelain'])
+  if (listed.code !== 0) {
+    warnings.push('无法读取 Git 登记，保留全部资产')
+    return res
+  }
+  const entries = parseWorktreeList(listed.stdout)
   const registered = hasWorktreeEntry(entries, opts.path)
+  const entry = entries.find((e) => {
+    try { return normalizeWorktreePath(e.path).compareKey === normalizeWorktreePath(opts.path).compareKey }
+    catch { return false }
+  })
+  if (registered && (!branchOwned || entry?.branch !== opts.branch || !directoryOwned)) {
+    warnings.push('Git 登记或分支不属于本次创建，保留全部资产')
+    return res
+  }
   if (registered) {
     const r = await runGitRaw(opts.repoRoot, ['worktree', 'remove', '--force', opts.path])
     if (r.code === 0) res.worktreeRemoved = true
@@ -195,7 +237,7 @@ export async function cleanupFailedCreate(opts: {
   }
 
   // ── 第 3 步：删目录（仅当本次新建 且 看起来确实是我们的）──
-  if (opts.intent.pathExistedAtStart) {
+  if (opts.intent.pathExistedAtStart || (!directoryOwned && !res.worktreeRemoved)) {
     // 用户原本就有的目录：**绝对不删**
     warnings.push('目标路径在创建前已存在，保留未删')
   } else {
@@ -214,7 +256,7 @@ export async function cleanupFailedCreate(opts: {
   }
 
   // ── 第 4 步：删分支（必须 -D）──
-  if (opts.intent.branchExistedAtStart) {
+  if (opts.intent.branchExistedAtStart || !branchOwned) {
     warnings.push('分支在创建前已存在，保留未删')
   } else {
     const exists = await runGitRaw(opts.repoRoot, [
