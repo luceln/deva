@@ -11,6 +11,8 @@ import {
 import { join } from 'path'
 import { writeFileAtomic } from './atomic-write'
 import { getDevaHome } from './config'
+import { historyLocked } from './chat-locks'
+import { clearDirty, indexTrusted, markDirty } from './index-dirty'
 import { hydrateMessages, mediaReplacer } from './media-store'
 import { modelFirst } from './model-view'
 import { removeToolResults } from './tool-results'
@@ -300,22 +302,36 @@ function metaOf(s: StoredSession): ChatSessionMeta {
   }
 }
 
-/** 惰性载入索引；文件缺失/损坏则扫描目录里的对话文件重建（自愈），并回写一份。 */
+/**
+ * 惰性载入索引；文件缺失/损坏/或**存在脏标记**则扫描目录重建（自愈），并回写一份。
+ *
+ * ## 为什么读索引前要先看 dirty
+ *
+ * 「主文件写成功、索引写失败」会留下一份**合法的旧索引**：它格式正确、内容过时。只看「能不能解析」
+ * 就会一直读到它，列表停在旧模型上，而且刷新也不修（索引文件一直「能读」）。
+ * 脏标记表达「上一轮索引没写全」，所以看到它就跳过旧索引、直接全量重建。
+ *
+ * 重建 → 写索引成功之后才清标记（由 `persistIndex` 统一处理）；重建或写回失败**不清**，
+ * 下次启动仍会重建——宁可多扫一次目录，也不能拿一份缺条目的索引当可信。
+ */
 function ensureIndex(): Map<string, ChatSessionMeta> {
   if (indexCache) return indexCache
   const map = new Map<string, ChatSessionMeta>()
-  try {
-    const raw = readFileSync(indexPath(), 'utf8')
-    const parsed = JSON.parse(raw)
-    if (Array.isArray(parsed)) {
-      for (const m of parsed as ChatSessionMeta[]) if (m && typeof m.id === 'string') map.set(m.id, m)
-      indexCache = map
-      return map
+  const trusted = indexTrusted(chatsDir())
+  if (trusted) {
+    try {
+      const raw = readFileSync(indexPath(), 'utf8')
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) {
+        for (const m of parsed as ChatSessionMeta[]) if (m && typeof m.id === 'string') map.set(m.id, m)
+        indexCache = map
+        return map
+      }
+    } catch {
+      /* 无索引 / 解析失败 → 落到扫描重建 */
     }
-  } catch {
-    /* 无索引 / 解析失败 → 落到扫描重建 */
   }
-  // 扫描重建：读每个对话文件的头部信息，重建索引（首启无索引 / 索引损坏时的兜底）。
+  // 扫描重建：读每个对话文件的头部信息，重建索引（首启无索引 / 索引损坏 / 上一轮索引没写全时的兜底）。
   try {
     for (const name of readdirSync(chatsDir())) {
       if (name === INDEX_FILE || !name.endsWith('.json')) continue
@@ -334,17 +350,30 @@ function ensureIndex(): Map<string, ChatSessionMeta> {
   return map
 }
 
+/** 索引当前是否可信（有有效脏标记 = 不可信）。供调用方在报告里如实说明「列表可能陈旧」。 */
+export function isIndexTrusted(): boolean {
+  return indexTrusted(chatsDir())
+}
+
 /**
- * 索引落盘。**返回是否写成功。**
+ * 索引落盘（**唯一**清 dirty 的地方）。**返回是否写成功。**
  *
  * 以前静默吞掉：理由是「单条对话文件已是真源，下次成功保存即自愈」。作为后台自愈路径这没问题，但
  * `save()` 必须知道结果——索引没更新，`listSessions` 读到的仍是旧列表，用户那边就是「没保存」。
  * `indexCache` 尚未建立（还没列过会话）时返回 true：没有要写的东西，不算失败。
+ *
+ * ## dirty 的清除条件是「写出的索引完整」，不是「这次 writeFileAtomic 返回成功」
+ *
+ * 若某次写索引只带了几个条目就落了盘，清掉标记等于宣布「索引可信」——下次启动直接读这份缺条目的索引。
+ * 所以清标记放在**写出成功之后**，而且写出的是 `indexCache` 的全量（`indexCache` 由 ensureIndex 全量重建
+ * 或由 save 逐条维护，两者都保证覆盖所有已知会话）。
  */
 function persistIndex(): boolean {
   if (!indexCache) return true
   try {
     writeFileAtomic(indexPath(), JSON.stringify([...indexCache.values()], null, 2))
+    // 索引已完整写出 → 标记可以清了。清不掉只是下次多重扫一遍，不影响正确性。
+    clearDirty(chatsDir())
     return true
   } catch (e) {
     console.warn('[chat-store] 会话索引落盘失败：', (e as Error)?.message ?? e)
@@ -373,10 +402,15 @@ function persistIndex(): boolean {
 export function invalidateIndex(): void {
   sessionCache.clear()
   indexCache = null
+  /*
+   * 删索引文件本身就是「索引不再可信」这个事实的声明。不立标记的话，删文件失败（Windows 上被占用很常见）
+   * 会留下一份**合法但已过时**的索引，下次启动照读它，和没失效过一样。
+   */
+  markDirty(chatsDir())
   try {
     rmSync(indexPath(), { force: true })
   } catch {
-    /* 删不掉也无妨：缓存已清，下次 ensureIndex 会重扫并覆盖写 */
+    /* 删不掉也无妨：标记已立，下次 ensureIndex 会跳过旧索引直接重建 */
   }
 }
 
@@ -404,10 +438,17 @@ export function invalidateIndex(): void {
  */
 export function invalidateIndexOnly(): void {
   indexCache = null
+  /*
+   * 与 invalidateIndex 同样先立标记：删文件可能失败（被别的进程占着），而那份文件此刻**已经不完整**
+   * ——磁盘上多了新会话文件，索引里还没有它们。留着标记，下次读时才能确定要重建。
+   *
+   * 注意这里只让**索引**失效，sessionCache 原样保留（导入收尾专用，见上方说明）。
+   */
+  markDirty(chatsDir())
   try {
     rmSync(indexPath(), { force: true })
   } catch {
-    /* 删不掉也无妨：索引缓存已清，下次 ensureIndex 会重扫并覆盖写 */
+    /* 删不掉也无妨：标记已立，下次 ensureIndex 会跳过旧索引直接重建 */
   }
 }
 
@@ -524,22 +565,33 @@ function loadSessionFile(id: string): StoredSession | undefined {
 }
 
 /**
+ * `save()` 的可区分结果（P2-⑦）。
+ *
+ * 以前只有 `boolean`，于是「主 JSON 已原子写入、只有索引落盘失败」与「主 JSON 根本没写进去」对调用方
+ * 完全一样。批量替换据此回滚内存并报失败——而磁盘上其实已经是新值：用户看到「失败」，重启后模型却是新的。
+ *
+ * 索引是**派生数据**（`ensureIndex()` 会扫目录重建），主文件才是真源。所以这里分开：
+ *  - `saved`：主文件与索引都写成功；
+ *  - `saved-index-stale`：主文件已落盘、索引待重建。**不得**回滚内存，也**不得**报成整体失败；
+ *  - `not-saved`：主文件没写（缓存里没有 / 序列化或写盘抛错）。调用方该回滚、该报失败。
+ */
+export type SaveOutcome = 'saved' | 'saved-index-stale' | 'not-saved'
+
+/**
  * 保存单条对话：写该对话文件 + 刷新其索引条目并落盘。
  * 只重写这一条 + 轻量索引，与其它对话无关（这是一对话一文件的核心收益）；压缩过的对话只重写模型还看得到的
  * 那部分，更早的追加进拆分文件（见 syncCompacted）。
  *
- * **返回是否真的写进了磁盘。**
+ * **`saveOutcome` 返回三态；`save` 是它的布尔投影**（保留既有调用方，不必全仓改签名）。
  *
- * 为什么必须返回：以前是 `void` 且 `catch { return }`，于是「保存失败」与「保存成功」对调用方完全一样。
+ * 为什么必须能区分：以前是 `void` 且 `catch { return }`，于是「保存失败」与「保存成功」对调用方完全一样。
  * 用返回值表达失败的函数被当语句调用，是本项目最危险的一类静默——批量替换 `applyModelSwap` 就是这样把
- * 「磁盘没改」算成「已替换 N 个」（P1-2）。改签名的成本很小：既有调用点忽略返回值即可，只有需要知道
- * 结果的地方显式检查。
+ * 「磁盘没改」算成「已替换 N 个」（P1-2）。之后又加了「索引失败也返回 false」，却把**已落盘**也算成没保存，
+ * 于是出现反向错误：磁盘已新、界面报失败、内存被回滚（P2-⑦）。
  *
- * 三种 false 的情况分开说清（界面文案要能对上）：
- *  - 缓存里没有这条对话（`sessionCache` 被清过）：**没写**，不是成功；
- *  - 序列化 / 写盘抛错（磁盘满、被占、权限）；
- *  - 索引落盘失败也算 false：单个对话文件是写了，但列表读的是索引——索引没更新，用户刷新一次就看不到了，
- *    对他而言与「没保存」等价。
+ * 在 `not-saved` 之前还有两种「没写」：
+ *  - 缓存里没有这条对话（`sessionCache` 被清过）；
+ *  - 序列化 / 写盘抛错（磁盘满、被占、权限）。
  *
  * ## 调用方什么时候**必须**检查返回值
  *
@@ -551,10 +603,21 @@ function loadSessionFile(id: string): StoredSession | undefined {
  *
  * ⚠️ 将来若有新的「承诺型」操作复用这个函数，这里会重演 P1-2：请把返回值接上去、把失败送到界面。
  */
-export function save(id: string): boolean {
+export function saveOutcome(id: string): SaveOutcome {
   const s = sessionCache.get(id)
-  // 缓存里没有 = 不知道要写什么。明确返回 false：静默返回会让调用方以为存过了。
-  if (!s) return false
+  // 缓存里没有 = 不知道要写什么。明确返回 not-saved：静默返回会让调用方以为存过了。
+  if (!s) return 'not-saved'
+  /*
+   * ⚠️ **write-ahead**：先立脏标记，再写主数据。
+   *
+   * 顺序不能反：主文件写完、索引还没写的那一刻若进程退出，磁盘上就是「新主文件 + 旧索引」。
+   * 旧索引是合法 JSON，下次启动照读，列表停在旧模型上，刷新也不修。立了标记，重启时 ensureIndex
+   * 会跳过旧索引直接重建。
+   *
+   * 标记立不起来（目录 / 符号链接 / 垃圾占位 / 无权限）就**不写主数据**：那样等于放弃了
+   * 「索引随后会被更新」这条保证，写下去只会让磁盘进入不一致状态且无从发现。
+   */
+  if (!markDirty(chatsDir())) return 'not-saved'
   let stale: string | null
   try {
     stale = syncCompacted(s)
@@ -563,12 +626,21 @@ export function save(id: string): boolean {
     writeFileAtomic(fileForId(id), JSON.stringify({ ...s, messages: live }, mediaReplacer, 2))
   } catch (e) {
     console.warn(`[chat-store] 对话 ${id} 落盘失败：`, (e as Error)?.message ?? e)
-    return false
+    /*
+     * 主数据没写成：标记保留（不清）。它表达的是「索引可能没有如实反映磁盘」，而此刻主文件也没更新，
+     * 下次启动多重建一次索引完全无害；反过来若在这里清掉，一旦主文件其实写成功了一半，就再无自愈路径。
+     */
+    return 'not-saved'
   }
   if (stale) removeCompactedFiles(id, s.compacted?.file)
   ensureIndex().set(id, metaOf(s))
-  // 索引是列表的真源：它没落盘，用户下次看到的仍是旧列表，与「没保存」同效。
-  return persistIndex()
+  // 主文件已经落地（上面的 writeFileAtomic 没抛）。索引失败只降级为「待重建」，不能反过来说没保存。
+  return persistIndex() ? 'saved' : 'saved-index-stale'
+}
+
+/** 布尔投影：`saved` 以外都为 false（索引待重建对「列表能不能看到」在当下仍算不完整）。 */
+export function save(id: string): boolean {
+  return saveOutcome(id) === 'saved'
 }
 
 /** 承诺型成员绑定操作必须回读磁盘确认，不能用缓存冒充落盘结果。 */
@@ -625,6 +697,61 @@ export function listSessions(): ChatSessionMeta[] {
 /** 取某对话全量（id 全局唯一）。 */
 export function getSession(id: string): StoredSession | undefined {
   return loadSessionFile(id)
+}
+
+/**
+ * 外部（导入器）刚改写了磁盘上的会话文件时，把它**已载入的缓存对象**换成磁盘上的新内容。
+ *
+ * ## 为什么不能直接 copyFileSync 了事（P1-①）
+ *
+ * `save(id)` 只认 `sessionCache` 里的对象。导入期间用户点开过这个对话，缓存里就留着一份旧对象；
+ * 导入器随后直接覆盖磁盘文件，缓存仍是旧的。下一次正常保存（一轮对话的 onStep / finally）就把旧消息集
+ * 写回去——上游新同步过来的消息**静默消失**，界面还显示得正常。
+ *
+ * ## 为什么是「就地换内容」而不是清缓存 / 换对象
+ *
+ * 一轮正在跑的对话全程持有**对象引用**（`chat-turns.ts` 的 `ensureSession()` 返回值），不会重新 getSession。
+ * 清 `sessionCache` 会让那轮之后所有 `save()` 因「缓存里没有」静默 return（P0-1）；换成新对象则让那轮的引用
+ * 指向一份不再被 save 认的孤儿。所以只把**同一个对象**的字段替换成磁盘内容，引用不变、save 继续可用。
+ *
+ * 返回 false 表示没有可替换的缓存（本来就没载入，或磁盘此刻读不出来）：调用方不需要、也不能假装同步成功。
+ * 未载入时磁盘就是唯一真源，下次 `getSession` 自然读到新内容。
+ */
+export function adoptSessionFile(id: string): boolean {
+  if (historyLocked(id) || !sessionCache.has(id)) return false
+  let parsed: StoredSession
+  try {
+    parsed = JSON.parse(readFileSync(fileForId(id), 'utf8')) as StoredSession
+  } catch {
+    // 读不出来就不动内存：宁可让缓存保持旧的一致快照，也不要用半份内容替换掉它
+    return false
+  }
+  if (!parsed || typeof parsed.id !== 'string') return false
+  const live = sessionCache.get(id)!
+  /*
+   * 磁盘上的主文件只存「压缩边界之后」的那段；缓存里必须是完整记录，否则下次 save 会把模型看不到的历史丢掉。
+   * 拆分文件读不出来时保持与 loadSessionFile 同样的降级：只用主文件那段（不臆造历史）。
+   */
+  let older: Message[] | null = null
+  if (Array.isArray(parsed.messages) && parsed.compacted) {
+    older = readCompacted(parsed.compacted)
+    if (older) parsed.messages = [...older, ...parsed.messages]
+  }
+  if (Array.isArray(parsed.messages)) hydrateMessages(parsed.messages)
+  // old persistedPrefix 属于旧对象，先丢；下面的 assign 结束后再按新内容记一次
+  persistedPrefix.delete(live)
+  for (const key of Object.keys(live) as (keyof StoredSession)[]) {
+    if (!(key in parsed)) delete live[key]
+  }
+  Object.assign(live, parsed)
+  /*
+   * ⚠️ 前缀必须记在 **live** 上，不能记在临时解析出来的 parsed 对象上（b9127cf 的漏洞）。
+   * `save()` 用 `persistedPrefix.get(s)` 取，s 是缓存里那个对象——记在 parsed 上等于没记：
+   * 下一次保存会认为「已写进拆分文件的那段不在了」，于是换新文件名整份重写，旧文件被删、
+   * 压缩边界平白漂移一次。指针 count 没变，但文件身份变了，正是 P1-② 要保住的东西。
+   */
+  if (older) persistedPrefix.set(live, older)
+  return true
 }
 
 /**
@@ -715,9 +842,21 @@ export function setSessionArchived(id: string, archived: boolean): boolean {
   return true
 }
 
-/** 删除某对话：清缓存 + 索引 + 磁盘文件（含拆分存盘的较早记录、它存下的超长工具结果）。 */
+/**
+ * 删除某对话：清缓存 + 索引 + 磁盘文件（含拆分存盘的较早记录、它存下的超长工具结果）。
+ *
+ * 顺序与 `saveOutcome` 同一套：**先立脏标记**再动磁盘。删除同样是「主数据 → 索引」两步，
+ * 中途退出会留下「文件已删、索引里还有这条」的索引，下次启动点进去是一篇空白对话。
+ * 标记立不起来时仍然继续删（删除是用户明确要求的动作，不能因为索引机制失效就拒绝），
+ * 只是这次索引的更新不带有「可信」保证。
+ */
 export function deleteSession(id: string): void {
   sessionCache.delete(id)
+  markDirty(chatsDir())
+  /*
+   * 索引里有这条才需要重写索引；没有就没有「新索引」可写，此时**不清标记**——
+   * 没有写出过完整索引，就没有「索引可信」这个事实，留着让下次启动重建一遍。
+   */
   if (ensureIndex().delete(id)) persistIndex()
   try {
     rmSync(fileForId(id), { force: true })

@@ -29,5 +29,8 @@
       "esbuild",
       "@parcel/watcher"
     ]
+  },
+  "devDependencies": {
+    "puppeteer": "^25.18.1"
   }
 }

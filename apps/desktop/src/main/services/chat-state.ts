@@ -14,6 +14,9 @@ import { getPersona, resolvePersonaId } from './personas'
 import { notifyNeedsInput, type PendingInput } from './reply-notify'
 import { getSession, type StoredNotice, type StoredSession } from './chat-store'
 import { gcBlobs, type CheckpointRec, type UndoFile } from './checkpoints'
+import { busySessions } from './chat-locks'
+
+export { busySessions, compacting, rewinding, historyLocked } from './chat-locks'
 
 /** 计划审阅的结果（PlanResponse 去掉键，feedback 已清洗：仅 keep 且非空时才有）。 */
 export type PlanVerdict = { decision: 'approve' | 'keep' | 'ignore'; feedback?: string }
@@ -61,13 +64,7 @@ export function recordTurnDuration(s: StoredSession, turnStart: number, ms: numb
 }
 
 /**
- * 正在跑回合的会话 → 其 turnId（主轮与定时任务都登记）。activeTurns 按 turnId 做键、查不到会话，
- * 回滚 / 撤销 / blob GC 据此判断「会话忙」而拒绝执行，免得与进行中的回合互相改写；
- * 渲染层打开会话时也据此接上进行中的回合（chat:attach-session）。
- */
-export const busySessions = new Map<string, string>()
-
-/** 正在跑回合的会话 → 这一轮开始的时刻（member_status 据此报「已用多久」）。 */
+ * 正在跑回合的会话 → 这一轮开始的时刻（member_status 据此报「已用多久」）。 */
 export const busySince = new Map<string, number>()
 
 /**
@@ -201,22 +198,6 @@ export function setWindowGetter(fn: () => BrowserWindow | null): void {
 
 export function emit(turnId: string, sessionId: string, event: ChatStreamEvent): void {
   publishChatEvent({ turnId, sessionId, event })
-}
-
-/** 正在手动压缩（/compact）的会话：期间不为后台任务通知起轮，免得与压缩同时改写 messages。 */
-export const compacting = new Set<string>()
-
-/** 正在执行回滚 / 撤销的会话：防同一会话的两次回滚交错，期间也不起轮。 */
-export const rewinding = new Set<string>()
-
-/**
- * 会话的历史正被改写：回合进行中、手动压缩中、回滚 / 撤销中。三者互斥，删轮也须等它们结束——
- * 回合一直往起轮时拿到的那个 messages 数组里追加，删轮 / 回滚会把 s.messages 换成新数组，交错的话
- * 落盘的是新数组，这一轮的输出就丢了。渲染层发起前也会检查，但挡不住主进程自己起的轮（定时任务、
- * 手机端消息、后台子智能体结束后的唤醒、成员交差），故以主进程这里为准。
- */
-export function historyLocked(sessionId: string): boolean {
-  return busySessions.has(sessionId) || compacting.has(sessionId) || rewinding.has(sessionId)
 }
 
 /** 手机端发起、仍在进行的回合：回复与交互卡都推到手机，桌面不再弹系统通知。 */

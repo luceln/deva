@@ -43,6 +43,41 @@ function pngFile(name = 'shot.png') {
   return new File([bytes], name, { type: 'image/png' })
 }
 
+/**
+ * 当前生效的 locale。
+ *
+ * `I18nProvider` 挂载时会把 `document.documentElement.lang` 设成它（见 i18n.tsx 的 useEffect），
+ * 所以直接读 DOM 就拿到了界面真正用的语言，不用猜 `navigator.language`。
+ */
+function currentLocale() {
+  return document.documentElement.getAttribute('lang') || 'en'
+}
+
+/**
+ * 按**当前 locale** 取期望文案。
+ *
+ * 断言里不写死「附加文件」「{n} 个附件也会一起带进去」这类字面量：写死就只在中文系统成立，
+ * GitHub runner 的 navigator.language 是 en-US，界面渲染英文，断言必然全挂
+ * （实测 `1 attachments go with it`、找不到「附加文件」按钮）。
+ * 换成从词条表取当前语言的期望值，中英文环境都能跑，也不再随文案改动而失效。
+ */
+function t(key) {
+  const table = window.__messages
+  if (!table) {
+    throw new Error('window.__messages 没挂上——entry.tsx 里那行 `window.__messages = messages` 被删了？')
+  }
+  const locale = currentLocale()
+  const dict = table[locale]
+  if (!dict) throw new Error(`没有 ${locale} 的词条表（有：${Object.keys(table).join(', ')}）`)
+  let cur = dict
+  for (const p of key.split('.')) {
+    if (typeof cur !== 'object' || cur === null || !(p in cur)) throw new Error(`词条 ${key} 不存在`)
+    cur = cur[p]
+  }
+  if (typeof cur !== 'string') throw new Error(`词条 ${key} 不是字符串`)
+  return cur
+}
+
 /** 走到「回合进行中」的输入框。 */
 async function mountStreaming(extra = {}) {
   window.__resetChat()
@@ -93,9 +128,9 @@ async function pickFile(file) {
     }
   ]
   const btn = [...document.querySelectorAll('.cf-composer button')].find(
-    (b) => b.getAttribute('aria-label') === '附加文件'
+    (b) => b.getAttribute('aria-label') === t('cf.attach')
   )
-  assert(btn, '找不到「附加文件」按钮')
+  assert(btn, `找不到「${t('cf.attach')}」按钮（当前 locale=${currentLocale()}）`)
   btn.click()
   await sleep(80)
 }
@@ -119,7 +154,11 @@ ok('回合进行中：粘贴图片能进输入框（旧行为是直接丢弃）'
 
 ok('回合进行中：附件条上出现「随这条插话带进去」的说明', async () => {
   const note = await waitFor(() => document.querySelector('.cf-attach__insertnote'), '没有插话附件说明')
-  assert(/附件/.test(note.textContent), `说明文案不对：${note.textContent}`)
+  // 期望文案从词条表取当前 locale 的，并把 {n} 换成实际附件数（此时是 1 张）。
+  // 不写死中文：写死就只在中文系统成立（CI 的 en-US 下实测拿到
+  // "1 attachments go with it"，硬比「附件」二字必然失败）。
+  const expected = t('cf.insert.withAttachments').replace('{n}', '1')
+  eq(note.textContent.trim(), expected, '说明文案')
 })
 
 ok('只有附件、没有正文也能插话，且附件随请求交出', async () => {

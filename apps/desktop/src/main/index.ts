@@ -33,6 +33,7 @@ import { sweepOnStartup } from './services/worktree/sweep'
 import { registerGitIpc } from './services/git'
 import { registerClipboardIpc } from './services/clipboard'
 import { registerDeliverablesIpc } from './services/deliverables'
+import { registerRoleHomeIpc } from './services/role-home'
 import { registerTasksIpc } from './services/tasks'
 import { startScheduler } from './services/scheduler'
 import { registerRemoteIpc, stopAllChannels } from './services/remote'
@@ -453,6 +454,9 @@ if (!app.requestSingleInstanceLock()) {
 
   // 交付卡（present_files）：文件信息与缩略图、用默认应用打开、在文件夹中显示（只作用于该对话里交付的文件）
   registerDeliverablesIpc()
+
+// 角色的默认工作区（没挂载工作区时的落点）：角色编辑页「工作区」一栏用
+  registerRoleHomeIpc()
 
   // 定时任务 / 自动任务（全局 ~/.deva-plus/tasks.json；创建时批准、执行时零交互）。
   registerTasksIpc(() => mainWindow)

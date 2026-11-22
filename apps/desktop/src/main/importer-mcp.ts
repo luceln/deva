@@ -2,6 +2,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { getDevaHome } from './services/config'
 import { setEnabled, upsertServerChecked, type McpValue } from './services/mcp-config'
+import { pluginOwnedMcpIds } from './services/plugin-managed'
 import { backupBroken, inspectTarget } from './importer-target'
 import type { Failure, StepStat } from '../shared/import-protocol'
 
@@ -113,8 +114,13 @@ function isSafeId(id: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(id) && id !== '.' && id !== '..'
 }
 
-export function importMcp(srcHome: string): StepStat & { failed: Failure[] } {
-  const stat: StepStat & { failed: Failure[] } = { copied: [], skipped: [], failed: [] }
+export function importMcp(srcHome: string): StepStat & { failed: Failure[]; pluginManaged: string[] } {
+  const stat: StepStat & { failed: Failure[]; pluginManaged: string[] } = {
+    copied: [],
+    skipped: [],
+    failed: [],
+    pluginManaged: []
+  }
   const fail = (id: string, reason: string): void => {
     stat.failed.push({ step: 'mcp', id, reason })
   }
@@ -137,12 +143,42 @@ export function importMcp(srcHome: string): StepStat & { failed: Failure[] } {
   const ids = Object.keys(srcMap)
   if (!ids.length) return stat
 
+  /*
+   * 插件托管的 MCP 条目：**只有在有明确 MCP 所有权依据时才排除**（P2-13）。
+   *
+   * ## 为什么不再拿 provider id 去映射 MCP id
+   *
+   * 旧实现是 `pluginManagedProviderIds(...)` 读插件状态里的 `providerId`，然后拿这个集合去排除 `mcpServers`
+   * 的同名条目——把**两个互相独立的 id 空间**当成一个用。实测的误伤：某 home 声明插件 provider 叫 `relay`，
+   * 而源里有个用户自配、与插件毫无关系的 MCP server 也叫 `relay` → 正常的 MCP 被误排，界面还告诉用户
+   * 「归插件管，去插件里改」。插件状态文件里根本没有 MCP 字段，这个映射没有任何依据。
+   *
+   * ## 现在的判据
+   *
+   * 只认**插件自己对 MCP 条目的声明**：插件状态文件的 `mcpServers` 字段（字符串数组）。插件若在某天开始
+   * 写这个字段，就按它排除；没写（当前 magpie 插件就是这种情况）则一律当普通条目导入。
+   *
+   * ⚠️ 无法确认归属时**不排除**——这会让 plugin 写下的死条目在没装插件时也被搬过来。那个代价是可见的：
+   * 用户看到一个连不上的条目，删掉即可；而误排用户自己的服务是**不可见**的（条目直接消失，界面上还被
+   * 归到「插件托管」那一栏，用户会去插件里找一个他根本没配过的服务）。宁可多一条可删的，不可少一条看不见的。
+   *
+   * ⚠️ 归 `pluginManaged` 而不是 `skipped`：`skipped` 的语义是「目标已有同名、保留本地、不用管」，
+   * 而这里是**根本没打算导**。混进 skipped 会让用户以为本地本来就有一份。
+   */
+  const ownedMcp = pluginOwnedMcpIds([srcHome, getDevaHome()])
+  const wanted = ids.filter((id) => {
+    if (!ownedMcp.has(id)) return true
+    stat.pluginManaged!.push(id)
+    return false
+  })
+  if (!wanted.length) return stat
+
   // ② 目标 mcp.json 四态：被占位 / 读不出时**一个字节都不写**
   const dst = targetState()
   if (dst === 'blocked' || dst === 'unreadable') {
     // 整份目标配置都动不了：逐条报失败，id 用服务 id 让用户知道是**哪些**没进来
     const reason = dst === 'blocked' ? 'target-blocked' : 'target-unreadable'
-    for (const id of ids) stat.failed.push({ step: 'mcp', id, reason })
+    for (const id of wanted) stat.failed.push({ step: 'mcp', id, reason })
     return stat
   }
 
@@ -162,13 +198,13 @@ export function importMcp(srcHome: string): StepStat & { failed: Failure[] } {
     existing = dst === 'absent' ? new Set() : existingIds()
   } catch {
     // 探测与读取之间被抢走：现在不知道里面有什么，绝不覆盖
-    for (const id of ids) fail(id, 'target-unreadable')
+    for (const id of wanted) fail(id, 'target-unreadable')
     return stat
   }
 
   // ③ 逐条并入：只补目标没有的 id
   const imported: string[] = []
-  for (const id of ids) {
+  for (const id of wanted) {
     if (!isSafeId(id)) {
       /*
        * 非法 id 搬不了（要当映射键与密钥前缀 `mcp:<id>:<field>`，含冒号/分隔符会撕开命名空间）。
