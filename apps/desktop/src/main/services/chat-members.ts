@@ -8,7 +8,6 @@ import type {
 import { publishSessionsChanged } from './chat-bus'
 import { mkdirSync, statSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import { randomUUID } from 'crypto'
 import { type ContentPart, type StopReason } from '../providers/types'
 import { memberAddedRecord, type MemberListingItem } from './listing'
 import {
@@ -36,15 +35,7 @@ import { withoutQuotes } from '../../shared/quote'
 import { DEFAULT_PERSONA_ID, getPersona, listPersonas, resolvePersonaId } from './personas'
 import { roleHome } from './role-home'
 import { notifyReplyDone } from './reply-notify'
-import { ensureSession, getSession, save as saveProject, verifyMemberMirrorSaved, verifyMemberTransactionMarker, type StoredSession } from './chat-store'
-import { invalidateMemberBindingRequest } from './member-binding-state'
-import {
-  beginMemberBindingTransaction, bindingSnapshotMatches, clearMemberBindingTransaction,
-  makeMemberBindingSnapshot, persistBindingSnapshot, restoreBindingMemory,
-  commitMemberBindingTransaction, recoverMemberBindingTransaction
-} from './member-binding-transaction'
-import type { MemberWorktreeIdentity } from '../../shared/member-worktree-protocol'
-import type { MemberWorktreeBindingTransaction } from './member-binding-transaction'
+import { ensureSession, getSession, save as saveProject, type StoredSession } from './chat-store'
 import { isEn } from '../locale'
 import {
   browserHasHandoff
@@ -320,7 +311,8 @@ function addMember(
     prior.root = p.root ?? memberFolder(prior)
     saveProject(main.id)
     if (sub && p.root) {
-      if (!setMemberFolder(sub, p.root)) return '成员恢复目录未能保存，请重试'
+      sub.focusRoot = p.root
+      saveProject(sub.id)
     }
     return { ref: prior, restored: true }
   }
@@ -421,61 +413,16 @@ export function markMemberSetting(sub: StoredSession, field: 'modelSet' | 'effor
 /**
  * 成员会话里挂载 / 卸载文件夹（null = 卸载，成员没有文件夹）：同步写回主对话名单（名单随消息下发，主智能体会收到更新）。
  */
-export function setMemberFolder(
-  sub: StoredSession,
-  folder: string | null,
-  identity?: MemberWorktreeIdentity
-): boolean {
+export function setMemberFolder(sub: StoredSession, folder: string | null): void {
   const main = sub.parentId ? getSession(sub.parentId) : undefined
   const ref = main?.members?.find((m) => m.sessionId === sub.id)
-  if (!main || !ref || ref.removed) return false
-  if (!recoverMemberBindingTransaction(sub.id)) return false
-  invalidateMemberBindingRequest(sub.id)
-  const before = makeMemberBindingSnapshot(sub, ref.root ?? null)
-  const after = { focusRoot: folder, revision: (sub.memberBindingRevision ?? 0) + 1,
-    identity, recovery: undefined, mirrorRoot: folder }
-  const tx: MemberWorktreeBindingTransaction = {
-    operationId: randomUUID(), attemptedRoot: folder, at: Date.now(), phase: 'prepared', before, after
+  if (main && ref) {
+    ref.root = folder
+    saveProject(main.id)
   }
-  // 先写独立事务日志，崩溃或回滚失败后执行守卫据此 fail-closed，启动时核实两份JSON并恢复before。
-  if (!beginMemberBindingTransaction(sub.id, tx)) return false
-  sub.focusRoot = after.focusRoot
-  sub.memberBindingRevision = after.revision
-  if (identity) sub.memberWorktreeIdentity = identity; else delete sub.memberWorktreeIdentity
-  delete sub.memberWorktreeRecovery
-  sub.memberBindingTransaction = tx
-  ref.root = after.mirrorRoot
-  const forwardSaved = persistBindingSnapshot(sub, main, after, 'forward-sub', 'forward-main')
-  if (forwardSaved && bindingSnapshotMatches(sub, after) &&
-      verifyMemberMirrorSaved(main.id, sub.id, after.mirrorRoot)) {
-    // 清事务标记时journal仍是prepared，崩溃会安全回滚before；随后提交journal才可报告成功。
-    delete sub.memberBindingTransaction
-    saveProject(sub.id)
-    if (verifyMemberTransactionMarker(sub.id, undefined) && commitMemberBindingTransaction(sub.id, tx)) {
-      clearMemberBindingTransaction(sub.id)
-      publishSessionsChanged()
-      return true
-    }
-    sub.memberBindingTransaction = tx
-  }
-
-  restoreBindingMemory(sub, main, before)
-  sub.memberBindingTransaction = tx
-  const rolledBack = persistBindingSnapshot(sub, main, before, 'rollback-sub', 'rollback-main')
-  if (rolledBack && bindingSnapshotMatches(sub, before) && verifyMemberMirrorSaved(main.id, sub.id, before.mirrorRoot)) {
-    delete sub.memberBindingTransaction
-    saveProject(sub.id)
-    if (verifyMemberTransactionMarker(sub.id, undefined) && clearMemberBindingTransaction(sub.id)) {
-      publishSessionsChanged()
-      return false
-    }
-    sub.memberBindingTransaction = tx
-  }
-  // 无法确认的事务日志必须保留；主、子两端只要能持久化，就向守卫发布不可执行标记。
-  sub.memberBindingTransaction = tx
+  sub.focusRoot = folder
   saveProject(sub.id)
-  console.warn('[member-binding] 绑定事务无法核实，执行将 fail-closed，等待恢复', sub.id)
-  return false
+  publishSessionsChanged()
 }
 
 /**

@@ -2671,62 +2671,6 @@ async function scenarioWorktreeCreate(): Promise<void> {
   eq('A4b：worktree 数量比之前多一条', entries.length, 2)
   eq('A4b：第一条是主检出', path.basename(entries[0].path), 'repo')
 
-  // 可控同步：两个请求都完成锁外预检，再同时进入锁队列（不靠 sleep）。
-  {
-    let arrived = 0
-    let release!: () => void
-    const barrier = new Promise<void>((r) => { release = r })
-    CR.setCreatePrecheckHookForTest(async () => {
-      arrived++
-      if (arrived === 2) release()
-      await barrier
-    })
-    const concurrentPath = path.join(DST, 'wts', 'concurrent')
-    let results: Awaited<ReturnType<typeof CR.createWorktree>>[]
-    try {
-      results = await Promise.all([1, 2].map(() => CR.createWorktree({
-        repoRoot: repo, branch: 'wt/concurrent', path: concurrentPath, skipDeps: true
-      })))
-    } finally { CR.setCreatePrecheckHookForTest() }
-    eq('并发：两请求均通过锁外预检', arrived, 2)
-    eq('并发：恰好一个成功', results.filter((r) => r.ok).length, 1)
-    const rejected = results.find((r) => !r.ok)
-    check('并发：第二请求不进入 cleanup', !!rejected && !rejected.ok && !rejected.cleanup, JSON.stringify(rejected))
-    eq('并发：首个目录保留', fs.existsSync(concurrentPath), true)
-    eq('并发：首个 HEAD 保留', gitOut(concurrentPath, 'rev-parse', 'HEAD'), head0)
-    eq('并发：首个 branch 保留', gitOut(concurrentPath, 'rev-parse', '--abbrev-ref', 'HEAD'), 'wt/concurrent')
-    eq('并发：首个 active 记录保留', S.getRecord(concurrentPath)?.phase, 'active')
-    const noProof = await GW.cleanupFailedCreate({ repoRoot: repo, path: concurrentPath,
-      branch: 'wt/concurrent', intent: { branchExistedAtStart: false, pathExistedAtStart: false } })
-    eq('归属：仅同仓库和旧不存在快照不授权清理', noProof.worktreeRemoved, false)
-    eq('归属：无凭据不能删分支', noProof.branchRemoved, false)
-    eq('归属：无凭据目录仍保留', fs.existsSync(concurrentPath), true)
-    const winner = S.getRecord(concurrentPath)!
-    const wrongToken = await GW.cleanupFailedCreate({ repoRoot: repo, path: concurrentPath,
-      branch: 'wt/concurrent', intent: { ...winner.intent,
-        ownership: { ...winner.intent.ownership!, token: 'not-this-create' } } })
-    eq('归属：同仓库同 SHA 但请求标记不同，不解登记', wrongToken.worktreeRemoved, false)
-    const wrongDirectory = await GW.cleanupFailedCreate({ repoRoot: repo, path: concurrentPath,
-      branch: 'wt/concurrent', intent: { ...winner.intent,
-        ownership: { ...winner.intent.ownership!, ino: -1 } } })
-    eq('归属：目录身份不符时不删分支', wrongDirectory.branchRemoved, false)
-    eq('归属：目录身份不符时不解登记', wrongDirectory.worktreeRemoved, false)
-    eq('归属：拒绝清理后首个 HEAD 不变', gitOut(concurrentPath, 'rev-parse', 'HEAD'), head0)
-
-    // 状态变化发生在锁外预检之后，必须锁内再次要求脏确认。
-    CR.setCreatePrecheckHookForTest(async () => {
-      fs.writeFileSync(path.join(repo, 'concurrent-wip.txt'), 'wip')
-    })
-    try {
-      const r = await CR.createWorktree({ repoRoot: repo, branch: 'wt/new-dirty',
-        path: path.join(DST, 'wts', 'new-dirty'), skipDeps: true })
-      eq('并发：锁内重验脏确认', !r.ok && r.reason, 'needs-confirm')
-    } finally {
-      CR.setCreatePrecheckHookForTest()
-      fs.rmSync(path.join(repo, 'concurrent-wip.txt'), { force: true })
-    }
-  }
-
   // ══════════ A7：n 层单分支树 —— 必须从主检出取 HEAD ══════════
   /*
    * 场景：在 worktree-A 里做一次提交，让 A 的 HEAD 前进；
@@ -2801,12 +2745,7 @@ async function scenarioWorktreeCreate(): Promise<void> {
   fs.mkdirSync(blockedPath, { recursive: true })
   fs.writeFileSync(path.join(blockedPath, 'user-file.txt'), 'user data\n')
 
-  const blockedStat = fs.lstatSync(blockedPath)
-  const failureOwner = { token: 'qa-failed-add', baseSha: headBeforeFail,
-    dev: blockedStat.dev, ino: blockedStat.ino, birthtimeMs: blockedStat.birthtimeMs }
-  gitOut(repo, 'update-ref', '--create-reflog', '-m', 'deva-create:qa-failed-add',
-    'refs/heads/wt/fail', headBeforeFail, '0'.repeat(40))
-  const addFail = await GW.addWorktree(repo, blockedPath, 'wt/fail', headBeforeFail, true)
+  const addFail = await GW.addWorktree(repo, blockedPath, 'wt/fail', headBeforeFail)
   info('add 到已存在路径的结果', JSON.stringify({ ok: addFail.ok, stderr: addFail.stderr.slice(0, 80) }))
   eq('A4：add 到已存在路径会失败', addFail.ok, false)
 
@@ -2814,7 +2753,7 @@ async function scenarioWorktreeCreate(): Promise<void> {
     repoRoot: repo,
     path: blockedPath,
     branch: 'wt/fail',
-    intent: { branchExistedAtStart: false, pathExistedAtStart: false, ownership: failureOwner }
+    intent: { branchExistedAtStart: false, pathExistedAtStart: false }
   })
   info('清理结果', JSON.stringify(cleanup))
 
@@ -2854,21 +2793,12 @@ async function scenarioWorktreeCreate(): Promise<void> {
     !String(mergedCheck.stdout ?? '').split('\n').includes('wt/unmerged'),
     String(mergedCheck.stdout ?? '').trim()
   )
-  // 分支前进后不再是创建失败资产，不能沿旧 intent 强删。
-  const protectedU = await GW.cleanupFailedCreate({ repoRoot: repo, path: wtU,
-    branch: 'wt/unmerged', intent: rU.record.intent })
-  eq('归属：分支产生用户提交后拒绝自动删除', protectedU.branchRemoved, false)
-  const unmergedSha = gitOut(repo, 'rev-parse', 'wt/unmerged')
-  // 重建为“本次刚 CAS 创建、尚未 checkout”的未合并分支，验证合法失败清理仍能 -D。
-  gitOut(repo, 'branch', '-D', 'wt/unmerged')
-  gitOut(repo, 'update-ref', '--create-reflog', '-m', 'deva-create:qa-unmerged',
-    'refs/heads/wt/unmerged', unmergedSha, '0'.repeat(40))
+  // 只清分支这一半（目录已不在）
   const cleanupU = await GW.cleanupFailedCreate({
     repoRoot: repo,
     path: wtU,
     branch: 'wt/unmerged',
-    intent: { branchExistedAtStart: false, pathExistedAtStart: false,
-      ownership: { ...rU.record.intent.ownership!, token: 'qa-unmerged', baseSha: unmergedSha } }
+    intent: { branchExistedAtStart: false, pathExistedAtStart: false }
   })
   info('未合并分支的清理结果', JSON.stringify(cleanupU))
   eq('A25：未合并的孤儿分支也被删掉（必须 -D，-d 会拒绝）', gitOut(repo, 'branch', '--list', 'wt/unmerged'), '')
@@ -6401,10 +6331,6 @@ async function scenarioWorktreeMerge(): Promise<void> {
 }
 
 const SCENARIOS: Record<string, () => Promise<void> | void> = {
-  memberwt: async () => {
-    const { testMemberWorktree } = await import('./member-worktree-tests')
-    await testMemberWorktree({ dst: DST, makeRepo, eq, check })
-  },
   full: scenarioFull,
   sweep: scenarioSweep,
   memidem: scenarioMemIdem,

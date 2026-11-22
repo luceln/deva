@@ -22,7 +22,7 @@ const ELECTRON_BIN = path.join(REPO, 'node_modules', 'electron', 'dist', 'electr
 const SCENARIOS = process.argv.slice(2).filter((a) => !a.startsWith('--'))
 const KEEP = process.argv.includes('--keep')
 const SEEDED = process.argv.includes('--seeded')
-const ALL = ['memberwt', 'shape', 'brandhome', 'full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'swapindex', 'swapstale', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtremove', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'sessync', 'memcond', 'wtmerge', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
+const ALL = ['shape', 'brandhome', 'full', 'sweep', 'memidem', 'budget', 'broken', 'writefail', 'mcp', 'mcpsrc', 'mcptgt', 'mcpipc', 'mcpunsafe', 'keyless', 'keytri', 'keydecrypt', 'keynoenc', 'cfgcorrupt', 'cfgabsent', 'swapfail', 'swapindex', 'swapstale', 'kindcopy', 'swapws', 'blockedturn', 'secretscorrupt', 'secretsabsent', 'swapcand', 'blockedlist', 'wtpaths', 'wtstore', 'wtprecheck', 'wtcreate', 'wtremove', 'wtbrief', 'wtsweep', 'wtlock', 'worktree', 'insatt', 'rekey', 'plugmgr', 'sessync', 'memcond', 'wtmerge', 'dangclass', 'locks', 'nosource', 'empty', 'gate', 'skills', 'resume', 'xproc', 'personas']
 
 /**
  * 不跑导入夹具、直接调仓库校验脚本的场景：`shape` 与 `brandhome`。

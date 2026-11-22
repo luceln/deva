@@ -81,18 +81,10 @@ export async function runMountTool(p: {
     return refused()
   }
 
+  ctx.workspaceRoot = picked
   const s = getSession(sessionId)
-  if (s?.parentId) {
-    // 成员换目录必须走绑定事务：失败时 focusRoot 没生效，绝不能继续走「已为你指定」的成功分支——
-    // 那会让模型以为工作区已经切过去，而实际还在旧目录里干活（谎报）。
-    // ctx 也只在绑定成功后才改，否则本轮后续的相对路径会指向一个没生效的目录。
-    if (!setMemberFolder(s, picked))
-      return { content: '成员目录绑定未能确认保存，请重试。', isError: true, summary: '目录绑定未保存' }
-    ctx.workspaceRoot = picked
-  } else {
-    if (s) s.focusRoot = picked
-    ctx.workspaceRoot = picked
-  }
+  if (s?.parentId) setMemberFolder(s, picked)
+  else if (s) s.focusRoot = picked
   // 措辞只陈述「本次起」：工作区可被用户随时切换，而这条结果会永久留在上下文里，后续一律以系统提示词【环境】为准。
   let content = member
     ? `用户已为你指定负责的文件夹：${picked}。本轮接下来的相对路径以它为基准；文件夹可由用户随时更换，后续一律以系统提示词【环境】里的当前工作目录为准。`
