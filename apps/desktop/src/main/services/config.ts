@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { writeFileAtomic } from './atomic-write'
 import type { ConfigChangedEvent, ConfigSetResult } from '../../shared/config-protocol'
+import { DEVA_HOME_DIRNAME } from '../../shared/brand'
 
 /**
  * 应用配置存储（主进程）。
@@ -27,7 +28,7 @@ let home = ''
 export function getDevaHome(): string {
   if (home) return home
   const override = process.env.DEVA_HOME?.trim()
-  home = override && override.length > 0 ? override : join(app.getPath('home'), '.deva-plus')
+  home = override && override.length > 0 ? override : join(app.getPath('home'), DEVA_HOME_DIRNAME)
   try {
     if (!existsSync(home)) mkdirSync(home, { recursive: true })
   } catch {
