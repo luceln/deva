@@ -15,7 +15,6 @@ import { BrowserWindow, ipcMain, utilityProcess, type UtilityProcess } from 'ele
 import { join } from 'path'
 import { detectShells, resolveShell } from './shells'
 import { assertMemberTerminalDirectory } from './member-worktree-guard'
-import { getSession, listSessions } from './chat-store'
 
 /** 渲染层传入的建终端参数（结构化复述，与 preload 对齐）。 */
 interface CreateOptions {
@@ -95,10 +94,7 @@ export function registerTerminalIpc(getWindow: () => BrowserWindow | null): void
   )
 
   ipcMain.handle('terminal:create', async (_evt, opts: CreateOptions): Promise<{ id: string }> => {
-    const sessionId = opts.sessionId ?? listSessions().find((meta) => {
-      const s = getSession(meta.id)
-      return s?.parentId && s.focusRoot === opts.cwd
-    })?.id
+    const sessionId = opts.sessionId
     await assertMemberTerminalDirectory(opts.cwd, sessionId)
     ensureChild()
     const id = `t${++seq}`

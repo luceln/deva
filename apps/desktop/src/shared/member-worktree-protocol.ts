@@ -6,6 +6,8 @@ export interface MemberWorktreeIdentity {
   repoRoot: string
   branch: string
   relativePath: string
+  /** 绑定前成员原本所在的目录（「返回原目录」要用它）。 */
+  sourceRoot?: string
 }
 
 export interface MemberWorktreeRecovery extends MemberWorktreeIdentity {
@@ -25,6 +27,9 @@ export interface MemberWorktreeState {
   identity?: MemberWorktreeIdentity
   pending: boolean
   recovery?: MemberWorktreeRecovery
+  /** 会话记录的绑定与实际目录状态对不上（目录被移走、身份不符等）。
+   *  为 true 时界面不能当作正常绑定继续操作，需走恢复流程。 */
+  bindingInconsistent?: boolean
 }
 
 export type MemberWorktreeReason =
@@ -33,6 +38,8 @@ export type MemberWorktreeReason =
   | 'binding-unreadable' | 'cancelled' | 'execution-root-missing'
   | 'identity-mismatch' | 'bind-write-failed' | 'recovery-not-found'
   | 'binding-uncertain' | 'invalid-request'
+  /** 返回原目录时，原目录已不可用（被删、不再是同一个仓库、或身份对不上）。 */
+  | 'original-unavailable'
 
 export interface MemberWorktreePrecheckReq {
   sessionId: string
@@ -53,6 +60,16 @@ export interface MemberWorktreeRetryBindReq {
   expectedRevision: number
   operationId: string
 }
+export interface MemberWorktreeReturnOriginalReq {
+  sessionId: string
+  expectedRevision: number
+}
+export type MemberWorktreeReturnOriginalResult = MemberWorktreeRejected | {
+  ok: true
+  revision: number
+  focusRoot: string
+}
+
 export interface MemberWorktreeRejected {
   ok: false
   status: 'rejected'

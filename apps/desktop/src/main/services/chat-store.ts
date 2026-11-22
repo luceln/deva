@@ -285,6 +285,12 @@ function indexPath(): string {
 const sessionCache = new Map<string, StoredSession>()
 // id -> 元信息（左侧列表的真源，内存态）。ensureSession 即时写入、save 落盘；null = 尚未载入。
 let indexCache: Map<string, ChatSessionMeta> | null = null
+let failIndexPersistForTest = false
+
+/** 故障注入：让 save() 在会话 JSON 已原子写入后，仅索引阶段失败。 */
+export function setFailIndexPersistForTest(fail: boolean): void {
+  failIndexPersistForTest = fail
+}
 
 function metaOf(s: StoredSession): ChatSessionMeta {
   return {
@@ -370,6 +376,7 @@ export function isIndexTrusted(): boolean {
  */
 function persistIndex(): boolean {
   if (!indexCache) return true
+  if (failIndexPersistForTest) return false
   try {
     writeFileAtomic(indexPath(), JSON.stringify([...indexCache.values()], null, 2))
     // 索引已完整写出 → 标记可以清了。清不掉只是下次多重扫一遍，不影响正确性。

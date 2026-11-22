@@ -4,6 +4,7 @@ import { useDialog } from '../components/DialogProvider'
 import { Modal } from '../components/Modal'
 import { useI18n } from '../i18n/i18n'
 import type { WorktreePrecheckOk } from '../../../shared/worktree-protocol'
+import './member-worktree.css'
 
 /**
  * Renderer-facing draft. `sourceRoot` is intentionally separate from create.repoRoot:
@@ -28,7 +29,8 @@ export interface MemberWorktreeDraft {
 
 export interface MemberWorktreeRecoveryView {
   operationId: string
-  sourceRoot: string
+  /** 原目录；老记录可能没有。 */
+  sourceRoot?: string
   checkoutRoot: string
   focusRoot: string
   branch: string
@@ -40,7 +42,8 @@ export interface MemberWorktreeBindDraft extends MemberWorktreeDraft {
 }
 
 export interface MemberWorktreeBoundView {
-  sourceRoot: string
+  /** 绑定前的原目录；老会话可能没有记录（返回原目录功能上线前绑的）。 */
+  sourceRoot?: string
   checkoutRoot: string
   focusRoot: string
   branch: string
@@ -49,7 +52,7 @@ export interface MemberWorktreeBoundView {
 /** Kept local until shared/preload protocol is committed and imported. */
 export type MemberWorktreePrecheckView =
   | { ok: false; message: string }
-  | { ok: true; revision: number; sourceRoot: string; relativePath: string; precheck: WorktreePrecheckOk }
+  | { ok: true; revision: number; sourceRoot: string; sourceCheckoutRoot: string; relativePath: string; precheck: WorktreePrecheckOk }
 
 export type MemberWorktreeBindView =
   | { status: 'bound'; state: MemberWorktreeBoundView }
@@ -77,24 +80,15 @@ interface Props {
   onReturnToOriginal?: (sessionId: string, expectedRevision: number) => Promise<void>
 }
 
-function childRelative(root: string, child: string): string | null {
-  const fold = (s: string): string => s.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
-  const r = fold(root)
-  const c = fold(child)
-  if (c === r) return ''
-  if (!c.startsWith(`${r}/`)) return null
-  return child.replace(/\\/g, '/').replace(/\/$/, '').slice(root.replace(/\\/g, '/').replace(/\/$/, '').length + 1)
-}
-
 export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
   const { t } = useI18n()
   const dialog = useDialog()
   const sourceRequest = useRef(0)
+  const operation = useRef(false)
   const [sourceRoot, setSourceRoot] = useState('')
   const [repoRoot, setRepoRoot] = useState('')
   const [branch, setBranch] = useState('')
   const [baseRef, setBaseRef] = useState('')
-  const [dirtyCount, setDirtyCount] = useState(0)
   const [dirtyAck, setDirtyAck] = useState(false)
   const [independent, setIndependent] = useState(false)
   const [precheck, setPrecheck] = useState<MemberWorktreePrecheckView | null>(null)
@@ -105,7 +99,8 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
   const [bound, setBound] = useState<MemberWorktreeBoundView | undefined>(props.bound)
 
   const locked = busy || props.busy
-  const relativePath = repoRoot && sourceRoot ? childRelative(repoRoot, sourceRoot) : null
+  // Only the service resolves real paths and case sensitivity. Never infer a child path here.
+  const relativePath = precheck?.ok ? precheck.relativePath : null
   const validIdentity = !!props.sessionId && props.expectedRevision !== undefined
   const hasBridge = !!props.onPrecheck && !!props.onCreateAndBind && validIdentity
 
@@ -121,35 +116,35 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
     setRepoRoot('')
     setBranch('')
     setBaseRef('')
-    setDirtyCount(0)
     setDirtyAck(false)
     setIndependent(false)
     setPrecheck(null)
     setError('')
     if (!initial) return
+    const request = ++sourceRequest.current
     let alive = true
     void window.deva.git.status(initial).then((status) => {
-      if (!alive) return
+      if (!alive || request !== sourceRequest.current) return
       if (status.isRepo) {
         setRepoRoot(status.root)
-        setBranch(status.branch ?? '')
         setBaseRef(status.branch ?? '')
-        setDirtyCount(status.staged.length + status.unstaged.length + status.conflicts.length)
       }
-    }).catch((e: unknown) => { if (alive) setError((e as Error)?.message ?? String(e)) })
+    }).catch((e: unknown) => { if (alive && request === sourceRequest.current) setError((e as Error)?.message ?? String(e)) })
     return () => { alive = false }
   }, [props.open, props.sessionId, props.focusRoot])
 
   if (!props.open) return null
 
   const chooseSource = async (): Promise<void> => {
+    if (locked || recovery) return
     const result = await window.deva.fs.openFolder()
     // System picker cancellation is not a choice; preserve all current input and confirmations.
     if (!result) return
     const request = ++sourceRequest.current
     setSourceRoot(result.path)
     setRepoRoot('')
-    setDirtyCount(0)
+    setBranch('')
+    setBaseRef('')
     setDirtyAck(false)
     setPrecheck(null)
     setError('')
@@ -158,9 +153,7 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
       if (request !== sourceRequest.current) return
       if (status.isRepo) {
         setRepoRoot(status.root)
-        setBranch(status.branch ?? '')
         setBaseRef(status.branch ?? '')
-        setDirtyCount(status.staged.length + status.unstaged.length + status.conflicts.length)
       } else {
         setBranch('')
         setBaseRef('')
@@ -172,7 +165,7 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
   }
 
   const makeDraft = (): MemberWorktreeDraft | null => {
-    if (!props.sessionId || props.expectedRevision === undefined || !sourceRoot || !repoRoot || relativePath === null)
+    if (!props.sessionId || props.expectedRevision === undefined || !sourceRoot || !repoRoot)
       return null
     return {
       sessionId: props.sessionId,
@@ -185,6 +178,8 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
   const check = async (): Promise<void> => {
     const draft = makeDraft()
     if (!draft || !props.onPrecheck) return
+    if (operation.current || locked) return
+    operation.current = true
     setBusy(true)
     setError('')
     try {
@@ -195,6 +190,7 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
     } catch (e) {
       setError((e as Error)?.message ?? String(e))
     } finally {
+      operation.current = false
       setBusy(false)
     }
   }
@@ -202,12 +198,23 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
   const createAndBind = async (): Promise<void> => {
     const draft = makeDraft()
     if (!draft || !props.onCreateAndBind || !precheck?.ok) return
+    if (operation.current || locked) return
+    operation.current = true
     setBusy(true)
     setError('')
     try {
       const result = await props.onCreateAndBind({
         ...draft,
         expectedRevision: precheckedRevision ?? draft.expectedRevision,
+        // Use exactly the canonical source and destination that the user confirmed in the preview.
+        sourceRoot: precheck.sourceRoot,
+        create: {
+          ...draft.create,
+          repoRoot: precheck.sourceCheckoutRoot,
+          baseRef: precheck.precheck.baseSha,
+          branch: precheck.precheck.branch,
+          path: precheck.precheck.path
+        },
         requestId: crypto.randomUUID()
       })
       if (result.status === 'bound') {
@@ -225,12 +232,15 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
     } catch (e) {
       setError((e as Error)?.message ?? String(e))
     } finally {
+      operation.current = false
       setBusy(false)
     }
   }
 
   const retryBind = async (): Promise<void> => {
     if (!recovery || !props.sessionId || props.expectedRevision === undefined || !props.onRetryBind) return
+    if (operation.current || locked) return
+    operation.current = true
     setBusy(true)
     setError('')
     try {
@@ -247,12 +257,15 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
     } catch (e) {
       setError((e as Error)?.message ?? String(e))
     } finally {
+      operation.current = false
       setBusy(false)
     }
   }
 
   const useDirectory = async (): Promise<void> => {
     if (!sourceRoot || locked || independent) return
+    if (operation.current || locked) return
+    operation.current = true
     setBusy(true)
     setError('')
     try {
@@ -261,6 +274,7 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
     } catch (e) {
       setError((e as Error)?.message ?? String(e))
     } finally {
+      operation.current = false
       setBusy(false)
     }
   }
@@ -268,19 +282,20 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
   const returnToOriginal = async (): Promise<void> => {
     if (!props.sessionId || props.expectedRevision === undefined || !props.onReturnToOriginal || locked) return
     if (!(await dialog.confirm({ title: t('cf.member.memberWorktree.returnOriginal'), message: t('cf.member.memberWorktree.returnConfirm') }))) return
+    if (operation.current || locked) return
+    operation.current = true
     setBusy(true)
     try {
       await props.onReturnToOriginal(props.sessionId, props.expectedRevision)
       props.onClose()
     } catch (e) {
       setError((e as Error)?.message ?? String(e))
-    } finally { setBusy(false) }
+    } finally { operation.current = false; setBusy(false) }
   }
 
   const target = precheck?.ok ? precheck.precheck : null
-  const active = !!bound
-  const sourceMismatch = precheck?.ok && precheck.sourceRoot !== sourceRoot
-  const canCreate = !!precheck?.ok && !sourceMismatch && !locked && hasBridge && (!dirtyCount || dirtyAck)
+  const active = !!bound && !recovery
+  const canCreate = !!target && !locked && hasBridge && (!(target.needsConfirm || target.dirtyCount > 0) || dirtyAck)
   const canUseFolder = !!sourceRoot && !locked && !independent
   const confirmLabel = recovery
     ? t('cf.member.memberWorktree.retryBind')
@@ -299,6 +314,7 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
           <button type="button" className="btn btn--ghost btn--sm" disabled={locked} onClick={props.onClose} aria-label={t('cf.member.memberWorktree.cancel')}>×</button>
         </header>
 
+        <div className="cf-mwt__scroll">
         {active ? (
           <section className="cf-mwt__state">
             <Field label={t('cf.member.memberWorktree.source')} value={bound?.sourceRoot ?? '—'} />
@@ -317,7 +333,12 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
               <section className="cf-mwt__recovery" role="status">
                 <strong>{t('cf.member.memberWorktree.createdUnbound')}</strong>
                 <p>{recovery.message}</p>
-                <Field label={t('cf.member.memberWorktree.source')} value={recovery.sourceRoot} />
+                <Field label={t('cf.member.memberWorktree.operationId')} value={recovery.operationId} />
+                <Field label={t('cf.member.memberWorktree.targetRoot')} value={recovery.checkoutRoot} />
+                <Field
+                  label={t('cf.member.memberWorktree.source')}
+                  value={recovery.sourceRoot ?? t('cf.member.memberWorktree.noSource')}
+                />
                 <Field label={t('cf.member.memberWorktree.currentFolder')} value={recovery.focusRoot} />
                 <p>{t('cf.member.memberWorktree.retryOnly')}</p>
               </section>
@@ -340,12 +361,16 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
                 <section className="cf-mwt__config">
                   <Field label={t('cf.member.memberWorktree.repo')} value={repoRoot || t('cf.member.memberWorktree.notGit')} />
                   <div className="cf-mwt__grid">
-                    <label className="cf-mwt__field"><span>{t('cf.member.memberWorktree.base')}</span><input value={baseRef} onChange={(e) => { setBaseRef(e.target.value); setPrecheck(null) }} disabled={locked || !repoRoot} /></label>
-                    <label className="cf-mwt__field"><span>{t('cf.member.memberWorktree.branch')}</span><input value={branch} onChange={(e) => { setBranch(e.target.value); setPrecheck(null) }} disabled={locked || !repoRoot} /></label>
+                    <label className="cf-mwt__field"><span>{t('cf.member.memberWorktree.base')}</span><input className="input" value={baseRef} onChange={(e) => { setBaseRef(e.target.value); setPrecheck(null) }} disabled={locked || !repoRoot} /></label>
+                    <label className="cf-mwt__field"><span>{t('cf.member.memberWorktree.branch')}</span><input className="input" value={branch} onChange={(e) => { setBranch(e.target.value); setPrecheck(null) }} disabled={locked || !repoRoot} /></label>
                   </div>
                   <p className="cf-mwt__hint">{t('cf.member.memberWorktree.relative').replace('{path}', relativePath ?? '—')}</p>
                   {target && (
                     <>
+                      <Field label={t('cf.member.memberWorktree.source')} value={precheck?.ok ? precheck.sourceRoot : sourceRoot} />
+                      <Field label={t('cf.member.memberWorktree.repo')} value={precheck?.ok ? precheck.sourceCheckoutRoot : repoRoot} />
+                      <Field label={t('cf.member.memberWorktree.base')} value={target.baseLabel} />
+                      <Field label={t('cf.member.memberWorktree.branch')} value={target.branch} />
                       <Field label={t('cf.member.memberWorktree.targetRoot')} value={target.path} />
                       <Field label={t('cf.member.memberWorktree.memberTarget')} value={`${target.path}${relativePath ? `/${relativePath}` : ''}`} />
                       {target.dirtyCount > 0 && (
@@ -361,7 +386,6 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
                       {t('cf.member.memberWorktree.check')}
                     </button>
                   )}
-                  {sourceMismatch && <p className="cf-mwt__error">{t('cf.member.memberWorktree.sourceMismatch')}</p>}
                   {precheck?.ok === false && <p className="cf-mwt__error">{precheck.message}</p>}
                 </section>
               )}
@@ -369,6 +393,7 @@ export function MemberWorktreePanel(props: Props): React.JSX.Element | null {
           </>
         )}
 
+        </div>
         <p className="cf-mwt__safety">{t('cf.member.memberWorktree.safety')}</p>
         {(error || (locked && independent)) && (
           <p className={error ? 'cf-mwt__error' : 'cf-mwt__operation'} role={error ? 'alert' : 'status'} aria-live="polite">

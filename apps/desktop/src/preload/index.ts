@@ -549,6 +549,8 @@ export interface TerminalCreateOptions {
   cols: number
   rows: number
   cwd: string | null
+  /** 所属会话；成员终端路径校验绝不按共享 cwd 猜测其他会话。 */
+  sessionId?: string
   /** 选定的 shell 配置 id（来自 listShells）；空则用主进程默认。 */
   shellId?: string | null
 }

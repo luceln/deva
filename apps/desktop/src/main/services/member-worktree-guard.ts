@@ -1,7 +1,7 @@
 import { statSync, realpathSync } from 'fs'
 import { resolve, relative, isAbsolute } from 'path'
 import { runGitRaw } from './git'
-import { getSession, listSessions } from './chat-store'
+import { getSession } from './chat-store'
 import { readMemberBindingTransaction, recoverMemberBindingTransaction } from './member-binding-transaction'
 import { activeMember, pendingMemberBindings } from './member-binding-state'
 import type { MemberWorktreeIdentity } from '../../shared/member-worktree-protocol'
@@ -62,14 +62,12 @@ export async function assertMemberExecution(sessionId: string | undefined, execu
   }
 }
 
-/** 终端旧接口只有 cwd：同路径绑定的成员也必须核实，不能绕过身份守卫。 */
+/** 终端只按显式所属会话校验；无 sessionId 的旧调用保留目录存在性校验，不扫描同路径的其他会话。 */
 export async function assertMemberTerminalDirectory(root: string | null, sessionId?: string): Promise<void> {
-  if (sessionId) await assertMemberExecution(sessionId, root)
-  if (!root) return
-  validExecutionDirectory(root)
-  for (const meta of listSessions()) {
-    const s = getSession(meta.id)
-    if (s?.parentId && s.focusRoot && resolve(s.focusRoot) === resolve(root))
-      await assertMemberExecution(s.id, root)
+  if (sessionId) {
+    const session = getSession(sessionId)
+    if (!session) throw new Error('终端所属会话不存在，已停止创建')
+    if (session.parentId) await assertMemberExecution(sessionId, root)
   }
+  if (root) validExecutionDirectory(root)
 }

@@ -1248,7 +1248,8 @@ const zhCN: MessageTree = {
         retryBind: '重试绑定',
         cancel: '取消',
         defer: '暂不绑定',
-        createdUnbound: '工作区已创建，但成员尚未绑定。原目录仍保持不变。',
+        createdUnbound: '工作区已创建，但成员绑定未完成。请核对实际目录状态后重试。',
+        operationId: '工作区操作记录标识',
         retryOnly: '重试只会绑定这条已创建的工作区记录，不会再次创建。',
         sourceOriginal: '来源目录',
         currentFolder: '当前成员目录',
@@ -1256,6 +1257,9 @@ const zhCN: MessageTree = {
         returnOriginal: '返回原目录…',
         returnConfirm: '成员将返回原目录。独立工作区、分支与提交都会保留。',
         safety: '这不是安全沙箱，不限制成员访问其他文件或执行命令。不会自动合并，也不会因退出或移除成员而删除工作区。',
+        loading: '正在核对成员工作区状态…',
+        reload: '重新核对状态',
+        uncertain: '成员绑定或创建状态尚未核实，已停止目录操作。请重新核对状态，不会自动创建或绑定。',
         running: '正在创建并绑定…'
       }
     },
@@ -2925,7 +2929,8 @@ const en: MessageTree = {
         retryBind: 'Retry binding',
         cancel: 'Cancel',
         defer: 'Not now',
-        createdUnbound: 'The worktree was created, but the member is not bound to it yet. The original folder is unchanged.',
+        createdUnbound: 'The worktree was created, but member binding is incomplete. Check the actual folder state before retrying.',
+        operationId: 'Worktree operation ID',
         retryOnly: 'Retry only binds this existing worktree record; it will not create another one.',
         sourceOriginal: 'Source folder',
         currentFolder: 'Current member folder',
@@ -2933,6 +2938,9 @@ const en: MessageTree = {
         returnOriginal: 'Return to original folder…',
         returnConfirm: 'The member will return to the original folder. The independent worktree, branch, and commits will be kept.',
         safety: 'This is not a security sandbox and does not limit access to other files or commands. Nothing is merged automatically, and exiting or removing a member will not delete the worktree.',
+        loading: 'Checking member worktree state…',
+        reload: 'Check state again',
+        uncertain: 'Member binding or creation state is not verified. Folder operations are blocked. Check the state again; nothing will be created or bound automatically.',
         running: 'Creating and binding…'
       }
     },

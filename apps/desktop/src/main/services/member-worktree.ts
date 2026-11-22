@@ -17,7 +17,8 @@ import type {
   MemberWorktreeState, MemberWorktreeStateResult, MemberWorktreeRejected, MemberWorktreeReason,
   MemberWorktreePrecheckReq, MemberWorktreePrecheckResult, MemberWorktreeBindReq,
   MemberWorktreeBindResult, MemberWorktreeCancelReq, MemberWorktreeCancelResult,
-  MemberWorktreeRetryBindReq, MemberWorktreeRecovery
+  MemberWorktreeRetryBindReq, MemberWorktreeRecovery, MemberWorktreeReturnOriginalReq,
+  MemberWorktreeReturnOriginalResult
 } from '../../shared/member-worktree-protocol'
 
 // 预检中的取消也必须生效，不能等 create 开始才识别；仅保存最近用户请求，避免无限增长。
@@ -223,7 +224,7 @@ export async function bindMemberWorktree(req: MemberWorktreeBindReq): Promise<Me
   const operation = { requestId: req.requestId, cancelled: false }
   const recovery: MemberWorktreeRecovery = {
     operationId: randomUUID(), expectedRevision: req.expectedRevision,
-    sourceFocusRoot: s.focusRoot ?? null,
+    sourceFocusRoot: s.focusRoot ?? null, sourceRoot: checked.sourceFocusRoot,
     createdAt: Date.now(), phase: 'intent', reason: 'create-failed',
     checkoutRoot: checked.precheck.path, repoRoot: checked.precheck.repoRoot,
     branch: checked.precheck.branch, relativePath: checked.relativePath
@@ -287,6 +288,31 @@ export function cancelMemberWorktree(req: MemberWorktreeCancelReq): MemberWorktr
   return { ok: true, cancelled, state: state(req.sessionId)! }
 }
 
+export async function returnMemberToOriginal(req: MemberWorktreeReturnOriginalReq): Promise<MemberWorktreeReturnOriginalResult> {
+  if (!req || typeof req.sessionId !== 'string' || !Number.isSafeInteger(req.expectedRevision))
+    return reject('invalid-request')
+  const blocked = eligibility(req.sessionId, req.expectedRevision)
+  if (blocked) return blocked
+  if (pendingMemberBindings.has(req.sessionId)) return reject('pending')
+  const s = getSession(req.sessionId)!
+  const identity = s.memberWorktreeIdentity
+  if (!identity?.sourceRoot) return reject('original-unavailable')
+  try {
+    validExecutionDirectory(identity.sourceRoot)
+    const top = await runGitRaw(identity.sourceRoot, ['rev-parse', '--show-toplevel'])
+    const common = await runGitRaw(identity.sourceRoot, ['rev-parse', '--git-common-dir'])
+    const identityCommon = await runGitRaw(identity.repoRoot, ['rev-parse', '--git-common-dir'])
+    if (top.code !== 0 || common.code !== 0 || identityCommon.code !== 0 ||
+        normalized(top.stdout.trim()) !== normalized(identity.repoRoot) ||
+        normalized(resolve(identity.sourceRoot, common.stdout.trim())) !==
+          normalized(resolve(identity.repoRoot, identityCommon.stdout.trim()))) return reject('original-unavailable')
+    const rel = relative(identity.repoRoot, identity.sourceRoot)
+    if (rel !== identity.relativePath) return reject('original-unavailable')
+  } catch { return reject('original-unavailable') }
+  if (!setMemberFolder(s, identity.sourceRoot)) return reject('binding-uncertain')
+  return { ok: true, revision: s.memberBindingRevision ?? req.expectedRevision + 1, focusRoot: identity.sourceRoot }
+}
+
 export async function retryMemberWorktreeBind(req: MemberWorktreeRetryBindReq): Promise<MemberWorktreeBindResult> {
   if (!req || typeof req.sessionId !== 'string' || typeof req.operationId !== 'string' ||
       !Number.isSafeInteger(req.expectedRevision)) return reject('invalid-request')
@@ -309,4 +335,5 @@ export function registerMemberWorktreeIpc(): void {
   ipcMain.handle('chat:member-worktree-cancel', (_e, req: MemberWorktreeCancelReq) => cancelMemberWorktree(req))
   ipcMain.handle('chat:member-worktree-state', (_e, req: { sessionId: string }) => memberWorktreeState(req?.sessionId))
   ipcMain.handle('chat:member-worktree-retry-bind', (_e, req: MemberWorktreeRetryBindReq) => retryMemberWorktreeBind(req))
+  ipcMain.handle('chat:member-worktree-return-original', (_e, req: MemberWorktreeReturnOriginalReq) => returnMemberToOriginal(req))
 }
