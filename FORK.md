@@ -202,7 +202,7 @@ comm -23 <(git ls-tree -r dev --name-only | sort) <(git ls-files | sort)
 | `apps/desktop/electron-builder.yml` `publish.owner` | `luceln`（fork 自己） | ✅ `luceln` | 自动更新去拉上游 Release，装完二开版就没了 |
 | `apps/desktop/electron-builder.yml` `appId` | `dev.lucel.devaplus` | ✅ | 与上游同 appId，同机会互相顶掉 |
 | `apps/desktop/electron-builder.yml` `productName` | `DevaPlus` | ✅ | 决定 Windows 安装目录，与上游版共装会冲突 |
-| `apps/desktop/package.json` `version` | `<上游版本>-plus.<序号>` | ✅ `0.1.16-plus.4` | 自建 tag 与上游 Release 撞名 |
+| `apps/desktop/package.json` `version` | `<上游版本>-plus.<序号>` | ✅ `0.1.16-plus.5` | 自建 tag 与上游 Release 撞名 |
 
 2026-11 补充的**第五项**（这次合并时发现仍是上游作者署名）：
 
