@@ -4,7 +4,8 @@ import type {
   MemberWorktreeBindReq, MemberWorktreeBindResult,
   MemberWorktreeCancelReq, MemberWorktreeCancelResult,
   MemberWorktreeStateReq, MemberWorktreeStateResult,
-  MemberWorktreeRetryBindReq
+  MemberWorktreeRetryBindReq,
+  MemberWorktreeReturnOriginalReq, MemberWorktreeReturnOriginalResult
 } from '../shared/member-worktree-protocol'
 import type { EffortLevel } from '../shared/effort'
 import type { UpdateState } from '../shared/update'
@@ -549,7 +550,13 @@ export interface TerminalCreateOptions {
   cols: number
   rows: number
   cwd: string | null
-  /** 所属会话；成员终端路径校验绝不按共享 cwd 猜测其他会话。 */
+  /**
+   * 所属会话；成员终端路径校验绝不按共享 cwd 猜测其他会话。
+   *
+   * **给成员会话开终端时必须传**：主进程靠它跑 `assertMemberExecution`（校验成员工作区身份、
+   * 绑定事务、目录一致性）。不传就只剩目录存在性检查——不报错，但守卫静默变弱。
+   * 目前唯一不传的是 `MergePanel` 的「在工作区开终端」（那是 git worktree，没有所属会话）。
+   */
   sessionId?: string
   /** 选定的 shell 配置 id（来自 listShells）；空则用主进程默认。 */
   shellId?: string | null
@@ -977,6 +984,16 @@ const api = {
     /** 仅重试绑定已创建工作区，不再次创建。 */
     memberWorktreeRetryBind: (req: MemberWorktreeRetryBindReq): Promise<MemberWorktreeBindResult> =>
       ipcRenderer.invoke('chat:member-worktree-retry-bind', req),
+    /**
+     * 成员返回原目录：只改绑定，不合并、不删工作区/分支/提交。
+     *
+     * 主进程会核对原目录的身份（还是不是同一个仓库、相对路径对不对），对不上返回
+     * `original-unavailable`，不会盲目绑过去。
+     */
+    memberWorktreeReturnOriginal: (
+      req: MemberWorktreeReturnOriginalReq
+    ): Promise<MemberWorktreeReturnOriginalResult> =>
+      ipcRenderer.invoke('chat:member-worktree-return-original', req),
     /** 挂载 / 卸载本对话的聚焦工作区并立即落库（不等下一次发送）。 */
     setFocus: (req: ChatSetFocusRequest): Promise<{ ok: true }> =>
       ipcRenderer.invoke('chat:set-focus', req),

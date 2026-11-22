@@ -156,7 +156,33 @@ export async function precheckMemberWorktree(req: MemberWorktreePrecheckReq): Pr
 export async function memberWorktreeState(sessionId: string): Promise<MemberWorktreeStateResult> {
   await settleUnstartedIntent(sessionId)
   const snapshot = state(sessionId)
-  return snapshot ? { ok: true, state: snapshot } : reject('not-member')
+  if (!snapshot) return reject('not-member')
+  return { ok: true, state: { ...snapshot, bindingInconsistent: await bindingInconsistent(snapshot) } }
+}
+
+/**
+ * 会话记录的绑定与实际目录状态是否对不上。
+ *
+ * 界面的 4 处 `bindingInconsistent` 读点全在这里拿到值：以前这个字段**只有读没有写**，
+ * 永远是 undefined，于是「目录被移走 / 身份不符」时界面照样当正常绑定操作。
+ *
+ * 判据只读、不修复、不回落（与 `verifyMemberWorktree` 的契约一致）：
+ * - 有 identity 却 focusRoot 为空 → 绑定不完整；
+ * - 目录不存在、不是同一个仓库、分支变了、子目录与身份不符 → 不一致。
+ *
+ * 只放在这里算（打开对话框时才跑），不进 `state()`：那个函数还用在绑定写路径上，
+ * 每次写都去跑 4 次 git 是白花时间。
+ */
+async function bindingInconsistent(snapshot: MemberWorktreeState): Promise<boolean> {
+  const identity = snapshot.identity
+  if (!identity) return false
+  if (!snapshot.focusRoot) return true
+  try {
+    await verifyMemberWorktree(identity, snapshot.focusRoot)
+    return false
+  } catch {
+    return true
+  }
 }
 
 function unbound(sessionId: string, r: MemberWorktreeRecovery, reason: MemberWorktreeReason): MemberWorktreeBindResult {

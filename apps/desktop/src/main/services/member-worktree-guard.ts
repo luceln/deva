@@ -62,7 +62,20 @@ export async function assertMemberExecution(sessionId: string | undefined, execu
   }
 }
 
-/** 终端只按显式所属会话校验；无 sessionId 的旧调用保留目录存在性校验，不扫描同路径的其他会话。 */
+/**
+ * 终端只按显式所属会话校验；无 sessionId 的旧调用保留目录存在性校验，不扫描同路径的其他会话。
+ *
+ * `sessionId` 为什么仍可选（这是有意为之，不是漏改）：
+ * - 唯一现有调用方是 `MergePanel` 的「在工作区开终端」——那是在 git worktree 里开，
+ *   没有所属会话可传；
+ * - 旧实现按 cwd 反查所有同路径的成员会话，每次建终端都要遍历全部会话，而且同一路径
+ *   被多个会话共用时会误判。
+ *
+ * 代价要说清楚：**传了 sessionId 才有成员守卫**。将来给成员会话开终端时必须传，
+ * 漏传则只剩目录存在性检查（不会报错，静默变弱）。为此 `TerminalCreateOptions.sessionId`
+ * 的注释里写明了这条契约；`terminal.ts` 里也把取到的 sessionId 记进 executionRoots，
+ * 让 dispose/写入路径复用同一个归属。
+ */
 export async function assertMemberTerminalDirectory(root: string | null, sessionId?: string): Promise<void> {
   if (sessionId) {
     const session = getSession(sessionId)

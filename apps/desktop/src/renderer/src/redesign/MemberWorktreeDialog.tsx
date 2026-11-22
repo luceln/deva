@@ -51,8 +51,15 @@ export function MemberWorktreeDialog({ sessionId, name, busy, onClose }: Props):
     return result.state
   }
 
-  if (!state || state.sessionId !== sessionId || state.bindingInconsistent || state.recovery?.phase === 'creating') {
-    const blocked = state?.bindingInconsistent || (!!state?.recovery && state.recovery.phase !== 'created')
+  /*
+   * fail-closed：绑定状态还没核实清楚时，一律不许渲染可操作的 Panel。
+   *
+   * 这里的条件必须和下面 `blocked` 的判据一致——原来只拦 `phase === 'creating'`，
+   * 而 `phase === 'intent'`（记了意图、还没跑 Git）会漏进 Panel，被当成正常绑定渲染。
+   * 那等于把「不知道有没有创建」当「可以用」，正是这条流程要防的事。
+   */
+  const blocked = state?.bindingInconsistent || (!!state?.recovery && state.recovery.phase !== 'created')
+  if (!state || state.sessionId !== sessionId || blocked) {
     return (
       <Modal open onClose={onClose} width={560} labelledBy="cf-member-wt-loading">
         <h2 id="cf-member-wt-loading" className="modal__title">{t('cf.member.memberWorktree.title')}</h2>
@@ -123,6 +130,16 @@ export function MemberWorktreeDialog({ sessionId, name, busy, onClose }: Props):
           return { status: 'created-unbound', recovery }
         }
         return { status: 'rejected', message: result.message ?? result.reason }
+      }}
+      onReturnToOriginal={async (sid, expectedRevision) => {
+        const result = await window.deva.chat.memberWorktreeReturnOriginal({ sessionId: sid, expectedRevision })
+        // 失败必须抛：Panel 会 catch 住显示错误并保留弹窗，不会假装已返回。
+        // memberWorktree 下没有 reason.* 词条，这里按既有做法回退到原始 reason 值，
+        // 至少让用户看到「为什么没成」（original-unavailable / stale / busy 等）。
+        if (!result.ok) throw new Error(result.message ?? result.reason)
+        // 用返回值就地更新，不再多跑一次 IPC：Panel 紧接着会 onClose，
+        // 多一次 round-trip 只会让关闭晚一帧。
+        setState((prev) => (prev ? { ...prev, revision: result.revision, focusRoot: result.focusRoot } : prev))
       }}
       // Successful binding already updates focus and publishes sessions; never bind a second time.
       onBound={() => {}}

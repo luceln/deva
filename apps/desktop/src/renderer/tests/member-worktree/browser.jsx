@@ -144,7 +144,8 @@ window.runMemberWorktreeAdapterChecks = async () => {
   }
   await mount()
   verify('state rejection is visible and cannot create', document.querySelector('[role=alert]')?.textContent === 'member-removed' && !document.querySelector('.cf-mwt'))
-  next = { ok: true, state: { ...state, bindingInconsistent: { operationId: 'uncertain-op', attemptedRoot: 'E:/Tree/pkg', at: 1 } } }
+  // 协议里 bindingInconsistent 是 boolean（主进程 memberWorktreeState 现在真的会写它）。
+  next = { ok: true, state: { ...state, bindingInconsistent: true } }
   await mount()
   verify('inconsistent binding fails closed', !!document.querySelector('[role=alert]') && !document.querySelector('.cf-mwt'))
   const record = { sourceRoot: 'E:/Selected/pkg', checkoutRoot: 'E:/Tree', repoRoot: 'E:/Repo', branch: 'member', relativePath: 'pkg' }
@@ -160,6 +161,58 @@ window.runMemberWorktreeAdapterChecks = async () => {
   next = { ok: true, state: { ...state, identity: record, recovery: { ...record, phase: 'created', operationId: 'operation-real', reason: 'bind-write-failed' } } }
   await mount()
   verify('recovery supersedes previous bound identity and retains record paths', document.querySelectorAll('.cf-mwt__recovery').length === 1 && document.querySelector('.cf-mwt__recovery').textContent.includes('operation-real') && document.querySelector('.cf-mwt__recovery').textContent.includes('E:/Tree/pkg') && !document.querySelector('.cf-mwt__state'))
+
+  /*
+   * 「返回原目录」必须从界面真的能点到。
+   *
+   * 这条通道曾经是死代码：主进程 `chat:member-worktree-return-original` 有 24 行完整实现
+   * （含原目录身份校验），preload 里一行都没有，于是 Dialog 传不进 onReturnToOriginal、
+   * Panel 那个按钮永远不渲染。功能整个不存在，而所有检查全绿。
+   * 所以这里断言的是「按钮在、点了真的调到那条 IPC、失败会报错不关闭」。
+   */
+  const returnCalls = []
+  let returnResult = { ok: false, status: 'rejected', reason: 'original-unavailable' }
+  window.deva.chat.memberWorktreeReturnOriginal = async (request) => {
+    returnCalls.push(request)
+    return returnResult
+  }
+  // confirm 要用户点「确定」：DialogProvider 的确认框由 useDialog 弹，这里直接点它的确认按钮。
+  const confirmYes = async () => {
+    const btns = [...document.querySelectorAll('button')]
+    const yes = btns.find((b) => /^(OK|确定|Confirm)$/i.test(b.textContent.trim()))
+    assert(!!yes, 'confirmation dialog did not appear')
+    yes.click()
+    await tick()
+  }
+  next = { ok: true, state: { ...state, identity: record } }
+  await mount()
+  const returnBtn = [...document.querySelectorAll('.cf-mwt__state button')].find((b) =>
+    /Return to original|返回原目录/.test(b.textContent)
+  )
+  verify('return-to-original button is reachable from the dialog', !!returnBtn)
+  returnBtn.click()
+  await tick()
+  await confirmYes()
+  await tick()
+  verify(
+    'return-to-original actually invokes the IPC with the pinned session and revision',
+    returnCalls.length === 1 && returnCalls[0].sessionId === 'mem-pinned' && returnCalls[0].expectedRevision === 7
+  )
+  verify(
+    'failed return keeps the dialog open and shows why',
+    document.querySelectorAll('.cf-mwt').length === 1 && /original-unavailable/.test(document.querySelector('[role=alert]')?.textContent ?? '')
+  )
+  returnResult = { ok: true, revision: 8, focusRoot: 'E:/Selected/pkg' }
+  await mount()
+  const returnBtn2 = [...document.querySelectorAll('.cf-mwt__state button')].find((b) =>
+    /Return to original|返回原目录/.test(b.textContent)
+  )
+  returnBtn2.click()
+  await tick()
+  await confirmYes()
+  await tick()
+  verify('successful return passes the new revision along', returnCalls.length === 2)
+
   verify('all state requests use the fixed member session', calls.length >= 5 && calls.every((request) => request.sessionId === 'mem-pinned'))
   return { passed: results.length, results }
 }
