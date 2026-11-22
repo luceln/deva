@@ -8,6 +8,7 @@ import { registerWorkspaceIpc } from './services/workspace'
 import { registerSecretsIpc } from './services/secrets'
 import { registerProviderIpc } from './services/provider'
 import { registerImportIpc } from './importer-ipc'
+import { registerBackupIpc } from './backup-ipc'
 import { hasActiveTurns, registerChatIpc, settleActiveTurns } from './services/chat'
 import { registerContextUsageIpc } from './services/context-usage'
 import { registerReadSyncIpc } from './services/read-sync'
@@ -386,6 +387,7 @@ if (!app.requestSingleInstanceLock()) {
 
   // 从原版 Deva 导入数据（手动触发；只补缺、幂等，原版全程只读）
   registerImportIpc(() => mainWindow)
+  registerBackupIpc(() => mainWindow)
 
   // 会话编排（Agent 主循环：流式 → 工具 → 权限 → 回灌）
   registerChatIpc(() => mainWindow)

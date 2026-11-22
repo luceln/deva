@@ -217,6 +217,36 @@ export async function hasSecret(key: string): Promise<boolean> {
 }
 
 /**
+ * 备份还原专用：**整体替换**密钥库（值是已加密的 base64 密文）。
+ *
+ * 为什么必须整份替换，而不是逐条 `setSecret`：
+ *  - 逐条写会**留下目标上原有的、包里没有的键**。还原的语义是「回到导出那一刻」，
+ *    那些多出来的键属于另一个环境（甚至是导出后新配的服务商），混进来会让状态既不是旧也不是新。
+ *  - 逐条写没法表达「包里某条密钥在本环境解不开、应当原样保留密文」这种情况 ——
+ *    那种条目的值本身就是有效密文，只是不属于本机，整份替换正好能原样带过去。
+ *
+ * `loadKind === 'corrupt'` 时**拒绝**：与 `setSecret` 同一层保护。此刻 `store` 是空的，
+ * 覆盖会把那份可能还能救的文件彻底毁掉（见 setSecret 的注释里那次实测）。
+ *
+ * 内存态与磁盘必须同时更新：绕过 `store` 直接写盘的话，本进程后续 `readSecret` 仍读旧内存，
+ * 「还原了但要重启才生效」正是这条路径最容易留下的坑。
+ */
+export async function replaceAllSecrets(next: Record<string, string>): Promise<{ ok: boolean; reason?: string }> {
+  await ensureLoaded()
+  if (loadKind === 'corrupt') {
+    return { ok: false, reason: '密钥库文件当前读不出来（内容损坏或被占用），为免覆盖掉还能救的内容，拒绝写入' }
+  }
+  store = { ...next }
+  try {
+    await persist()
+  } catch (e) {
+    return { ok: false, reason: `密钥库写盘失败：${(e as Error)?.message ?? e}` }
+  }
+  return { ok: true }
+}
+
+
+/**
  * 导入专用：**原样写入一段已有密文**（base64），不加密也不解密。
  *
  * 为什么要这个入口：某些调用方手里只有密文、拿不到也不该拿到明文（例如备份迁移里搬同一应用自己的库）。

@@ -301,3 +301,60 @@ export async function canImport(): Promise<GateResult> {
   }
   return { ok: true, sourceHome, importing, summary }
 }
+
+/**
+ * 目录版闸门：与 `canImport()` 同一条判定链，但源目录由调用方给。
+ *
+ * 为什么另开一个而不是给 `canImport` 加可选参数：`canImport()` 的语义是「从原版 Deva 导入」，
+ * 它内部固定走 `upstreamHome()` 并检查**原版的锁文件**。备份还原的源是一个解压出来的临时目录，
+ * 那里既没有原版的锁，也不该受「原版在跑」的影响 —— 两条判定链是不同的问题。
+ *
+ * 复用 `summarize` 是有意的：它能一眼看出「包里到底有什么」，而且读不出来时 fail-closed，
+ * 这与原版导入的判据完全一致，不该在还原路径上放宽。
+ */
+export function canImportFromDir(dir: string): GateResult {
+  const importing = isImporting(getDevaHome())
+  const norm = (p: string): string =>
+    process.platform === 'win32' || process.platform === 'darwin' ? resolve(p).toLowerCase() : resolve(p)
+  if (norm(dir) === norm(getDevaHome())) {
+    return {
+      ok: false,
+      code: 'same-home',
+      importing,
+      message: isEn()
+        ? `Bundle content resolves to the target data folder (${getDevaHome()}).`
+        : `备份包内容解到了目标数据目录上（${getDevaHome()}），无法继续。`
+    }
+  }
+  let st
+  try {
+    st = statSync(dir)
+  } catch (e) {
+    return {
+      ok: false,
+      code: (e as NodeJS.ErrnoException).code === 'ENOENT' ? 'no-source' : 'source-unreadable',
+      importing,
+      message: isEn() ? `Bundle content not found (${dir})` : `找不到备份包内容（${dir}）`
+    }
+  }
+  if (!st.isDirectory()) {
+    return {
+      ok: false,
+      code: 'no-source',
+      importing,
+      message: isEn() ? `Bundle content is not a folder (${dir})` : `备份包内容不是一个目录（${dir}）`
+    }
+  }
+  const { summary, unreadable } = summarize(dir)
+  if (unreadable.length) {
+    return {
+      ok: false,
+      code: 'source-partially-unreadable',
+      importing,
+      message: isEn()
+        ? `Some bundle content can’t be read (${unreadable.join(', ')}). The bundle may be damaged.`
+        : `备份包的部分内容读不出来（${unreadable.join('、')}）：包可能已损坏。`
+    }
+  }
+  return { ok: true, sourceHome: dir, importing, summary }
+}
