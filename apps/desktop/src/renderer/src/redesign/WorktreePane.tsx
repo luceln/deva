@@ -132,23 +132,9 @@ function formatBytes(n: number): string {
 export function WorktreePane(): React.JSX.Element {
   const { t } = useI18n()
   const { snapshot, loading, error, refresh } = useWorktree()
-  /** 未接通的按钮点了之后的短暂反馈（删除/重建/prune/合并的 IPC 还没落地）。 */
-  const [pending, setPending] = useState<string | null>(null)
 
   const rows = snapshot?.items ?? []
   const unmanaged = snapshot?.unmanaged ?? []
-
-  /*
-   * 还没接通的操作只在这里留一个：`conflicts`（冲突处理窗口，P2 未做）与 `reveal`（打开目录，
-   * 需要新增一条主进程通道）。**不假装成功**：点下去只提示「这个操作还没接通」，
-   * 不弹「已删除」这种假 toast。
-   *
-   * 删除 / 重建 / prune / 合并都已在下面用真实 IPC 接好，不要再往这里加。
-   */
-  const notWired = (name: string): void => {
-    setPending(name)
-    setTimeout(() => setPending(null), 1200)
-  }
 
   return (
     <div className="cf-wt">
@@ -190,7 +176,7 @@ export function WorktreePane(): React.JSX.Element {
 
       <div className="cf-wt__list">
         {rows.map((w) => (
-          <WorktreeCard key={w.compareKey || w.path} view={w} pending={pending} onNotWired={notWired} />
+          <WorktreeCard key={w.compareKey || w.path} view={w} />
         ))}
       </div>
 
@@ -213,16 +199,8 @@ export function WorktreePane(): React.JSX.Element {
   )
 }
 
-/** 一张卡片。`pending` 用于「操作未接通」时的短暂反馈（见外层注释）。 */
-function WorktreeCard({
-  view,
-  pending,
-  onNotWired
-}: {
-  view: WorktreeListItem
-  pending: string | null
-  onNotWired: (name: string) => void
-}): React.JSX.Element {
+/** 一张卡片。 */
+function WorktreeCard({ view }: { view: WorktreeListItem }): React.JSX.Element {
   const { t } = useI18n()
   const toast = useToast()
   const dialog = useDialog()
@@ -275,6 +253,49 @@ function WorktreeCard({
     // 用 warning 而不是 success：这些是没做到的部分。
     for (const w of res.warnings) toast.show({ variant: 'warning', message: w })
     toast.show({ variant: 'success', message: t('cf.wt.remove.done') })
+  }
+
+  /**
+   * 中止一次没收尾的合并（§4.7 出口一）。
+   *
+   * **必须传 targetPath**：合并发生在 target 检出目录，不是用户此刻在看的工作区。
+   * 传错的表现是「点了没反应、冲突还在」，且不报错。
+   */
+  const abortMerge = async (targetPath: string): Promise<void> => {
+    setBusy(true)
+    try {
+      const res = await window.deva.git.mergeAbort(targetPath)
+      if (!res.ok) {
+        toast.show({ variant: 'error', message: res.message || t('cf.wt.merge.abortFailed') })
+        return
+      }
+      toast.show({ variant: 'success', message: t('cf.wt.merge.aborted') })
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** 在终端打开 target 检出（§4.7 出口二）：用户在终端里 `git add` + `git merge --continue`。 */
+  const openInTerminal = async (targetPath: string): Promise<void> => {
+    try {
+      // 80×24 只是新 PTY 的初始尺寸；终端面板挂载后会按自己的几何 resize，不需精确。
+      await window.deva.terminal.create({ cwd: targetPath, cols: 80, rows: 24 })
+    } catch (e) {
+      toast.show({ variant: 'error', message: (e as Error)?.message ?? t('cf.wt.revealFailed') })
+    }
+  }
+
+  /**
+   * 在文件管理器打开 target 检出（§4.7 出口三）。
+   *
+   * 通道对它做受信根校验，不在根内会返回 `ok:false` **且不抛错**——不把这条报出来，
+   * 用户看到的就是「点了没反应」。主进程在 merge / list 两处都会 trustRoot(targetPath)，
+   * 走到这里仍失败说明确实越界，得让人知道。
+   */
+  const revealTarget = async (targetPath: string): Promise<void> => {
+    const res = await window.deva.fs.revealFolder(targetPath)
+    if (!res.ok) toast.show({ variant: 'error', message: t('cf.wt.revealFailed') })
   }
 
   /**
@@ -426,14 +447,38 @@ function WorktreeCard({
 
       {/*
         合并进行中（§13.10）：target 检出里还有没收尾的合并。这里给的是「有几处冲突」这一个事实，
-        冲突处理窗口属于 P2 还没做，所以按钮明确标成未接通——不假装点了能打开。
+        以及**能立刻收尾的三个出口**（§4.7 的平权原则：都不做 primary，用户已经做了工作，
+        不诱导放弃）。
+        不在这里做冲突解决面板——spec §0.1 的「不做」清单里明确排除；解冲突交给终端，
+        应用只负责把用户送到能解的地方，并让「放弃这次合并」随时可做。
       */}
       {view.mergeInProgress !== null && (
         <div className="cf-wt__note is-warn">
           <span>{t('cf.wt.mergeInProgress').replace('{n}', String(view.mergeInProgress.unmergedCount))}</span>
-          <button type="button" className="btn btn--ghost cf-wt__notebtn" onClick={() => onNotWired('conflicts')}>
-            {t('cf.wt.merge.resolve')}
-          </button>
+          <span className="cf-wt__exits">
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              disabled={busy}
+              onClick={() => void abortMerge(view.mergeInProgress!.targetPath)}
+            >
+              {t('cf.wt.merge.abortMerge')}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void openInTerminal(view.mergeInProgress!.targetPath)}
+            >
+              {t('cf.wt.merge.openTerminal')}
+            </button>
+            <button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void revealTarget(view.mergeInProgress!.targetPath)}
+            >
+              {t('cf.wt.merge.reveal')}
+            </button>
+          </span>
         </div>
       )}
 
@@ -485,7 +530,7 @@ function WorktreeCard({
           </button>
         )}
         {view.state === 'branch-mismatch' && (
-          <button type="button" className="btn btn--ghost" onClick={() => onNotWired('reveal')}>
+          <button type="button" className="btn btn--ghost" onClick={() => void revealTarget(view.path)}>
             <FolderSearch size={13} />
             {t('cf.wt.reveal')}
           </button>
@@ -501,7 +546,6 @@ function WorktreeCard({
           <Trash2 size={13} />
           {t('cf.wt.remove.title')}
         </button>
-        {pending && <span className="cf-wt__pending">{t('cf.wt.notWired')}</span>}
       </footer>
 
       {/*

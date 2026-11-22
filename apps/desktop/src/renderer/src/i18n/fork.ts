@@ -195,6 +195,7 @@ export const forkZhCN = {
       memoryShared: '与主仓库 {repoRoot} 共享项目私有记忆',
       rebuild: '重建',
       rebuildDone: '工作区已重建',
+      revealFailed: '打不开这个目录（可能已不在受信范围内），请从合并面板或工作区列表重试。',
       rebuildFail: {
         notFound: '找不到这条工作区记录，可能已被移除。',
         dirExists: '目录已经存在，不需要重建。',
@@ -493,6 +494,7 @@ export const forkEn = {
       memoryShared: 'Shares project memory with the main repo {repoRoot}',
       rebuild: 'Rebuild',
       rebuildDone: 'Worktree rebuilt',
+      revealFailed: 'Could not open this folder (it may be outside the trusted roots); retry from the merge panel or the worktree list.',
       rebuildFail: {
         notFound: 'This worktree record no longer exists.',
         dirExists: 'The folder already exists, so there is nothing to rebuild.',

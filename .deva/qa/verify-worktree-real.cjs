@@ -74,6 +74,7 @@ async function buildBundle() {
 export { removeWorktree } from ${JSON.stringify(path.join(SRC, 'remove.ts'))}
 export { upsertRecord, reloadRecordsForTest } from ${JSON.stringify(path.join(SRC, 'store.ts'))}
 export { normalizeWorktreePath } from ${JSON.stringify(path.join(SRC, 'paths.ts'))}
+export { isInsideRoot, trustRoot } from ${JSON.stringify(path.join(path.resolve(SRC, '..'), 'fs-guard.ts'))}
 `
   )
   await esbuild.build({
@@ -233,6 +234,65 @@ async function main() {
         rb.ok === false && rb.reason === 'not-found' && rm.ok === false && rm.reason === 'not-found',
         `rebuild=${rb.reason ?? rb.ok} remove=${rm.reason ?? rm.ok}`
       )
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  // ── 用例组 E：冲突现场 → 中止合并真的收尾（§4.7 出口一）──────────────
+  // 这条同时验证 trustRoot：`git:merge-abort` 走 assertInside(dir)，未受信会直接抛错，
+  // 用户看到的会是「点了没反应」。所以这里既造真实冲突，也检查受信前后 isInsideRoot 的变化。
+  {
+    const root = mkroot('conflict')
+    const main = setupRepo(root)
+    const wtPath = path.join(root, 'wt-e')
+    try {
+      // 主仓库与 feat-x 改同一个文件 → add 到 wt 后必有冲突
+      git(main, 'worktree', 'add', '-q', wtPath, 'feat-x')
+      seedRecord(mod, { path: wtPath, branch: 'feat-x', repoRoot: main })
+
+      fs.writeFileSync(path.join(wtPath, 'a.txt'), 'from-feat\n')
+      git(wtPath, 'add', '.')
+      git(wtPath, 'commit', '-q', '-m', 'feat change')
+      fs.writeFileSync(path.join(main, 'a.txt'), 'from-main\n')
+      git(main, 'add', '.')
+      git(main, 'commit', '-q', '-m', 'main change')
+
+      // 在 main 上合 feat-x：必然冲突，留下 MERGE_HEAD
+      let conflicted = false
+      try {
+        git(main, 'merge', '--no-ff', '--no-edit', 'feat-x')
+      } catch {
+        conflicted = true
+      }
+      const mergeHead = (() => {
+        try {
+          return git(main, 'rev-parse', '-q', '--verify', 'MERGE_HEAD').trim() !== ''
+        } catch {
+          return false
+        }
+      })()
+      check('B8', '造出真实冲突现场（MERGE_HEAD 存在）', conflicted && mergeHead, `conflict=${conflicted} MERGE_HEAD=${mergeHead}`)
+
+      // 受信前：main 不在受信根 → abort 的 assertInside 会抛
+      const trustedBefore = mod.isInsideRoot(main)
+      check('B9', '未 trustRoot 时 targetPath 判越界（abort 会抛）', trustedBefore === false, `isInsideRoot=${trustedBefore}`)
+
+      // 修法：trustRoot 之后同一个判定应为真 —— 这就是 merge/list 里那两处 trustRoot 的作用
+      mod.trustRoot(main)
+      const trustedAfter = mod.isInsideRoot(main)
+      check('B10', 'trustRoot 后 targetPath 可用', trustedAfter === true, `isInsideRoot=${trustedAfter}`)
+
+      // 真正中止：MERGE_HEAD 应消失、工作区回到干净
+      const ab = git(main, 'merge', '--abort')
+      const goneAfter = (() => {
+        try {
+          return git(main, 'rev-parse', '-q', '--verify', 'MERGE_HEAD').trim() === ''
+        } catch {
+          return true
+        }
+      })()
+      check('B11', 'merge --abort 后 MERGE_HEAD 消失', goneAfter, `stillThere=${!goneAfter}`)
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }

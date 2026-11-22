@@ -190,7 +190,9 @@ if (pane !== null && i18n !== null) {
   }
 
   // ── G5：mergeInProgress 非 null 时渲染 unmergedCount ──
-  const mip = pane.match(/view\.mergeInProgress\s*!==\s*null[\s\S]{0,600}?<\/div>/)
+  // 窗口放在 1500 字符：这块后来加了三个收尾出口（中止 / 终端 / 打开目录），
+  // 600 已经装不下，而判据要守的是「拿到 unmergedCount 就渲染出来」，与块的长度无关。
+  const mip = pane.match(/view\.mergeInProgress\s*!==\s*null[\s\S]{0,1500}?<\/div>/)
   if (!mip) {
     bad('G5 mergeInProgress 非 null 时渲染', '没找到 mergeInProgress !== null 的渲染块')
   } else if (!/unmergedCount/.test(mip[0])) {

@@ -18,7 +18,11 @@
  *   R5  两个操作成功后都 `await refresh()`
  *   R6  重建失败按 `reason` 分派文案，且六个 reason 在中英文各有一条词条
  *   R7  两个按钮在 `busy` 期间禁用（防连点）
- *   R8  `onNotWired` 的剩余用途只剩 conflicts / reveal，不再有 rebuild / prune
+ *   R8  `onNotWired` 机制已整体移除（所有按钮都接了真实 IPC）
+ *   R9a 合并进行中时给出三个收尾出口（中止 / 终端 / 打开目录），都接真实通道
+ *   R9b 三个出口传的是 targetPath，不是 view.path（传错 = 点了没反应且不报错）
+ *   R10 reveal 失败要报出来（通道不抛错、只回 ok:false，吞掉就是静默失败）
+ *   R11 主进程在 merge / list 两处都 trustRoot(targetPath)（否则 reveal 一律 ok:false）
  *
  * 它**不能**证明的：真实点下去 git 到底做了什么、列表有没有在界面上真的刷新。
  * 那些要真机跑，见 .deva/qa/ 下的运行时脚本。
@@ -129,16 +133,59 @@ for (const [name, re] of [
     hits.length >= 2 ? pass('R7 重建/prune 在 busy 时禁用', `${hits.length} 处`) : fail('R7 重建/prune 在 busy 时禁用', `只 ${hits.length} 处`)
 }
 
-// R8：onNotWired 不再用于 rebuild / prune
+// R9：合并进行中时给的三个收尾出口都接了真实通道（§4.7 平权三出口）
 {
-  const re = /onNotWired\('(rebuild|prune|conflicts|reveal)'\)/g
-  const hits = [...pane.matchAll(re)].map((m) => m[1])
-  if (requireHits('R8 onNotWired 只剩 conflicts/reveal', hits, re)) {
-    const bad = hits.filter((n) => n === 'rebuild' || n === 'prune')
-    const remain = [...new Set(hits)].sort()
-    if (bad.length) fail('R8 onNotWired 只剩 conflicts/reveal', `仍在用：${bad.join(',')}`)
-    else pass('R8 onNotWired 只剩 conflicts/reveal', remain.join(', '))
+  // 取 mergeInProgress 那一段：从条件到它自己的 </div>，不依赖精确缩进
+  const start = pane.indexOf('view.mergeInProgress !== null')
+  const block = start === -1 ? '' : pane.slice(start, start + 2000)
+  if (!block) fail('R9a 冲突收尾三出口存在', '找不到 mergeInProgress 渲染块')
+  else {
+    const need = [
+      ['abortMerge', /abortMerge\(view\.mergeInProgress!\.targetPath\)/],
+      ['openInTerminal', /openInTerminal\(view\.mergeInProgress!\.targetPath\)/],
+      ['revealTarget', /revealTarget\(view\.mergeInProgress!\.targetPath\)/]
+    ]
+    const missing = need.filter(([, re]) => !re.test(block)).map(([n]) => n)
+    if (missing.length) fail('R9a 冲突收尾三出口存在', `缺 ${missing.join(', ')}`)
+    else pass('R9a 冲突收尾三出口存在', '中止 / 终端 / 打开目录')
   }
+}
+
+// R9b：三个收尾出口必须传 targetPath，不能传 view.path
+// 注意 `revealTarget(view.path)` 在 branch-mismatch 那处是**正确**的（那是打开工作区自己的目录，
+// 不是 target 检出），所以这里只约束那三个出口函数在 mergeInProgress 块内的调用。
+{
+  const start = pane.indexOf('view.mergeInProgress !== null')
+  const block = start === -1 ? '' : pane.slice(start, start + 2000)
+  const wrong = [...block.matchAll(/(?:abortMerge|revealTarget|openInTerminal)\(view\.path\)/g)].map((m) => m[0])
+  if (wrong.length) fail('R9b 收尾出口传 targetPath', `块内误传 view.path：${wrong.join(', ')}`)
+  else pass('R9b 收尾出口传 targetPath', '块内无 view.path 误用')
+}
+
+// R10：reveal 失败必须报出来（通道不抛错，只回 ok:false，吞掉就是「点了没反应」）
+{
+  const m = pane.match(/const revealTarget = async[\s\S]*?\n  \}/)?.[0] ?? ''
+  if (!m) fail('R10 reveal 失败有提示', '找不到 revealTarget')
+  else if (/if \(!res\.ok\)/.test(m) && /toast\.show/.test(m)) pass('R10 reveal 失败有提示', 'ok:false 时报错')
+  else fail('R10 reveal 失败有提示', 'ok:false 时没有提示 —— 静默失败')
+}
+
+// R11：主进程两处都 trustRoot(targetPath)，否则 reveal 一律返回 ok:false
+{
+  const merge = fs.readFileSync(path.join(REPO, 'apps/desktop/src/main/services/worktree/merge.ts'), 'utf8')
+  const list = fs.readFileSync(path.join(REPO, 'apps/desktop/src/main/services/worktree/list.ts'), 'utf8')
+  const inMerge = /trustRoot\(targetPath\)/.test(merge)
+  const inList = /trustRoot\(targetPath\)/.test(list)
+  if (inMerge && inList) pass('R11 targetPath 在主进程两处 trustRoot', 'merge + list')
+  else fail('R11 targetPath 在主进程两处 trustRoot', `merge=${inMerge} list=${inList}`)
+}
+// R8：onNotWired 机制已整体移除（所有按钮都接了真实 IPC）
+// 这不是「还剩几个」的问题：留着这套机制就等于给后来人一个「先挂个空壳」的入口，
+// 而它正是本次要清掉的那类假接线。判据是它彻底不存在。
+{
+  const leftovers = [...pane.matchAll(/onNotWired|notWired/g)].map((m) => m[0])
+  if (leftovers.length === 0) pass('R8 onNotWired 机制已移除', '0 处残留')
+  else fail('R8 onNotWired 机制已移除', `仍有 ${leftovers.length} 处：${[...new Set(leftovers)].join(', ')}`)
 }
 
 console.log('')
