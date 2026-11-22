@@ -245,6 +245,30 @@ export async function replaceAllSecrets(next: Record<string, string>): Promise<{
   return { ok: true }
 }
 
+/**
+ * 备份还原专用：把内存态**清空重来**，让下一次读写以磁盘现状为准。
+ *
+ * ## 为什么必须有
+ *
+ * `ensureLoaded()` 是「本进程只读一次盘」的守卫。而还原流程会把整个 home 换掉：
+ *  - 还原前：`store` 装着旧机器的密钥、`filePath` 指向旧路径、`loadKind` 可能是 `corrupt`
+ *    （旧库读不出来时）或 `ok`；
+ *  - 还原后：磁盘上是新写的内容，但内存里仍是上面那份。
+ *
+ * 结果就是 `replaceAllSecrets` 拿 `loadKind === 'corrupt'` 直接**拒绝写入**，密钥一条都还原不了 ——
+ * 而这是一个荒谬的死锁：用户正是因为旧库坏了才来还原的，却被"保护旧库"的逻辑挡住。
+ * 更普遍的情况是内存里的旧 `store` 继续被读取，还原后界面显示的仍是旧机器的密钥。
+ *
+ * 还原会整目录替换，旧库**本来就不再需要保护**了，所以这里显式放开守卫是正确语义，
+ * 不是绕过校验。
+ */
+export function resetForRestore(): void {
+  store = {}
+  filePath = ''
+  loaded = false
+  loadKind = 'ok'
+}
+
 
 /**
  * 导入专用：**原样写入一段已有密文**（base64），不加密也不解密。

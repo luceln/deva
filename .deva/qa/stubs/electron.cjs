@@ -47,7 +47,16 @@ module.exports = {
   safeStorage,
   __setEncryptionAvailable,
   // 其余 API 只在 IPC/窗口相关模块里用到，这里不需要实现
-  app: { getVersion: () => '0.0.0-qa' },
+  /*
+   * `app.getPath('userData')` 是 `secrets.ts` 的 `migrateLegacy()` 要用的：新位置没有
+   * secrets.json 时会去旧位置找一次。返回一个**必然不存在**的临时路径，让那条分支安静地
+   * 走到 ENOENT → absent。若这里抛错，会被 `ensureLoaded` 归类成 `corrupt`，
+   * 于是 `replaceAllSecrets` 拒绝写入 —— 那是替身的锅，不是产品的。
+   */
+  app: {
+    getVersion: () => '0.0.0-qa',
+    getPath: (name) => require('path').join(require('os').tmpdir(), 'deva-qa-no-such-userdata', String(name))
+  },
   dialog: {},
   ipcMain: {},
   BrowserWindow: class {},

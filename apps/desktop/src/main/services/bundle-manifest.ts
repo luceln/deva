@@ -33,11 +33,17 @@ import {
  *  - `*.tmp` / `*.bad-*`：原子写的中间态、以及解析失败被改名保存的坏文件。都是过程产物。
  *  - `.magpie-agent*.json`：外部插件 magpie 自己的状态（`plugin-managed.ts:67-75` 本应用只读）。
  *    它由插件维护，备份还原不该插手；带过去反而会让插件读到一份别的机器上的登记。
+ *  - `secrets.json`：**密钥库，由密钥段（`secrets.enc`）单独负责，不能当普通文件搬。**
+ *    盘上这份是本机 `safeStorage` 的密文，绑死当前 Windows 账户的 DPAPI 密钥。原样搬进包里，
+ *    重装后解不开 —— 更要命的是它会在替换阶段被写回目标，若这次包里没有密钥段（比如导出时
+ *    密钥库为空），用户新填的密钥就被这串解不开的旧密文顶掉，界面上却还显示"已配置"，
+ *    实际所有服务商 401。这是验收实测出来的 P0。
  */
 const EXCLUDED_EXACT = new Set([
   '_index.json',
   '_index.dirty',
   'import.lock',
+  'secrets.json',
   '.magpie-agent.json',
   '.magpie-agent.state.json',
   '.magpie-agent.config-backup.json'

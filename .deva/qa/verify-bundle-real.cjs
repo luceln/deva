@@ -258,7 +258,17 @@ async function main() {
 
   // E2 排除项不该进包
   const homeFiles = listFiles(home).filter((f) => !f.link)
-  const excludedExpected = ['data/chats/_index.json', 'data/chats/_index.dirty', 'import.lock']
+  /*
+   * secrets.json 必须在这一列里 —— 它是验收实测出的 P0：
+   * 盘上那份是本机 safeStorage 密文，绑死当前 Windows 账户。原样搬进包，重装后解不开；
+   * 更糟的是它会在替换阶段被写回目标，把用户新填的密钥顶成坏密文，而界面还显示"已配置"。
+   */
+  const excludedExpected = [
+    'data/chats/_index.json',
+    'data/chats/_index.dirty',
+    'import.lock',
+    'secrets.json'
+  ]
   const missingExcluded = excludedExpected.filter((p) => entries[`home/${p}`])
   if (missingExcluded.length === 0) ok('E2a 派生/临时物未进包', excludedExpected.join(', '))
   else bad('E2a 派生/临时物进了包', missingExcluded.join(', '))
@@ -355,7 +365,6 @@ async function main() {
    */
   let contentBad = 0
   for (const f of expectedFiles) {
-    if (f.rel === 'secrets.json') continue
     const got = sha256File(path.join(home, f.rel))
     const want = crypto.createHash('sha256').update(Buffer.from(entries[`home/${f.rel}`])).digest('hex')
     if (got !== want) contentBad += 1
@@ -369,7 +378,15 @@ async function main() {
    */
   {
     const stub = require(path.join(QA, 'stubs', 'electron.cjs'))
-    const restored = JSON.parse(fs.readFileSync(path.join(home, 'secrets.json'), 'utf8'))
+    /*
+     * secrets.json 现在是**由密钥段生成**的（它已被排除出普通文件清单，见 P0-1）。
+     * 所以这里同时断言两件事：文件确实被重封装写回来了，且能用本机凭据解开。
+     */
+    const secPath = path.join(home, 'secrets.json')
+    if (!fs.existsSync(secPath)) {
+      bad('E7d 还原后密钥可用本机凭据解开', 'secrets.json 根本没被写回 —— 密钥段没落盘')
+    }
+    const restored = fs.existsSync(secPath) ? JSON.parse(fs.readFileSync(secPath, 'utf8')) : {}
     const map = restored.secrets ?? restored
     let decodedOk = 0
     let decodedBad = 0
@@ -397,6 +414,57 @@ async function main() {
   // E9 派生索引不该被还原进来
   if (!fs.existsSync(path.join(home, 'data/chats/_index.json'))) ok('E9 派生索引未还原（会重建）')
   else bad('E9 派生索引被还原了', '会用导出当天的快照覆盖真实会话列表')
+
+  /*
+   * E16 还原必须**删掉包里有、目标多出来**的用户数据，否则只是覆盖不是替换。
+   *
+   * 造一份「还原前就存在、包里没有」的文件，还原后它必须消失。
+   * 这条对应验收实测的 P0-2：重装后应用会先生成种子角色，只写不删会变成"卸载前 + 一份新的"。
+   */
+  {
+    const stalePersona = path.join(home, 'personas/builtin-seeded.md')
+    fs.writeFileSync(stalePersona, '# 应用启动时自动种下的角色')
+    const staleChat = path.join(home, 'data/chats/never-in-bundle.json')
+    fs.writeFileSync(staleChat, '{"stale":true}')
+    // 用户代码目录：绝不能被删
+    fs.mkdirSync(path.join(home, 'worktrees/proj'), { recursive: true })
+    fs.writeFileSync(path.join(home, 'worktrees/proj/main.ts'), 'export const x = 1')
+
+    const r16 = await api.restoreBundle({ bundlePath, overwriteConfirmed: true })
+    if (!r16.ok) bad('E16a 还原成功', JSON.stringify(r16).slice(0, 120))
+    else {
+      if (!fs.existsSync(stalePersona)) ok('E16a 包里没有的角色文件被清掉（真正替换）')
+      else bad('E16a 残留未清理', 'personas/builtin-seeded.md 还在 —— 只覆盖不删除')
+      if (!fs.existsSync(staleChat)) ok('E16b 包里没有的会话文件被清掉')
+      else bad('E16b 残留未清理', 'data/chats/never-in-bundle.json 还在')
+      if (fs.existsSync(path.join(home, 'worktrees/proj/main.ts')))
+        ok('E16c 用户工作区代码未被删（红线）')
+      else bad('E16c 删了用户工作区代码', 'worktrees/ 必须永远保留')
+      if (Array.isArray(r16.removedStale) && r16.removedStale.length > 0)
+        ok('E16d 清理项有报告', r16.removedStale.join(', '))
+      else bad('E16d 清理项未报告', '用户不知道少了什么')
+    }
+  }
+
+  /*
+   * E17 包内**不得**含 home/secrets.json（旧机器密文）。
+   *
+   * 这是验收实测的 P0-1：盘上那份密文绑死当前 Windows 账户的 DPAPI，原样搬进包重装后解不开；
+   * 更糟的是它会在替换阶段写回目标，把用户新填的密钥顶成坏密文，界面却还显示"已配置"。
+   * 密钥只能走 secrets.enc 这一条路。
+   */
+  {
+    const packedSecretFile = Object.keys(entries).filter((n) => n === 'home/secrets.json')
+    if (packedSecretFile.length === 0) ok('E17a 包内不含 home/secrets.json（旧密文不进包）')
+    else bad('E17a 包内带了旧密文 secrets.json', '还原后会把新填的密钥顶成解不开的坏密文')
+
+    // 还原后 disk 上的 secrets.json 必须是密文（明文只许存在于包内）
+    const diskSec = JSON.parse(fs.readFileSync(path.join(home, 'secrets.json'), 'utf8'))
+    const vals = Object.values(diskSec.secrets ?? diskSec)
+    const plainOnDisk = vals.some((v) => typeof v === 'string' && v === 'sk-plaintext-qa-key-123')
+    if (!plainOnDisk) ok('E17b 磁盘上的密钥是密文，明文未落盘')
+    else bad('E17b 明文密钥落到了磁盘上')
+  }
 
   // E10 目标非空且未确认 → 拒绝且零写入
   const before = sha256File(path.join(home, 'config.json'))
@@ -506,12 +574,38 @@ async function main() {
     fs.writeFileSync(badSecPath, Buffer.from(zipSync(evil)))
     void m
   }
+  /*
+   * **必须让"被覆盖"产生可观测的差异，否则判据抓不住任何东西。**
+   *
+   * 第一版直接比还原前后的 `config.json` 哈希，可坏包里带的正是同一份 config —— 覆盖了也
+   * 一模一样，于是"先替换数据、后报密钥错"的注入照样 PASS。这是在验一个恒真命题。
+   *
+   * 正确做法：还原前把目标改成一份**与包内不同**的内容。如果实现顺序对了（先验密钥段，
+   * 报错即退出），这份用户数据必须原封不动；顺序反了就会被包里的内容盖掉，哈希必然变化。
+   * 同时造一个包里没有的会话文件 —— 残留清理若已执行也会把它删掉，多一条观测点。
+   */
   const beforeE = sha256File(path.join(home, 'secrets.json'))
+  const beforeConfig = ['config-local-marker', 'theme:light']
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ local: beforeConfig }))
+  fs.writeFileSync(path.join(home, 'data/chats/only-local.json'), '{"localOnly":true}')
+  const beforeData = sha256File(path.join(home, 'config.json'))
   const r14 = await api.restoreBundle({ bundlePath: badSecPath, overwriteConfirmed: true })
   const afterE = sha256File(path.join(home, 'secrets.json'))
+  const afterData = sha256File(path.join(home, 'config.json'))
+  const localChatAlive = fs.existsSync(path.join(home, 'data/chats/only-local.json'))
   if (!r14.ok && r14.code === 'corrupt') {
-    if (beforeE === afterE) ok('E14 密钥段损坏被拒，且现有密钥未被破坏')
-    else bad('E14 损坏被拒了但密钥库已被改动')
+    ok('E14a 密钥段损坏被拦住', r14.code)
+    if (beforeData === afterData && localChatAlive) {
+      ok('E14b 用户数据未被覆盖（坏包在动数据之前就被挡住）')
+    } else {
+      bad(
+        'E14b 用户数据被覆盖了',
+        `config 已变=${beforeData !== afterData}，本地会话被删=${!localChatAlive} ` +
+          '—— 坏包先覆写数据再报错，用户只剩自动备份可退'
+      )
+    }
+    if (beforeE === afterE) ok('E14c 现有密钥未被破坏')
+    else bad('E14c 损坏被拒了但密钥库已被改动')
   } else bad('E14 损坏的密钥段没被拦住', JSON.stringify(r14).slice(0, 120))
 
   // ── 清场 ──

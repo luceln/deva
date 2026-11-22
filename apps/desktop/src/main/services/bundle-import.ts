@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readlinkSync } from 'fs'
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'fs/promises'
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'fs/promises'
 
 import { dirname, join } from 'path'
 import { unzipSync } from 'fflate'
@@ -49,6 +49,100 @@ async function cpPreservingLinks(src: string, dst: string): Promise<void> {
   }
   await mkdir(dirname(dst), { recursive: true })
   await cp(src, dst, { force: true })
+}
+
+/**
+ * 找出「目标里有、但包里没有」的**用户数据**，这些要在还原时删掉。
+ *
+ * ## 为什么必须删
+ *
+ * 不删就只是覆盖写入，不是替换。重装后应用会先生成一份种子数据（内置角色 `deva.md`/`lucy.md`、
+ * 默认技能等），还原时再把包里的写上去 —— 用户看到的是「卸载前 + 一份新的」，不是卸载前那样。
+ * 验收实测：包里 4 个文件，还原后目录 7 个。
+ *
+ * ## 为什么不能整个目录 rm -rf
+ *
+ * `home` 下有些东西**不属于备份范围，也不能删**：
+ *  - `worktrees/`：用户的工作区代码。删了就是删用户源码，绝对不行。
+ *  - `.magpie-agent*.json`：外部插件的状态，本应用只读，删了会让插件认不出自己写过的登记。
+ *  - `*.tmp` / `*.bad-*`：正在写的中间态，删了可能打断别的进程。
+ *
+ * 所以走「遍历 → 逐个判断」而不是一删了之。判断依据是**顶层目录白名单**：只清理备份明确
+ * 覆盖的那些顶层项，其余一律不碰。新增顶层数据目录时要记得同步这张表 —— 漏了的表现是
+ * 「那类数据还原后会残留旧文件」，而不是报错。
+ */
+const RESTORE_SCOPE = new Set([
+  'data',
+  'personas',
+  'projects',
+  'skills',
+  'uploads',
+  'profile'
+])
+
+/** 备份覆盖的**单文件**（在 home 根上）。同样只清理这些，别的根文件不动。 */
+const RESTORE_SCOPE_FILES = new Set([
+  'config.json',
+  'secrets.json',
+  'memory.json',
+  'mcp.json',
+  'tasks.json',
+  'read-state.json',
+  'worktrees.json'
+])
+
+async function findStaleEntries(home: string, keep: Set<string>): Promise<string[]> {
+  const stale: string[] = []
+  let tops: string[]
+  try {
+    tops = await readdir(home)
+  } catch {
+    return stale
+  }
+
+  const walk = async (relDir: string): Promise<void> => {
+    let ents
+    try {
+      ents = await readdir(join(home, relDir), { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const ent of ents) {
+      const rel = `${relDir}/${ent.name}`
+      if (keep.has(rel)) {
+        // 目录在包里也有子项：继续往下比，别整棵跳过
+        if (ent.isDirectory() && !ent.isSymbolicLink()) await walk(rel)
+        continue
+      }
+      if (ent.isDirectory() && !ent.isSymbolicLink()) {
+        /*
+         * 目录本身不在清单里（清单只列文件），要看它**子树**里有没有包内条目：
+         * 有就继续下潜，没有才整棵算残留。
+         */
+        const hasInner = [...keep].some((k) => k.startsWith(`${rel}/`))
+        if (hasInner) await walk(rel)
+        else stale.push(rel)
+        continue
+      }
+      if (ent.isSymbolicLink()) {
+        stale.push(rel)
+        continue
+      }
+      // 文件或链接：上面的 keep 已判过，走到这里就是包里没有
+      stale.push(rel)
+    }
+  }
+
+  for (const top of tops) {
+    if (top === 'worktrees') continue // 用户代码，永不删
+    if (!RESTORE_SCOPE.has(top) && !RESTORE_SCOPE_FILES.has(top)) continue
+    if (keep.has(top)) continue // 备份里有同名根文件
+    const st = await lstat(join(home, top)).catch(() => null)
+    if (!st) continue
+    if (st.isDirectory() && !st.isSymbolicLink()) await walk(top)
+    else if (!keep.has(top)) stale.push(top)
+  }
+  return stale
 }
 
 /**
@@ -215,6 +309,34 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
 
     // ---- 6. 替换 home 内容 ----
     report('replace', 0, manifest.files.length)
+
+    /*
+     * 先删掉目标里「包里没有」的用户文件。
+     *
+     * 只写不删不算替换，算覆盖。后果是重装后应用生成的种子数据（内置角色、默认技能等）
+     * 会和新还原的数据混在一起 —— 用户看到的不是「卸载前的样子」，而是「卸载前 + 一份新的」。
+     * 验收实测：包里 4 个文件，还原后目录里有 7 个。
+     *
+     * 只删用户数据类，保留 base 白名单里的东西（工作区、外部插件状态等），理由见 `shouldRemove`。
+     */
+    const removedStale: string[] = []
+    const keepSet = new Set(manifest.files.map((f) => f.path))
+    for (const link of manifest.symlinks) keepSet.add(link.path)
+    /*
+     * `secrets.json` 不在文件清单里（它由密钥段单独负责），但**必须加进 keep**。
+     *
+     * 否则它会被当成"包里没有的残留"删掉，而密钥段是稍后才写的 —— 中间这段窗口里
+     * 密钥库文件是不存在的。虽然最终会被 commitSecrets 写回来，但如果密钥段为空
+     * （导出时一条密钥都没有），用户现有的密钥库就白丢了。
+     * 加进 keep 后它是"保留原样"，随后被 commitSecrets 整体替换或原样留着，两种都对。
+     */
+    keepSet.add('secrets.json')
+    const stale = await findStaleEntries(home, keepSet)
+    for (const rel of stale) {
+      await rm(join(home, rel), { recursive: true, force: true }).catch(() => undefined)
+      removedStale.push(rel)
+    }
+
     const now = new Date()
     for (let i = 0; i < manifest.files.length; i++) {
       const f = manifest.files[i]
@@ -288,6 +410,7 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
       ok: true,
       files: manifest.files.length,
       relinked,
+      removedStale,
       symlinkAsCopy,
       secrets,
       ...(previousBackup ? { backupOfPrevious: previousBackup } : {}),
@@ -376,6 +499,14 @@ async function reencryptSecrets(plainJson: string): Promise<SecretsRestore> {
   }
 
   const secrets = await import('./secrets')
+  /*
+   * 先把密钥库的内存态清空重来。
+   *
+   * 还原已经整目录替换过，旧库不再需要保护；不清的话会撞上 `loadKind === 'corrupt'` 而
+   * **拒绝写入**（用户正是因为旧库坏了才来还原，却被"保护旧库"挡住），或者继续读到旧机器的密钥。
+   * 详见 `secrets.ts` 的 `resetForRestore`。
+   */
+  secrets.resetForRestore()
   let restored = 0
   const out: Record<string, string> = {}
   for (const [key, val] of Object.entries(parsed)) {
@@ -383,7 +514,20 @@ async function reencryptSecrets(plainJson: string): Promise<SecretsRestore> {
     out[key] = safeStorage.encryptString(val).toString('base64')
     restored += 1
   }
-  await secrets.replaceAllSecrets(out)
+  /*
+   * `replaceAllSecrets` 有返回值，**必须看**。
+   *
+   * 它会在这两种情况下拒绝写入并给出 `{ok:false}`：
+   *  - `loadKind === 'corrupt'`（密钥库读不出来，为免覆盖掉还能救的内容）；
+   *  - 写盘失败（磁盘满 / 权限）。
+   *
+   * 以前这里直接忽略返回值，于是写盘失败也会报「已还原 N 条密钥」，用户以为好了，
+   * 实际一个都没落地。这跟导入器那边「写盘失败穿上已存在的衣服」是同一个病。
+   */
+  const written = await secrets.replaceAllSecrets(out)
+  if (!written.ok) {
+    throw new RestoreError('write-failed', `密钥库写入失败：${written.reason ?? '未知原因'}`)
+  }
   return { restored, absent: false }
 }
 

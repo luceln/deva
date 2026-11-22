@@ -132,7 +132,41 @@ console.log('\nD4 把密钥解析挪到替换用户数据之后…')
   } else {
     const moved = origImport.replace(call, '').replace(marker, `${marker}${call}`)
     fs.writeFileSync(IMPORT, moved)
-    check('D4 密钥顺序判据有效', 'E14', runVerify())
+    check('D4 密钥顺序判据有效', 'E14b', runVerify())
+    restore()
+  }
+}
+
+/*
+ * ── D5 把 secrets.json 从排除清单里拿掉 ──
+ *
+ * 对应验收的 P0-1。注入后 E17a 必须报红（旧密文进包）。
+ */
+console.log('\nD5 把 secrets.json 从排除清单里拿掉…')
+{
+  const orig = fs.readFileSync(MANIFEST, 'utf8')
+  if (!orig.includes("  'secrets.json',")) {
+    bad('D5 注入失败', '找不到锚点')
+  } else {
+    fs.writeFileSync(MANIFEST, orig.replace("  'secrets.json',", ''))
+    check('D5 旧密文不进包判据有效', 'E17a', runVerify())
+    restore()
+  }
+}
+
+/*
+ * ── D6 关掉残留清理 ──
+ *
+ * 对应验收的 P0-2。注入后 E16a/E16b 必须报红（只覆盖不删除）。
+ */
+console.log('\nD6 关掉残留清理（stale 恒为空）…')
+{
+  const line = 'const stale = await findStaleEntries(home, keepSet)'
+  if (!origImport.includes(line)) {
+    bad('D6 注入失败', '找不到锚点')
+  } else {
+    fs.writeFileSync(IMPORT, origImport.replace(line, 'const stale: string[] = []'))
+    check('D6 真正替换判据有效', 'E16a', runVerify())
     restore()
   }
 }

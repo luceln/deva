@@ -30,7 +30,7 @@ export const BUNDLE_SCHEMA_VERSION = 1
 /** 包内清单文件名，固定放在 zip 根目录。 */
 export const MANIFEST_NAME = 'manifest.json'
 
-/** 密钥段文件名（口令加密后的密文），固定放在 zip 根目录。 */
+/** 密钥段文件名，固定放在 zip 根目录。内容是明文 JSON（还原时重新用 safeStorage 封装）。 */
 export const SECRETS_ENC_NAME = 'secrets.enc'
 
 /**
@@ -142,7 +142,7 @@ export type ExportFailCode =
   | 'write-failed'
   /** 读 home 时有无权限 / 被占用 */
   | 'read-failed'
-  /** 设了口令但本机没有可用加密（无法解出明文再去加密） */
+  /** 本机没有可用的 safeStorage，读不出密钥明文 */
   | 'no-encryption'
 
 /** 还原一轮的结果。 */
@@ -155,6 +155,8 @@ export type RestoreResult =
       relinked: number
       /** 目标不存在、降级为实体副本的符号链接（路径列表）。 */
       symlinkAsCopy: string[]
+      /** 被删掉的目标残留（包里有、目标多出来的用户数据）。不报出来用户不知道少了什么。 */
+      removedStale: string[]
       /** 密钥还原结果。 */
       secrets: SecretsRestore
       /** 覆盖前的自动备份落在哪（目标非空时才有）。 */
@@ -178,10 +180,6 @@ export type RestoreFailCode =
   | 'extract-failed'
   /** 条目路径含 `..` 或绝对路径（zip slip） */
   | 'unsafe-path'
-  /** 口令错（AEAD 认证失败） */
-  | 'bad-passphrase'
-  /** 包里没有密钥段 */
-  | 'no-secrets'
   /** 目标非空、用户取消 */
   | 'cancelled'
   /** 写目标失败 */

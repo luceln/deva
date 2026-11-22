@@ -107,11 +107,10 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
   )
 
   /**
-   * 探包：用户选好文件后，先看看这是什么包、有没有密钥段、要不要口令。
+   * 探包：用户选好文件后，先看看这是什么包、多大、里面有没有密钥。
    *
-   * 为什么单独一条而不是让 `backup:restore` 自己去问：界面需要在用户点「还原」**之前**
-   * 就能把「这个包含密钥，请输口令」那块输入框显示出来。让还原流程中途弹一个输入框，
-   * 会打断「覆盖确认」那个本来就够紧张的动作。
+   * 为什么单独一条而不是让 `backup:restore` 自己去探：界面要在用户点「还原」**之前**
+   * 就把包内容摆出来，让他知道这一下会拿回什么、覆盖多少 —— 而不是点完之后才看到摘要。
    */
   ipcMain.handle('backup:inspect', async () => {
     const win = getWindow()

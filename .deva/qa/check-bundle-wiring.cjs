@@ -194,6 +194,66 @@ forbid(
 need('B10a 还原时重建链接', srcImport, /await symlink\(link\.target/, '没重建符号链接')
 need('B10b 目标不存在要报告', srcImport, /symlinkAsCopy\.push/, '降级为副本时必须报告，不能静默')
 
+/*
+ * B11 secrets.json 必须被排除出普通文件清单。
+ *
+ * 验收实测的 P0-1：盘上那份是本机 safeStorage 密文，绑死当前 Windows 账户的 DPAPI。
+ * 原样搬进包，重装后解不开；更糟的是它会在替换阶段写回目标，把用户新填的密钥顶成坏密文，
+ * 而界面还显示"已配置"，实际所有服务商 401。密钥只走 secrets.enc 这一条路。
+ */
+{
+  const inExcluded = /EXCLUDED_EXACT = new Set\(\[[\s\S]*?'secrets\.json'[\s\S]*?\]\)/.test(srcManifest)
+  if (inExcluded) pass('B11a secrets.json 在排除清单里')
+  else fail('B11a secrets.json 在排除清单里', '旧密文会被当普通文件搬进包并覆盖目标')
+  need(
+    'B11b 还原时 secrets.json 不计入残留清理',
+    srcImport,
+    /keepSet\.add\('secrets\.json'\)/,
+    '不加进 keep 会被当残留删掉，而密钥段随后才写'
+  )
+}
+
+/*
+ * B12 必须是「替换」而不是「覆盖写入」。
+ *
+ * 只写不删时，重装后应用生成的种子数据（内置角色等）会和还原的数据混在一起，
+ * 用户看到的不是卸载前的样子。验收实测：包里 4 个文件，还原后目录 7 个。
+ */
+{
+  need('B12a 有残留清理步骤', srcImport, /findStaleEntries\(home, keepSet\)/, '没有清理 → 只是覆盖不是替换')
+  need(
+    'B12b worktrees 永不删',
+    srcImport,
+    /if \(top === 'worktrees'\) continue/,
+    '删用户工作区代码是红线'
+  )
+  need('B12c 清理项要报告', srcImport, /removedStale\.push/, '不报告用户不知道少了什么')
+  need(
+    'B12d 清理范围白名单化',
+    srcImport,
+    /const RESTORE_SCOPE = new Set\(/,
+    '不能整个目录 rm -rf，只清备份明确的那些顶层项'
+  )
+}
+
+/*
+ * B13 密钥库写盘结果必须检查。
+ *
+ * `replaceAllSecrets` 会返回 {ok:false}（库损坏 / 写盘失败）。忽略它就会在一条都没落盘时
+ * 报「已还原 N 条密钥」，用户以为好了。
+ */
+{
+  const m = stripComments(srcImport)
+  if (/replaceAllSecrets\(out\)/.test(m) && /if \(!written\.ok\)/.test(m)) pass('B13 密钥写盘结果被检查')
+  else fail('B13 密钥写盘结果被检查', '忽略返回值会在写盘失败时仍报成功')
+  need(
+    'B13b 还原前重置密钥库内存态',
+    srcImport,
+    /resetForRestore\(\)/,
+    '不清会撞 loadKind=corrupt 而拒绝写入（用户正因旧库坏了才来还原）'
+  )
+}
+
 // ── 契约：format 常量 ──
 need('C1 format 常量', srcFormat, /BUNDLE_FORMAT = 'devaplus-backup'/, '常量不对')
 need('C2 有 schemaVersion', srcFormat, /BUNDLE_SCHEMA_VERSION = \d+/, '缺版本常量')

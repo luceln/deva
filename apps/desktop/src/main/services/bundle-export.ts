@@ -31,8 +31,6 @@ function shouldCompress(relPath: string): boolean {
 export interface ExportOptions {
   /** 目标包路径。扩展名只用于展示，不影响格式。 */
   targetPath: string
-  /** 口令。未给 / 空串 = 包里不含密钥段。 */
-  passphrase?: string
   onProgress?: (done: number, total: number) => void
 }
 
@@ -115,7 +113,8 @@ export async function exportBundle(opts: ExportOptions): Promise<ExportResult> {
 }
 
 /**
- * 读密钥库、解出明文、再用口令加密。返回 null = 没有密钥库（不是错误），`{error}` = 读失败。
+ * 读密钥库、逐条解出明文，写进包的密钥段。
+ * 返回 null = 没有密钥库 / 一条都解不开（不是错误），`{error}` = 读失败。
  *
  * ## 为什么必须逐条解成明文
  *
