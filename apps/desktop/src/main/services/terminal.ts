@@ -21,6 +21,9 @@ interface CreateOptions {
   cols: number
   rows: number
   cwd: string | null
+  /** 终端所属的会话。**给成员会话开终端时必须传**——成员守卫靠它识别归属，
+   *  漏传则只剩目录存在性检查（不会报错，静默变弱）。PTY 恢复路径没有所属会话，
+   *  那里可以省略。详见 member-worktree-guard.ts 的 assertMemberTerminalDirectory。 */
   sessionId?: string
   shellId?: string | null
 }
