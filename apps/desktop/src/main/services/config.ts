@@ -206,6 +206,42 @@ export function getConfig(): Record<string, unknown> {
 }
 
 /**
+ * 备份还原专用：让内存态**重新从磁盘载入**。
+ *
+ * 为什么必须有：`ensureLoaded()` 只在本进程首次调用时读一次盘。还原流程是直接往磁盘写
+ * `config.json`，写完之后本进程的 `config` 还是还原前那份 —— 于是「还原了，但当前窗口里
+ * 服务商/模型/角色全是旧的，重启才好」。
+ *
+ * 与 `rereadForWrite()` 的区别：那个是写路径的即时体检（顺带更新内存），且对「文件缺失」有
+ * 「用户主动删除则不复活」的语义。这里是**用户明确要求**把磁盘上的那份接管过来，缺失也允许
+ * （交给下次 `ensureLoaded` 建基线）。
+ */
+export function reloadConfigFromDisk(): { ok: true } | { ok: false; reason: string } {
+  try {
+    const raw = readFileSync(configPath(), 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, reason: 'config.json 顶层不是对象' }
+    }
+    config = parsed as Record<string, unknown>
+    loadKind = 'ok'
+    baselineEstablished = true
+    loaded = true
+    return { ok: true }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') {
+      // 还原包里没有 config.json（不该发生，但真发生了也不能留着一份旧内存态）
+      config = {}
+      loadKind = 'absent'
+      loaded = true
+      return { ok: true }
+    }
+    return { ok: false, reason: `重读配置失败：${(e as Error)?.message ?? e}` }
+  }
+}
+
+/**
  * 把渲染层的一条 `config:set` 补丁里的 `models` 段**合并**到当前内存态上（纯函数，不写盘）。
  *
  * ## 为什么需要它（2-B 的核心）

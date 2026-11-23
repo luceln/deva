@@ -44,6 +44,7 @@ import type {
 import type { ConfigChangedEvent, ConfigSetResult } from '../shared/config-protocol'
 // 二开独有的两块通道独立成模块（上游没有这些功能，搬出去可避免上游改动本文件时冲突）。
 import { importApi } from './import'
+import { backupApi } from './backup'
 import { worktreeApi } from './worktree'
 
 /** 聊天 IPC 协议类型：与主进程共用 shared/chat-protocol.ts。 */
@@ -806,6 +807,8 @@ const api = {
     }
   },
   import: importApi,
+  /** 备份包：导出到本地文件 / 从本地文件还原（整机复原，与 import 的「补缺」是两件事）。 */
+  backup: backupApi,
   /** 本机用户资料（个人资料面板）：头像 spec 存 config.json，图片另存 ~/.deva-plus/profile/。 */
   profile: {
     get: (): Promise<UserProfile> => ipcRenderer.invoke('profile:get'),

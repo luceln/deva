@@ -6379,3 +6379,112 @@ body.cf-pop-open * {
   overflow: hidden;
 }
 
+
+/* ───────── 设置 › 备份（导出 / 还原） ─────────
+ * 与「导入」面板并列但语义不同：导入是补缺、备份是复原。
+ * 视觉上刻意用卡片分块 + 明确的危险色，因为还原会整目录覆盖用户数据。
+ */
+.cf-backup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 720px;
+}
+.cf-backup__intro {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.cf-backup__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--bg-subtle, transparent);
+}
+.cf-backup__h3 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.cf-backup__desc {
+  margin: 0 0 var(--space-1);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.cf-backup__label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.cf-backup__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-tertiary, var(--text-secondary));
+  line-height: 1.6;
+}
+.cf-backup__warn {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warn, #d97706);
+}
+.cf-backup__ok {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ok, #16a34a);
+  line-height: 1.6;
+  word-break: break-all;
+}
+.cf-backup__err {
+  margin: 0;
+  font-size: 12px;
+  color: var(--danger, #dc2626);
+  line-height: 1.6;
+  word-break: break-all;
+}
+.cf-backup__inspect {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 6px);
+}
+.cf-backup__kv {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font-size: 12px;
+}
+.cf-backup__kv span {
+  color: var(--text-secondary);
+}
+.cf-backup__danger {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--danger, #dc2626);
+  border-radius: var(--radius-sm, 6px);
+  color: var(--danger, #dc2626);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.cf-backup__danger p {
+  margin: 0;
+}
+/* 危险按钮：还原会整目录覆盖，不能与普通主要按钮长得一样 */
+.cf-btn.is-danger {
+  border-color: var(--danger, #dc2626);
+  color: var(--danger, #dc2626);
+}
+.cf-btn.is-danger:hover {
+  background: var(--danger, #dc2626);
+  color: #fff;
+}
