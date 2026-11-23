@@ -1,7 +1,7 @@
-import { createWriteStream, existsSync } from 'fs'
+import { existsSync } from 'fs'
 import { mkdir, readFile, rename, rm, stat } from 'fs/promises'
 import { join, dirname } from 'path'
-import { Zip, ZipDeflate, ZipPassThrough } from 'fflate'
+import { ZipWriter } from './bundle-zip-writer'
 import { MANIFEST_NAME, SECRETS_ENC_NAME, LINK_PREFIX, type BundleManifest, type ExportResult } from '../../shared/bundle-format'
 import { buildManifest, hashFiles, resolveLinkTarget, scanHome, toEntryName } from './bundle-manifest'
 
@@ -214,114 +214,91 @@ async function uniqueTarget(p: string): Promise<string> {
 /**
  * 流式写 zip。
  *
- * `Zip` 的回调每产出一块就推给写流；`push(..., true)` 表示该条目结束。
  * 条目顺序：清单在最前（解包方打开就能知道这是什么包，不必先扫全部条目），然后密钥段，然后文件。
+ *
+ * 用的是自己实现的 `ZipWriter`（`bundle-zip-writer.ts`）而不是 fflate 的 `Zip`：
+ * 后者固定写 data descriptor，而它的流式读侧在 `store + descriptor` 条目上靠扫描
+ * `50 4b 07 08` 定界 —— 媒体文件里恰好出现这 4 字节就会被提前截断。详见那个文件的说明。
  */
-function writeZip(
+async function writeZip(
   partPath: string,
   home: string,
   manifest: BundleManifest,
   secrets: Buffer | null,
   onProgress?: (done: number, total: number) => void
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const out = createWriteStream(partPath)
-    let settled = false
-    const finish = (err?: Error): void => {
-      if (settled) return
-      settled = true
-      if (err) reject(err)
-      else resolve()
+  const total = manifest.files.length + 1 // +1：manifest.json 本身
+  let n = 0
+  const tick = (): void => onProgress?.((n += 1), total)
+
+  const zip = await ZipWriter.create(partPath)
+  try {
+    await zip.addEntry(MANIFEST_NAME, Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'), true)
+    tick()
+
+    if (secrets) await zip.addEntry(SECRETS_ENC_NAME, secrets, false)
+
+    for (const f of manifest.files) {
+      const data = await readFile(join(home, f.path))
+      /*
+       * 清单里的 size 与磁盘实际不符 → 中止，而不是写一份自相矛盾的包。
+       * 什么时候会发生：导出期间应用还在写这个文件（正在进行的对话、正在追加的 tool-result）。
+       * 写进去的包内容与清单哈希对不上，还原时会被判「包已损坏」，那时用户已经没法重导了。
+       */
+      if (data.length !== f.size) {
+        throw new Error(
+          `文件在导出过程中被修改：${f.path}（清单 ${f.size} 字节，实际 ${data.length}）。请等当前对话结束后重试。`
+        )
+      }
+      await zip.addEntry(toEntryName(f.path), data, shouldCompress(f.path))
+      tick()
+      // 让出事件循环：几百个文件连续 readFile 会把进度事件饿死，界面看着像卡死
+      if (n % 16 === 0) await new Promise((r) => setImmediate(r))
     }
-    out.on('error', finish)
-    out.on('finish', () => finish())
 
-    const zip = new Zip((err, chunk, final) => {
-      if (err) return finish(err)
-      out.write(Buffer.from(chunk))
-      if (final) out.end()
-    })
+    // zip 本身不表达「这是个符号链接」，所以链接单独写成一个小文本条目
+    for (const link of manifest.symlinks) {
+      await zip.addEntry(
+        `${toEntryName(link.path)}.symlink`,
+        Buffer.from(JSON.stringify({ target: link.target }), 'utf8'),
+        true
+      )
+    }
 
-    void (async () => {
-      try {
-        const total = manifest.files.length + 1 // +1：manifest.json 本身
-        let n = 0
-        const tick = (): void => onProgress?.((n += 1), total)
-
-        addBuffer(zip, MANIFEST_NAME, Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'), true)
-        tick()
-
-        if (secrets) addBuffer(zip, SECRETS_ENC_NAME, secrets, false)
-
-        for (const f of manifest.files) {
-          const data = await readFile(join(home, f.path))
-          /*
-           * 清单里的 size 与磁盘实际不符 → 中止，而不是写一份自相矛盾的包。
-           * 什么时候会发生：导出期间应用还在写这个文件（正在进行的对话、正在追加的 tool-result）。
-           * 写进去的包内容与清单哈希对不上，还原时会被判「包已损坏」，那时用户已经没法重导了。
-           */
-          if (data.length !== f.size) {
-            throw new Error(
-              `文件在导出过程中被修改：${f.path}（清单 ${f.size} 字节，实际 ${data.length}）。请等当前对话结束后重试。`
-            )
-          }
-          addBuffer(zip, toEntryName(f.path), data, shouldCompress(f.path))
-          tick()
-          // 让出事件循环：几百个文件连续 readFile 会把进度事件饿死，界面看着像卡死
-          if (n % 16 === 0) await new Promise((r) => setImmediate(r))
+    /*
+     * 链接目标的**内容副本**，放在 `links/<链接路径>/…`。
+     *
+     * 为什么不放 `home/`：那会让「包内 home 条目数 = home 非链接文件数」这条判据
+     * （`verify-bundle-real.cjs` E2b）立刻对不上，而且会让还原时的「同路径文件」与「链接」
+     * 争同一个位置。放独立前缀，语义清楚：`home/` 就是 home 原样，`links/` 是备用副本。
+     */
+    for (const tree of manifest.links ?? []) {
+      if (!tree.files.length) continue
+      const targetAbs = await resolveLinkTarget(home, tree.path)
+      for (const f of tree.files) {
+        let data: Buffer
+        try {
+          data = await readFile(join(targetAbs, f.path))
+        } catch (e) {
+          throw new Error(`读取符号链接内容失败：${tree.path}/${f.path}：${(e as Error)?.message ?? e}`)
         }
-
-        // zip 本身不表达「这是个符号链接」，所以链接单独写成一个小文本条目
-        for (const link of manifest.symlinks) {
-          addBuffer(
-            zip,
-            `${toEntryName(link.path)}.symlink`,
-            Buffer.from(JSON.stringify({ target: link.target }), 'utf8'),
-            true
+        if (data.length !== f.size) {
+          throw new Error(
+            `符号链接内容在导出过程中被修改：${tree.path}/${f.path}（清单 ${f.size} 字节，实际 ${data.length}）。请重试。`
           )
         }
-
-        /*
-         * 链接目标的**内容副本**，放在 `links/<链接路径>/…`。
-         *
-         * 为什么不放 `home/`：那会让「包内 home 条目数 = home 非链接文件数」这条判据
-         * （`verify-bundle-real.cjs` E2b）立刻对不上，而且会让还原时的「同路径文件」与「链接」
-         * 争同一个位置。放独立前缀，语义清楚：`home/` 就是 home 原样，`links/` 是备用副本。
-         */
-        for (const tree of manifest.links ?? []) {
-          if (!tree.files.length) continue
-          const targetAbs = await resolveLinkTarget(home, tree.path)
-          for (const f of tree.files) {
-            let data: Buffer
-            try {
-              data = await readFile(join(targetAbs, f.path))
-            } catch (e) {
-              throw new Error(`读取符号链接内容失败：${tree.path}/${f.path}：${(e as Error)?.message ?? e}`)
-            }
-            if (data.length !== f.size) {
-              throw new Error(
-                `符号链接内容在导出过程中被修改：${tree.path}/${f.path}（清单 ${f.size} 字节，实际 ${data.length}）。请重试。`
-              )
-            }
-            addBuffer(zip, `${LINK_PREFIX}${tree.path}/${f.path}`, data, shouldCompress(f.path))
-            tick()
-            if (n % 16 === 0) await new Promise((r) => setImmediate(r))
-          }
-        }
-
-        zip.end()
-      } catch (e) {
-        finish(e as Error)
+        await zip.addEntry(`${LINK_PREFIX}${tree.path}/${f.path}`, data, shouldCompress(f.path))
+        tick()
+        if (n % 16 === 0) await new Promise((r) => setImmediate(r))
       }
-    })()
-  })
-}
+    }
 
-/** 把一个 buffer 写成 zip 条目。 */
-function addBuffer(zip: Zip, name: string, data: Buffer, compress: boolean): void {
-  const entry = compress ? new ZipDeflate(name, { level: 6 }) : new ZipPassThrough(name)
-  zip.add(entry)
-  entry.push(new Uint8Array(data), true)
+    // 中央目录 + EOCD + fsync + close。返回前数据一定已落到设备上
+    await zip.end()
+  } catch (e) {
+    await zip.abort()
+    throw e
+  }
 }
 
 /** 读应用版本。读不到不影响导出。 */

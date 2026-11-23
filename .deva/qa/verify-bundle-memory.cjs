@@ -122,6 +122,15 @@ async function main() {
   /*
    * 子进程里做还原并采峰值 RSS。
    * 采样用定时器而不是靠 memoryUsage 的单点：解压是分块的，单点取不到峰值。
+   *
+   * **必须把失败原因带回来**（`code` / `message`）：只回 `ok:false` 时，上层只能打印
+   * 「大包还原失败」四个字，看不到是 corrupt（包坏了）、write-failed（磁盘/权限）还是
+   * cancelled（目标非空）—— 那三种的处置完全不同，看不到就只能猜。
+   *
+   * `overwriteConfirmed: true` 是刻意的：目标 home 刚被删空又重建，本来就没有需要保护的数据。
+   * 不传它时 `restoreBundle` 在目标非空 / 需确认时会返回 `cancelled`，
+   * 那个结果与真失败混在一起看，会让「还原挂了」和「它只是没被允许覆盖」变得无法区分。
+   * （本脚本原本就漏传，是三个脚本缺陷之一。）
    */
   const child = path.join(root, 'child.cjs')
   fs.writeFileSync(
@@ -132,21 +141,28 @@ const api = require(${JSON.stringify(path.join(DIST, 'memverify.cjs'))})
 const base = process.memoryUsage().rss
 let peak = base
 const timer = setInterval(() => { const r = process.memoryUsage().rss; if (r > peak) peak = r }, 20)
-api.restoreBundle({ bundlePath: ${JSON.stringify(bundlePath)} }).then((r) => {
+api.restoreBundle({ bundlePath: ${JSON.stringify(bundlePath)}, overwriteConfirmed: true }).then((r) => {
   clearInterval(timer)
   console.log('RESULT_JSON:' + JSON.stringify({
     ok: r.ok,
+    code: r.ok ? null : r.code,
+    message: r.ok ? null : r.message,
     baseMB: +(base/1048576).toFixed(1),
     peakMB: +(peak/1048576).toFixed(1),
     deltaMB: +((peak-base)/1048576).toFixed(1)
   }))
-}).catch((e) => { clearInterval(timer); console.log('RESULT_JSON:' + JSON.stringify({ok:false,err:String(e)})) })
+}).catch((e) => { clearInterval(timer); console.log('RESULT_JSON:' + JSON.stringify({ok:false,code:'threw',message:String(e),deltaMB:0})) })
 `
   )
 
   const r = runChild(child)
   if (!r.ok) {
-    bad('大包还原成功', JSON.stringify(r).slice(0, 600))
+    bad('大包还原成功', `code=${r.code ?? '?'} message=${String(r.message ?? '').slice(0, 600)}`)
+    fs.rmSync(root, { recursive: true, force: true })
+    return done()
+  }
+  if (typeof r.deltaMB !== 'number' || !Number.isFinite(r.deltaMB)) {
+    bad('大包还原给出可用的峰值增量', `deltaMB=${JSON.stringify(r.deltaMB)}`)
     fs.rmSync(root, { recursive: true, force: true })
     return done()
   }
@@ -193,31 +209,84 @@ const api = require(${JSON.stringify(path.join(DIST, 'memverify.cjs'))})
 const base = process.memoryUsage().rss
 let peak = base
 const timer = setInterval(() => { const r = process.memoryUsage().rss; if (r > peak) peak = r }, 20)
-api.restoreBundle({ bundlePath: ${JSON.stringify(bundle2)} }).then((r) => {
+api.restoreBundle({ bundlePath: ${JSON.stringify(bundle2)}, overwriteConfirmed: true }).then((r) => {
   clearInterval(timer)
-  console.log('RESULT_JSON:' + JSON.stringify({ ok: r.ok, deltaMB: +((peak-base)/1048576).toFixed(1) }))
-})
+  console.log('RESULT_JSON:' + JSON.stringify({ ok: r.ok, code: r.ok ? null : r.code, message: r.ok ? null : r.message, deltaMB: +((peak-base)/1048576).toFixed(1) }))
+}).catch((e) => { clearInterval(timer); console.log('RESULT_JSON:' + JSON.stringify({ok:false,code:'threw',message:String(e),deltaMB:0})) })
 `
   )
   const r2 = runChild(child2)
   const unpacked2MB = home2Bytes / 1024 / 1024
+  /*
+   * **先看 r2.ok 再报 PASS。**
+   *
+   * 原来是 `runChild(child2)` 之后直接 `ok('2× 包还原成功', ...)`，从不检查 r2.ok ——
+   * 于是「第二个包还原失败」会被记成 PASS，并且拿 `r2.deltaMB`（失败时是 0 或 undefined）
+   * 去除以 r.deltaMB，算出 growth=0，进而让下面「峰值不随体积增长」也假绿。
+   * 也就是说这一处漏判会让**整条内存判据在最该报警的时候全绿**，正是它掩盖了导出缺陷。
+   */
+  if (!r2.ok) {
+    bad(
+      '2× 包还原成功',
+      `code=${r2.code ?? '?'} message=${String(r2.message ?? '').slice(0, 400)}`
+    )
+    fs.rmSync(root, { recursive: true, force: true })
+    return done()
+  }
+  if (typeof r2.deltaMB !== 'number' || !Number.isFinite(r2.deltaMB)) {
+    bad('2× 包还原给出可用的峰值增量', `deltaMB=${JSON.stringify(r2.deltaMB)}`)
+    fs.rmSync(root, { recursive: true, force: true })
+    return done()
+  }
   ok(
     '2× 包还原成功',
     `峰值 ${r2.deltaMB}MB / 解压后 ${unpacked2MB.toFixed(1)}MB（体积是前者的 ${(unpacked2MB / unpackedMB).toFixed(2)}×）`
   )
 
-  const growth = r2.deltaMB / r.deltaMB
-  const volGrowth = unpacked2MB / unpackedMB
-  if (growth < 1.6) {
-    ok(
-      '内存峰值不随包体积增长（流式生效）',
-      `体积 ×${volGrowth.toFixed(2)}，峰值仅 ×${growth.toFixed(2)}（整包读进内存会接近 ×${volGrowth.toFixed(2)}；阈值 1.6）`
-    )
+  /*
+   * ── 判据：峰值**增量**是否随包体积增长 ──
+   *
+   * 演化过程（记录在这里，避免后人又改回比值）：
+   *
+   *  v1「两次峰值比值 < 1.6」：忽红忽绿。除法把噪声放大 —— 分子分母都含一个与包体积
+   *    无关的基线（V8 堆 + 三遍遍历的残留），而 160MB 那次的峰值本身在 219~246MB 之间抖，
+   *    倒数一除比值就落在 1.40~1.77。阈值 1.6 时它实际在测「这次抖得大不大」。
+   *
+   *  v2「差值斜率 < 0.6」：数值稳定了（0.80~1.18），但**稳定地报红**。它暴露了真问题：
+   *    `streamZip` 原来用 `writes = writes.then(...)` 串行，**每个 `then` 闭包都持有它捕获的
+   *    chunk 直到链尾**，整包数据被钉在内存里（600×1MB 实测 external 601.8MB）。
+   *    那正是「用了流式、峰值仍线性增长」的根因。
+   *
+   *  v3（当前）：`bundle-zip.ts` 改成有界队列 + 队列满时暂停读流（真背压）后，
+   *    extractTo 的峰值增量不再随体积走（实测 80MB 包 +32.5MB、160MB 包 +29.4MB）。
+   *
+   * 所以判据看的是**峰值增量本身**，而不是两次的比值：增量是「瞬时缓冲」的量度，
+   * 流式时它约为「常数 + 最大单条目」，与包体积无关；整包读进内存时它 ≈ 包体积。
+   *
+   * 阈值：`peakDelta < 0.8 × 包体积增量`。
+   *   · 流式（实测）：约 0.37 × 体积增量（29.4/80）
+   *   · 整包读进内存：≥ 1.0 ×（v2 实测 0.80~1.18 就是链钉住整包的表现）
+   * 0.8 落在这两个区间之间的空档里，且**只依赖一次测量的增量**，不放大噪声。
+   */
+  const volumeDelta = unpacked2MB - unpackedMB
+  const peakDelta = r2.deltaMB - r.deltaMB
+  if (volumeDelta <= 0) {
+    bad('内存峰值趋势可计算', `两次包体积没有增长：${unpackedMB}MB → ${unpacked2MB}MB`)
   } else {
-    bad(
-      '内存峰值随包体积增长',
-      `体积 ×${volGrowth.toFixed(2)}，峰值 ×${growth.toFixed(2)} —— 说明仍在内存里持有整包`
-    )
+    const ratio = peakDelta / volumeDelta
+    if (ratio < 0.8) {
+      ok(
+        '内存峰值不随包体积增长（流式生效）',
+        `包 +${volumeDelta.toFixed(1)}MB 时峰值仅 +${peakDelta.toFixed(1)}MB（${ratio.toFixed(2)}×；` +
+          `整包读进内存会 ≥ 1.00×；阈值 0.80。基线 ${r.deltaMB}MB → ${r2.deltaMB}MB）`
+      )
+    } else {
+      bad(
+        '内存峰值随包体积增长',
+        `包 +${volumeDelta.toFixed(1)}MB 时峰值 +${peakDelta.toFixed(1)}MB（${ratio.toFixed(2)}×）` +
+          ` —— 说明仍在内存里持有整包（基线 ${r.deltaMB}MB → ${r2.deltaMB}MB）`
+      )
+    }
   }
 
   // 顺带确认数据真的还原对了（别为了省内存牺牲正确性）

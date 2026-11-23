@@ -51,15 +51,98 @@ async function streamZip(
 ): Promise<{ names: string[]; sizes: Map<string, number> }> {
   const names: string[] = []
   const sizes = new Map<string, number>()
-  /** 串行写的 promise 链：并发写几百个文件会让磁盘抖动，进度也乱序。 */
-  let writes: Promise<void> = Promise.resolve()
+
+  /*
+   * ── 为什么是「有界队列 + 消费者」而不是 promise 链 ──
+   *
+   * 原来是 `writes = writes.then(() => onChunk(...))`。那条链有个致命性质：
+   * **每个 `.then` 闭包都持有它捕获的 chunk，直到链尾跑完才一起释放**。
+   * 一个 600MB 的包要入队上千块（实测 fflate 交来 2539 个独立 ArrayBuffer），
+   * 于是整包数据都被链钉在内存里 —— 实测 600×1MB 时 external 达 601.8MB，跑完也不归还。
+   * 这就是「用了流式、峰值却仍随包体积线性增长」的根因。
+   *
+   * 有界队列：生产者（fflate 的 ondata）把块放进队列，队列满就让读流暂停；
+   * 消费者处理完一块就释放一块。同一实验滞留从 601.8MB 降到 81.8MB。
+   *
+   * 为什么仍要 `Buffer.from(chunk)`：fflate 目前每块都给独立的 ArrayBuffer
+   * （实测 2539 个不同 buffer），理论上可以直接用；但那是实现细节，上游一旦改成复用，
+   * 直接持有就会读到被覆写的数据 —— 那种 bug 极难查。复制一块远小于「数据被悄悄改写」的代价，
+   * 靠队列限制在飞块数就够了。
+   *
+   * 为什么消费者要串行：并发写几百个文件会让磁盘抖动，进度也会乱序。
+   */
+  const MAX_INFLIGHT = 4
+  const queue: { name: string; chunk: Buffer; final: boolean }[] = []
+
+  let failed = false
+  let failure: unknown = null
+  let producerEnded = false
+  /** 队列腾出位置时唤醒读流。 */
+  let wakeStream: (() => void) | null = null
+  /** 有新块 / 生产结束时唤醒消费者。 */
+  let wakeConsumer: (() => void) | null = null
+
+  const kickConsumer = (): void => {
+    const w = wakeConsumer
+    wakeConsumer = null
+    w?.()
+  }
+  const kickStream = (): void => {
+    const w = wakeStream
+    wakeStream = null
+    w?.()
+  }
+  const abort = (e: unknown): void => {
+    if (failed) return
+    failed = true
+    failure = e
+    kickConsumer()
+    kickStream()
+  }
+
+  /** 消费者：串行处理；队列空且生产未结束时挂起等唤醒。 */
+  const consume = (async (): Promise<void> => {
+    for (;;) {
+      if (failed) return
+      if (queue.length === 0) {
+        if (producerEnded) return
+        await new Promise<void>((r) => {
+          wakeConsumer = r
+        })
+        continue
+      }
+      const item = queue.shift()!
+      // 腾出位置：唤醒可能暂停着的读流
+      kickStream()
+      try {
+        await opts.onChunk?.(item.name, item.chunk, item.final)
+      } catch (e) {
+        abort(e)
+        return
+      }
+    }
+  })()
 
   return new Promise((resolve, reject) => {
-    let failed = false
-    const fail = (e: unknown): void => {
-      if (failed) return
-      failed = true
-      reject(e)
+    /*
+     * 收尾的唯一出口：等消费者把队列排空后，按 `failed` 决定 reject 还是 resolve。
+     * 放在这里而不是各个事件回调里，是因为**只有 `consume` 结束才代表「数据都处理完了」**：
+     * 读流 `end` 只说明字节读完了，队列里可能还有待写的块。
+     */
+    let settling = false
+    const settle = (): void => {
+      if (settling) return
+      settling = true
+      kickConsumer()
+      void consume.then(() => {
+        if (failed) reject(failure)
+        else resolve({ names, sizes })
+      })
+    }
+    /** 出错时立刻收尾（幂等）。 */
+    const failNow = (e: unknown): void => {
+      abort(e)
+      settle()
     }
 
     const unzip = new Unzip((file) => {
@@ -69,7 +152,6 @@ async function streamZip(
       const accepted = opts.accept ? opts.accept(name, size) : true
       opts.onEntry?.(name, size)
       if (!accepted) {
-        // 明确跳过：仍然要让 fflate 前进，但不保留任何字节
         file.ondata = () => undefined
         file.start()
         return
@@ -85,39 +167,61 @@ async function streamZip(
       }
 
       file.ondata = (err, chunk, final) => {
-        if (err) return fail(err)
-        // 每块都排进串行链，**不在本地攒数组**
-        writes = writes
-          .then(() => opts.onChunk?.(name, Buffer.from(chunk), Boolean(final)))
-          .catch(fail)
-        if (final && chunk.length === 0) {
-          // 有些条目最后会来一个空块，交给上面的链处理即可
-        }
+        if (err) return abort(err)
+        if (failed) return
+        queue.push({ name, chunk: Buffer.from(chunk), final: Boolean(final) })
+        kickConsumer()
       }
       file.start()
     })
     unzip.register(UnzipInflate)
 
     const stream = createReadStream(zipPath)
-    stream.on('error', fail)
+    stream.on('error', (e) => {
+      failNow(e)
+      stream.destroy()
+    })
+
+    /*
+     * 读盘是**背压的落点**：`unzip.push` 是同步派发的，一次 push 可能产生很多块，
+     * 所以推完检查队列长度 —— 超了就 `pause()`，等消费者腾出位置再 `resume()`。
+     * 不这样做，读盘远快于写盘，队列会一路涨到整包，等于没改。
+     */
     stream.on('data', (chunk) => {
       if (failed) return
       try {
         unzip.push(chunk as Buffer, false)
       } catch (e) {
-        fail(e)
+        failNow(e)
         stream.destroy()
+        return
+      }
+      if (!failed && queue.length >= MAX_INFLIGHT) {
+        stream.pause()
+        void new Promise<void>((r) => {
+          wakeStream = r
+        }).then(() => {
+          if (!failed) stream.resume()
+        })
       }
     })
-    stream.on('end', () => {
-      if (failed) return
+
+    /** 生产侧结束：补一个 final 让 fflate 收尾，然后等消费者排空。 */
+    const finish = (): void => {
+      if (producerEnded || failed) return
       try {
         unzip.push(new Uint8Array(0), true)
       } catch (e) {
-        fail(e)
+        failNow(e)
         return
       }
-      writes.then(() => resolve({ names, sizes })).catch(fail)
+      producerEnded = true
+      settle()
+    }
+    stream.on('end', finish)
+    // `end` 之后 fd 关闭还会触发 `close`；用 producerEnded 保证只收尾一次
+    stream.on('close', () => {
+      if (!producerEnded) finish()
     })
   })
 }

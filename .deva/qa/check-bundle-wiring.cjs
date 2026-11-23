@@ -76,14 +76,60 @@ const forbid = (name, src, re, msg) => {
 }
 
 // ── B1 流式 Zip ──
-need('B1a 导出用流式 Zip', srcExport, /new Zip\(/, '没有 new Zip(')
+/*
+ * 原判据是「导出用 fflate 的 `new Zip(`」。现在改成了自实现的 `ZipWriter` ——
+ * 原因不是嫌它麻烦，而是 fflate 的写出侧**固定写 data descriptor**，而它的流式读侧
+ * 在 `store + data descriptor` 条目上靠扫描数据里的 `50 4b 07 08` 定界，
+ * 媒体文件里恰好出现这 4 字节就会被提前截断（实测 8% 失败率，包自检却全对）。
+ *
+ * 所以这里的判据跟着换，但**闸门更严了**：不只看「是不是流式」，
+ * 还要求「不许出现 data descriptor」——那正是本次缺陷的机制本身。
+ */
+if (/ZipWriter\.create\s*\(/.test(srcExport)) {
+  pass('B1a 导出用流式 Zip（自实现 ZipWriter，不再用 fflate 的 Zip）')
+} else if (/new Zip\(/.test(srcExport)) {
+  fail('B1a 导出用流式 Zip', 'fflate 的 Zip 固定写 data descriptor，勿再用（见 bundle-zip-writer.ts 说明）')
+} else {
+  fail('B1a 导出用流式 Zip', '既没有 ZipWriter.create 也没有 new Zip(')
+}
 forbid(
   'B1b 导出不得用 zipSync',
   srcExport,
   /\bzipSync\s*\(/,
   'zipSync 会把整个包拼在内存里；home 约 600MB，直接顶爆 Node 堆'
 )
-need('B1c 大件走 PassThrough 不压缩', srcExport, /new ZipPassThrough\(/, '媒体/大件应 store 而非 deflate')
+/*
+ * B1c 原为「大件走 PassThrough 不压缩」。现在 store 与 deflate 都由 ZipWriter 按 `compress` 决定，
+ * 所以判据改成：导出侧必须把「按扩展名决定是否压缩」的策略传下去（不应变成全压缩或全不压缩）。
+ */
+need(
+  'B1c 大件不压缩（仍按扩展名分流）',
+  srcExport,
+  /shouldCompress\(f\.path\)/,
+  '媒体/大件应 store 而非 deflate —— 仍要按 shouldCompress 分流'
+)
+/*
+ * 新增：本模块（bundle-zip-writer.ts）负责写入，它自己**不得**再出现 data descriptor 写法。
+ * 这是本次缺陷的机制层闸门，缺了它「换回 descriptor」不会被任何判据拦住。
+ */
+const writerPath = path.join(REPO, 'apps/desktop/src/main/services/bundle-zip-writer.ts')
+if (fs.existsSync(writerPath)) {
+  const srcWriter = fs.readFileSync(writerPath, 'utf8')
+  forbid(
+    'B1d 写入侧不得写 data descriptor',
+    srcWriter,
+    /0x8074[bB]50|writeUInt16LE\([^)]*\|\s*8\s*,\s*6\)/,
+    'data descriptor 会让流式读侧按扫描 504b0708 定界，媒体数据会把它骗到'
+  )
+  need(
+    'B1e 写入侧 end() 在关闭前 fsync',
+    srcWriter,
+    /this\.fh\.sync\s*\(\s*\)/,
+    'rename 之前必须确认数据真的落盘（断电/崩溃窗口）'
+  )
+} else {
+  fail('B1d 写入侧模块存在', `找不到 ${writerPath}`)
+}
 
 // ── B2 .part + rename ──
 need('B2a 先写 .part', srcExport, /\.part`/, '没有 .part 临时文件')
