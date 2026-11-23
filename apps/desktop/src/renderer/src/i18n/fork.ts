@@ -207,6 +207,14 @@ export const forkZhCN = {
       restoreBackupAt: '覆盖前的那份数据已备份到：{path}（觉得还原不对，可以把它拷回去）',
       restoreRelinked: '{n} 个外部链接已重新连上',
       restoreDowngraded: '以下 {n} 项原本指向外部目录，但外部目录已不在了，还原成了独立副本（不再与外部仓库联动）：{list}',
+      restoreUnrecovered: '以下 {n} 项内容没有恢复：它们原本指向外部目录，而外部目录和备份包里都没有内容，只剩空目录。请重新挂载，或手动把内容拷回：{list}',
+      restoreIncomplete: '以下 {n} 项只恢复了一部分，能用但缺了内容（括号里是「缺几个/共几个」）：{list}',
+      restoreIncompleteTruncated: '注意：上面这些缺失中有的是导出时就截断了，不是包坏了 —— {why}。重新导出一次并挑重点目录，可以补回来。',
+      restoreDirsFailed: '以下 {n} 个空目录没能建回来（常见原因是同名的文件占了位置）：{list}',
+      truncatedTooBig: '导出时这些目录超过了体积上限',
+      truncatedTooMany: '导出时这些目录的文件数超过了条数上限',
+      truncatedUnreadable: '导出时这些目录读不出来（多半是权限问题）',
+      restoreCorruptSecrets: '原来的密钥库读不出来（文件已损坏），没有覆盖它，而是改名保留在：{path}。可以从这里抢救，或删掉它让应用重新生成一份。',
       restoreConfigStale: '配置重读失败（{msg}），界面上看到的可能还是旧配置。重启应用可让它生效。'
     },
     wt: {
@@ -546,6 +554,14 @@ export const forkEn = {
       restoreBackupAt: 'The data you replaced was backed up to: {path} (copy it back if the restore was wrong)',
       restoreRelinked: '{n} external links reconnected',
       restoreDowngraded: '{n} items pointed at external folders that no longer exist and were restored as independent copies (no longer linked to the outside repo): {list}',
+      restoreUnrecovered: '{n} items were NOT restored: they pointed at external folders, and neither the folder nor the bundle had their content, so only empty folders remain. Re-mount them or copy the content back by hand: {list}',
+      restoreIncomplete: '{n} items were only partially restored; they work but are missing content (each entry shows "missing/total"): {list}',
+      restoreIncompleteTruncated: 'Note: some of those gaps were already there at export time rather than caused by a damaged bundle — {why}. Exporting again and picking the important folders can fill them in.',
+      restoreDirsFailed: '{n} empty folders could not be recreated (usually because a file with the same name is in the way): {list}',
+      truncatedTooBig: 'those folders exceeded the size limit during export',
+      truncatedTooMany: 'those folders exceeded the file-count limit during export',
+      truncatedUnreadable: 'those folders could not be read during export (most likely a permissions problem)',
+      restoreCorruptSecrets: 'Your previous key store could not be read (the file was corrupt), so it was renamed instead of overwritten and kept at: {path}. You can salvage it there, or delete it to let the app create a fresh one.',
       restoreConfigStale: 'Config reload failed ({msg}); what you see may still be the old config. Restart the app to apply.'
     },
     wt: {

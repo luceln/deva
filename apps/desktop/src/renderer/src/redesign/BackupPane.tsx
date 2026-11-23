@@ -153,6 +153,21 @@ export function BackupPane(): React.JSX.Element {
             files: number
             relinked: number
             symlinkAsCopy: string[]
+            /*
+             * 这两个字段是「比降级更糟」的两类结果，与 symlinkAsCopy 同级重要，所以一并断言出来。
+             * 曾经漏在类型里不写、界面也不渲染，等于把「内容没恢复」显示成「还原完成」。
+             */
+            symlinkUnrecovered?: string[]
+            symlinkIncomplete?: Array<{
+              path: string
+              total: number
+              copied: number
+              missing: number
+              missingDirs?: number
+              truncated?: 'too-big' | 'too-many' | 'unreadable'
+            }>
+            dirsFailed?: string[]
+            corruptSecretsBackup?: string
             secrets: { restored: number; absent: boolean; noEncryption?: boolean }
             backupOfPrevious?: string
             excluded: string[]
@@ -190,6 +205,56 @@ export function BackupPane(): React.JSX.Element {
           notes.push(
             fill(t('cf.backup.restoreConfigStale'), { msg: r.configReloadError })
           )
+        }
+        /*
+         * 这两条是「比降级成副本更糟」的结果，必须单独说，因为用户看到「还原完成」时
+         * 不会自己去猜哪些东西其实没回来：
+         *
+         * - `symlinkUnrecovered`：目标路径不在、包里也没带内容副本 —— 那些技能/目录**内容没恢复**，
+         *   只剩个空目录。与 `symlinkAsCopy`（内容在、只是不再联动外部仓库）不是一回事，
+         *   混在一起说就会重演 probe-bundle-junction J2c 抓到的那种谎报。
+         * - `corruptSecretsBackup`：旧密钥库读不出来，被改名挪到了别处。不说清它在哪，
+         *   用户会以为是凭空丢了密钥，进而以为整个还原出了大问题。
+         */
+        if (r.symlinkUnrecovered && r.symlinkUnrecovered.length > 0) {
+          notes.push(
+            fill(t('cf.backup.restoreUnrecovered'), {
+              n: r.symlinkUnrecovered.length,
+              list: r.symlinkUnrecovered.join('、')
+            })
+          )
+        }
+        /*
+         * 顺序按严重度：**全在**（不需要管，不单独报）→ **部分** → **全无** → 目录没建回来。
+         * 这三态必须能分辨：主进程刻意没把「部分」并进 `symlinkUnrecovered`，
+         * 因为那里写的是「N 项内容没恢复」，混进去就是同一句话对应两种状态 = 换个地方继续谎报。
+         * 所以这里每项都带上 `missing`/`total`，让用户知道到底缺多少、缺哪个。
+         */
+        if (r.symlinkIncomplete && r.symlinkIncomplete.length > 0) {
+          notes.push(
+            fill(t('cf.backup.restoreIncomplete'), {
+              n: r.symlinkIncomplete.length,
+              list: r.symlinkIncomplete
+                .map((it) => `${it.path}（${it.missing}/${it.total}${it.missingDirs ? `，${it.missingDirs} 个目录` : ''}）`)
+                .join('、')
+            })
+          )
+          /*
+           * `truncated` 是**导出时**就缺了，不是包坏了 —— 这两种结论对用户完全不同
+           * （前者要重新导出、后者要怀疑文件传输），所以单独一句说清原因，不塞进上面那条。
+           */
+          const cut = r.symlinkIncomplete.find((it) => it.truncated)
+          if (cut?.truncated) {
+            notes.push(fill(t('cf.backup.restoreIncompleteTruncated'), { why: truncatedReason(cut.truncated, t) }))
+          }
+        }
+        if (r.dirsFailed && r.dirsFailed.length > 0) {
+          notes.push(
+            fill(t('cf.backup.restoreDirsFailed'), { n: r.dirsFailed.length, list: r.dirsFailed.join('、') })
+          )
+        }
+        if (r.corruptSecretsBackup) {
+          notes.push(fill(t('cf.backup.restoreCorruptSecrets'), { path: r.corruptSecretsBackup }))
         }
         /*
          * 重启提示按主进程给的 `needsRestart` 决定，而不是无条件写死在文案里。
@@ -346,6 +411,22 @@ export function BackupPane(): React.JSX.Element {
       </section>
     </div>
   )
+}
+
+/**
+ * `ManifestLinkTree.truncated` 的书面原因。
+ *
+ * 为什么要区分：三种都属于「导出时就没收全」，但用户该做的事不同 ——
+ * 体积/条数超限要重新导出并挑重点，读不出来要回去看那个目录的权限。
+ * 只说「超出上限」会让后一种情况的人一直重试同一个目录。
+ */
+function truncatedReason(
+  why: 'too-big' | 'too-many' | 'unreadable',
+  t: (k: string) => string
+): string {
+  if (why === 'too-big') return t('cf.backup.truncatedTooBig')
+  if (why === 'too-many') return t('cf.backup.truncatedTooMany')
+  return t('cf.backup.truncatedUnreadable')
 }
 
 function fmtBytes(n: number): string {
