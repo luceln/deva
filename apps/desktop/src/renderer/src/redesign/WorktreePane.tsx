@@ -420,10 +420,10 @@ function WorktreeCard({ view }: { view: WorktreeListItem }): React.JSX.Element {
         {badState && <span className="cf-wt__badge is-bad">{stateText}</span>}
         {noSession && <span className="cf-wt__badge">{t('cf.wt.noSession')}</span>}
         {/*
-          A11 / A28：是否在当前根内（`§10.1b`）。
-          必须写 `=== false`，不能写 `!view.insideRoot` —— 老记录缺 `createdUnderRoot` 时主进程
-          **不给**这个字段（`list.ts:526-530`），`!undefined` 为真，会把所有历史记录标成根外。
-          `undefined` 的语义是「无法判断」，既不是根内也不是根外，所以这里什么都不加。
+          A11 / A28：是否在**当前**工作区根内（`§10.1b` / `§11.2` / `§10.2`）。
+          主进程按当前生效根算、恒给布尔值（老记录也算得出），所以这里判 `=== false` 即可。
+          仍然显式写 `=== false` 而不是 `!view.insideRoot`：字段恒有值，两种写法等价，
+          但显式比较不会因为将来把字段改回可选而静默变成「全部标红」。
         */}
         {view.insideRoot === false && <span className="cf-wt__badge">{t('cf.wt.rootOutsideBadge')}</span>}
         {view.deps !== 'ready' && view.deps !== 'skipped' && (
@@ -498,7 +498,6 @@ function WorktreeCard({ view }: { view: WorktreeListItem }): React.JSX.Element {
       {/*
         A28 引导句（`§10.1b` 末段）：根外记录说清楚「这里不能新建」，以及「想用这里当根该怎么改」。
         措辞刻意避开「非法 / 无效」—— 这个目录本身完全正常，只是不在当前根的辖区内。
-        同样只用 `=== false`：`undefined`（老记录）不加这句，否则等于断言「它在根外」。
       */}
       {view.insideRoot === false && (
         <div className="cf-wt__note">{t('cf.wt.rootOutsideNote')}</div>

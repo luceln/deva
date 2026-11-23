@@ -118,9 +118,29 @@ else bad('恢复默认没有传 undefined', '传字符串会把「跟随 DEVA_HO
 if (/\.deva-plus[\\/]worktrees|~\/\.deva/.test(FEATURE))
   bad('渲染层写死了默认根路径', '用户设过 DEVA_HOME 后它是错的；应消费 defaultRoot')
 else ok('没有写死默认根路径')
-/* 消费了 defaultRoot 字段（任务说主进程已给） */
-if (/defaultRoot/.test(FEATURE)) ok('消费了 defaultRoot 字段')
-else ok('未直接使用 defaultRoot（改根后由 root() 重新拉取，同样正确）')
+/*
+ * 消费了 defaultRoot 字段（任务说主进程已给）。
+ *
+ * 这条原本写成 `if (有) ok(...) else ok(...)` —— 两个分支都 ok，等于没判。
+ * 而独立验收正是在这里抓到真问题：`defaultRoot` 在 WorktreeRootSetting.tsx 里
+ * 只被赋值、从未渲染，用户看不到默认根是什么。所以这里必须真判：
+ * 既要「代码里出现了 defaultRoot」，也要「它出现在 JSX 里」（不然只是拿了个变量没用）。
+ *
+ * 不能放宽成「改根后由 root() 重新拉取同样正确」：`root()` 返回的 `root` 是**当前生效根**，
+ * 当前生效根在自定义态下就等于自定义值，永远显示不出默认值。那正是本 bug 的形态。
+ */
+if (/defaultRoot/.test(FEATURE)) {
+  ok('代码里消费了 defaultRoot 字段')
+} else {
+  bad('没有消费 defaultRoot 字段', '用户看不到默认根是什么（A1）')
+}
+/* defaultRoot 必须真的进 JSX —— 只赋值不渲染是 A1 的实际形态 */
+const jsxForDefault = FEATURE.indexOf('return (') >= 0 ? FEATURE.slice(FEATURE.indexOf('return (')) : ''
+if (/\{\s*[^}]*defaultRoot[^}]*\}/.test(jsxForDefault)) {
+  ok('defaultRoot 出现在 JSX 里（真的渲染出来）')
+} else {
+  bad('defaultRoot 只赋值未渲染', '用户看不到默认根是什么（A1 的实际形态）')
+}
 
 /* ── 2. 这两个调用在 JSX 渲染路径上 ── */
 console.log('\n== 2. 调用在 JSX 渲染路径上（不是死函数）==')

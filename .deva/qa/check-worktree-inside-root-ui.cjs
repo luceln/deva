@@ -4,19 +4,22 @@
  *
  * ## 为什么需要
  *
- * `check-worktree-root.cjs` 已经守住了主进程：老记录的 `insideRoot` 缺省、新记录带值（A11b/A11e/A14d）。
- * 但那套断言全在数据层 —— **界面一处都没渲染**它也能全绿。本文件补的就是「字段到像素」这一段。
+ * `check-worktree-root.cjs` 守的是主进程数据层，但那套断言全在数据层 ——
+ * **界面一处都没渲染**它也能全绿。本文件补的是「字段到像素」这一段。
  *
- * ## 真正要防的是什么
+ * ## 真正要防的是什么（两个独立的失效，都已真实发生过）
  *
- * 不是「有没有那枚徽标」，而是**判断条件写错**。同一个 `insideRoot` 有三种取值，
- * 最自然的写法 `{!view.insideRoot && <Badge/>}` 在 `undefined` 时为真，于是：
+ * **失效一：判定条件写成真值判断。** 若字段可选，最自然的写法 `{!view.insideRoot && …}`
+ * 在 `undefined` 时为真，于是所有老记录一上线就被标成「不在当前根内」——
+ * 用户会去改根 / 去搬目录，而那个目录其实没问题。所以条件必须是 `=== false`。
  *
- * - 所有老记录一上线就被标成「不在当前根内」—— 用户会去改根 / 去搬目录，而那个目录其实没问题；
- * - 主进程特意「不给字段」表达「无法判断」（list.ts:526-530），这个信息在界面被抹掉了。
- *
- * 这种错**类型检查、编译、肉眼看单条数据都不报错**：列表里只有老记录时才暴露，
- * 而开发机上的工作区几乎都是新记录。所以断言必须同时守住三态，且必须对 `undefined` 这一态反向验证。
+ * **失效二（更隐蔽）：主进程拿错了比较基准。** 曾经 `list.ts` 写的是
+ * `isInsideRoot(rec.createdUnderRoot, rec.path)` —— `createdUnderRoot` 是创建时冻结的根，
+ * 而记录本来就建在那个根下，两者同源 → 恒为 true → **徽标永不出现**。
+ * 界面代码完全正确、判据全绿，功能却等于没实现。
+ * 需求原文三处（§11.2 / §10.1b / §10.2）写的是「**当前**根」，且 A11 要求老记录也标注，
+ * 而老记录没有 `createdUnderRoot` —— 按创建时根根本算不出来。
+ * 所以本文件除了守界面，还要守**主进程用的基准是当前根**，否则界面判据会替一个死功能背书。
  *
  * ## 剥注释
  *
@@ -30,6 +33,7 @@ const ROOT = path.resolve(__dirname, '..', '..')
 const R = (p) => path.join(ROOT, p)
 const PANE = R('apps/desktop/src/renderer/src/redesign/WorktreePane.tsx')
 const I18N = R('apps/desktop/src/renderer/src/i18n/fork.ts')
+const LIST = R('apps/desktop/src/main/services/worktree/list.ts')
 
 function stripComments(src) {
   return src
@@ -54,7 +58,7 @@ const pane = stripComments(fs.readFileSync(PANE, 'utf8'))
 const i18n = fs.readFileSync(I18N, 'utf8')
 
 /* ══════════ 1. 条件必须是 `=== false`，绝不能是取反 ══════════ */
-console.log('\n== 1. 判定条件是 `=== false`（undefined 不得被当成根外）==')
+console.log('\n== 1. 判定条件是 `=== false`，不是真值判断 ==')
 
 /* 找出所有「消费 insideRoot」的表达式 */
 const uses = [...pane.matchAll(/view\.insideRoot\s*([=!]==?|[^&\n,)]{0,4})/g)].map((m) => m[0])
@@ -65,12 +69,13 @@ if (uses.length === 0) {
 }
 
 /* 硬断言：不许出现 `!view.insideRoot` / `view.insideRoot !=` / `view.insideRoot === undefined`
- * 这些都会把 undefined 卷进「根外」或「根内」的某一侧。 */
+ * 显式比较是防线：字段现在是恒有值的布尔，但若将来改回可选，真值判断会静默把
+ * undefined 卷进「根外」或「根内」的某一侧，而类型检查不会报错。 */
 const DANGEROUS = [
-  [/!\s*view\.insideRoot\b/, '`!view.insideRoot`（undefined 会当成根外）'],
-  [/view\.insideRoot\s*!=\s*false/, '`view.insideRoot != false`（undefined 为真）'],
+  [/!\s*view\.insideRoot\b/, '`!view.insideRoot`（字段若变可选，undefined 会当成根外）'],
+  [/view\.insideRoot\s*!=\s*false/, '`view.insideRoot != false`（同上）'],
   [/view\.insideRoot\s*===?\s*undefined/, '`view.insideRoot === undefined`（拿来当条件会误判）'],
-  [/view\.insideRoot\s*\?\s*[^:]/, '`view.insideRoot ? …`（真值判断，undefined 走 false 分支）']
+  [/view\.insideRoot\s*\?\s*[^:]/, '`view.insideRoot ? …`（真值判断）']
 ]
 for (const [re, desc] of DANGEROUS) {
   if (re.test(pane)) bad(`出现了危险写法 ${desc}`)
@@ -88,8 +93,48 @@ if (/view\.insideRoot\s*===\s*true/.test(pane))
   bad('出现了 `=== true` 分支', '在根内是常态，不该单独渲染任何东西')
 else ok('没有 `=== true` 分支（在根内不渲染任何标注）')
 
-/* ══════════ 2. 徽标：在 cf-wt__rowhead 里，用 cf-wt__badge ══════════ */
-console.log('\n== 2. 徽标位置与类名 ==')
+/* ══════════ 2. 主进程的比较基准必须是「当前根」 ══════════ */
+console.log('\n== 2. 主进程按当前生效根算（不是创建时根）==')
+/*
+ * 这一节守的是本轮真实踩到的 P0：界面代码完全正确、判据全绿，功能却等于没实现。
+ *
+ * 曾经 `list.ts` 写 `isInsideRoot(rec.createdUnderRoot, rec.path)`：
+ * `createdUnderRoot` 是创建时冻结的根，记录本来就建在那个根下，两者同源 →
+ * Windows 上恒 true（徽标永不出现）、Linux 上因混用 compareKey 与绝对路径恒 false
+ * （徽标恒出现，把所有记录误标）。两种都是死功能，而界面侧判据全都 PASS。
+ */
+const listSrc = stripComments(fs.readFileSync(LIST, 'utf8'))
+
+if (/isInsideRoot\s*\(\s*rec\.createdUnderRoot|createdUnderRoot\s*,\s*rec\.path/.test(listSrc)) {
+  bad('insideRoot 仍用 createdUnderRoot 作为比较基准', '两者同源 → 恒真，徽标永不出现（或恒假误标）')
+} else {
+  ok('insideRoot 不再拿 createdUnderRoot 当基准')
+}
+
+/* 必须出现「当前根」参与运算：worktreeRoot() 或它的 compareKey 化 */
+if (/worktreeRoot\s*\(\s*\)/.test(listSrc)) ok('listWorktrees 里取了当前生效根 worktreeRoot()')
+else bad('没有取当前生效根', 'A11/§11.2 要求按当前根重算，不是一次性快照')
+
+/*
+ * 两个入参必须同为 compareKey 形态。`isInsideRoot` 会对入参再跑 normalizeWorktreePath
+ * （含 resolve），拿 compareKey 传进去在 Linux 上会被当相对路径 → 同根判根外。
+ * `remove.ts:139-148` 明令禁止这个组合，这里守住同一口径。
+ */
+if (/isInsideRoot\s*\([^)]*compareKey/.test(listSrc)) {
+  bad('把 compareKey 传给了 isInsideRoot', 'Linux 上会被当相对路径，同根判根外；应改用 isKeyInsideRoot')
+} else {
+  ok('没有把 compareKey 传给 isInsideRoot')
+}
+if (/isKeyInsideRoot\s*\(/.test(listSrc)) ok('用 isKeyInsideRoot 做 compareKey 比较（与 remove.ts 同口径）')
+else bad('没有用 isKeyInsideRoot', 'compareKey 比较必须走它')
+
+/* 字段必须是恒有值的布尔，否则老记录（无 createdUnderRoot）永远算不出标注 */
+if (/insideRoot\??\s*:\s*boolean/.test(fs.readFileSync(R('apps/desktop/src/shared/worktree-protocol.ts'), 'utf8')))
+  ok('协议里 insideRoot 是必填 boolean（老记录也算得出）')
+else bad('协议里 insideRoot 仍是可选', 'A11 要求老记录也标注，可选会让老记录永远没有标注')
+
+/* ══════════ 3. 徽标：在 cf-wt__rowhead 里，用 cf-wt__badge ══════════ */
+console.log('\n== 3. 徽标位置与类名 ==')
 /* 取 rowhead 区块（header ... </header>） */
 const rowhead = pane.match(/<header className="cf-wt__rowhead">([\s\S]*?)<\/header>/)
 if (!rowhead) {

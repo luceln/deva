@@ -187,12 +187,16 @@ export interface WorktreeListItem {
    * 渲染层再算一遍必然与主进程漂移，而漂移的表现是「标了根外、实际删得掉」这种静默矛盾。
    */
   /**
-   * 这条记录是否在当前 `worktreeRoot` 内。
+   * 这条记录是否在**当前生效**的 `worktreeRoot` 内。不在则界面显示「不在当前根内」（A11 / A28）。
    *
-   * **`undefined` 表示「老记录、无法判断」**（缺 `createdUnderRoot`）：这不是「在根外」，
-   * 界面不该给它打标注。把它折成 `false` 会让所有历史记录一上线就被标成根外 —— 那是假信息。
+   * 恒有值。**不设 `undefined` 态**：需求 A11 明确要求「根外的**老记录**在列表里可见且带标注」，
+   * 而老记录没有 `createdUnderRoot`。若把「老记录」折成 `undefined` 再让界面跳过标注，
+   * 就等于 A11 从未实现 —— 恰好是之前那版的实际形态（比较两边同源、恒为 true，徽标永不出现）。
+   *
+   * 判定基准是**当前根**，不是创建时根：`createdUnderRoot` 只用于删除侧的「跳过根校验」
+   * （需求取舍二），两处口径不同，不要合并。
    */
-  insideRoot?: boolean
+  insideRoot: boolean
   /** 创建时生效的根（compareKey，老记录无此值）。界面「恢复默认后按新根重算」时不必，
    *  但用户在核对「这个目录当初建在哪」时需要它。 */
   createdUnderRoot?: string

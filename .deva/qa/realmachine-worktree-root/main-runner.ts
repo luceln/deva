@@ -130,6 +130,8 @@ async function main(): Promise<void> {
     await phaseVerifyReset()
   } else if (PHASE === 'main') {
     await phaseMain()
+  } else if (PHASE === 'inside-root') {
+    await phaseInsideRoot()
   } else {
     fail('未知阶段', PHASE)
   }
@@ -328,6 +330,117 @@ async function main(): Promise<void> {
       const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
       check('5b. config.json 里已无 worktreeRoot 键', !('worktreeRoot' in cfg), JSON.stringify(cfg.worktreeRoot))
     }
+  }
+
+  /**
+   * A11/A28：`insideRoot` 必须相对**当前生效根**算，且改根后要**重算**。
+   *
+   * 这一阶段守的是本轮真实踩到的 P0：原来写的是
+   * `isInsideRoot(rec.createdUnderRoot, rec.path)` —— `createdUnderRoot` 是创建时冻结的根，
+   * 记录本来就建在那个根下，两者同源：
+   *   · Windows 上恒 `true` → 徽标永不出现（功能等于没实现）
+   *   · Linux 上因混用 compareKey 与绝对路径恒 `false` → 徽标恒出现（把所有记录误标）
+   * 两种都是死功能，而界面侧判据全都 PASS。
+   *
+   * 所以这里必须验三件界面判据验不了的事：
+   *   1. 根内记录 → `true`
+   *   2. 把根**改到别处**后，同一条记录变成 `false`（证明按当前根、不是一次性快照）
+   *   3. 老记录（无 `createdUnderRoot`）**也算得出**（A11 要求老记录也标注）
+   */
+  async function phaseInsideRoot(): Promise<void> {
+    const { listWorktrees } = await import('../../../apps/desktop/src/main/services/worktree/list')
+    const { setWorktreeRoot } = await import('../../../apps/desktop/src/main/services/worktree/root-setting')
+
+    const ROOT_A = path.join(ROOT, 'root-a')
+    const ROOT_B = path.join(ROOT, 'root-b')
+    fs.mkdirSync(path.join(ROOT_A, 'probe-a'), { recursive: true })
+    fs.mkdirSync(path.join(ROOT_B, 'probe-b'), { recursive: true })
+    const IN_A = path.join(ROOT_A, 'probe-a')
+
+    /*
+     * 直接写 worktrees.json：`store.ts` 的 `ensureLoaded()` 在模块首次使用时把文件读进内存，
+     * 所以必须在**本阶段任何 worktree 调用之前**落盘。本阶段是独立进程，这里写还来得及。
+     *
+     * `compareKey` 必须与 `rootKeyOf()` 同形态（归一化产物），否则测的就不是真实数据形态。
+     * 这里手工按 win32/posix 一致的最简规则给：反正 `rec.path` 是权威，`compareKey` 只用于
+     * `isKeyInsideRoot` 的比较，两边都从同一路径推出即可自洽。
+     */
+    const keyOf = (p: string) => p.replace(/\\/g, '/').toLowerCase()
+    const mk = (p: string, branch: string, createdUnderRoot?: string) => ({
+      path: p,
+      compareKey: keyOf(p),
+      branch,
+      baseSha: '0000000000000000000000000000000000000000',
+      phase: 'active' as const,
+      repoRoot: REPO_ROOT,
+      baseBranch: 'dev',
+      createdAt: Date.now(),
+      ...(createdUnderRoot === undefined ? {} : { createdUnderRoot })
+    })
+    const store = {
+      schemaVersion: 1,
+      records: [
+        // 根 A 下的正常记录（有 createdUnderRoot，指向 A）
+        mk(IN_A, 'probe-a', ROOT_A),
+        // 老记录：字段整个缺席（A11 要求它也要能标注）
+        mk(path.join(ROOT_B, 'probe-b'), 'probe-b')
+      ]
+    }
+    fs.writeFileSync(path.join(DEVA_HOME, 'worktrees.json'), JSON.stringify(store, null, 2))
+
+    /* ── 场景 1：当前根 = A ── */
+    const setA: any = setWorktreeRoot(ROOT_A)
+    check('A11-0. 当前根设为 A', setA?.ok === true, JSON.stringify(setA))
+
+    const snapA: any = await listWorktrees()
+    const viewsA: any[] = snapA?.items ?? []
+    info('根=A 时返回条数', `${viewsA.length}（storeUnreadable=${snapA?.storeUnreadable}）`)
+    check('A11a. 两条夹具记录都被读出来（否则下面等于没跑）', viewsA.length === 2, `实际=${viewsA.length}`)
+
+    const byBranch = (views: any[], b: string) => views.find((v) => v.branch === b)
+    const aInA = byBranch(viewsA, 'probe-a')
+    const bInA = byBranch(viewsA, 'probe-b')
+    info('根=A：probe-a', JSON.stringify({ insideRoot: aInA?.insideRoot, path: aInA?.path }))
+    info('根=A：probe-b（老记录）', JSON.stringify({ insideRoot: bInA?.insideRoot, path: bInA?.path }))
+
+    check('A11b. 根=A 时，A 下的记录 insideRoot === true', aInA?.insideRoot === true, `实际=${JSON.stringify(aInA?.insideRoot)}`)
+    check(
+      'A11c. 根=A 时，B 下的记录 insideRoot === false（**老记录也算得出**，A11 要求老记录也标注）',
+      bInA?.insideRoot === false,
+      `实际=${JSON.stringify(bInA?.insideRoot)}（若为 undefined/缺字段，说明老记录仍算不出来）`
+    )
+
+    /* ── 场景 2：把根改到 B，同一条记录必须重算 ── */
+    const setB: any = setWorktreeRoot(ROOT_B)
+    check('A11-1. 当前根改为 B', setB?.ok === true, JSON.stringify(setB))
+
+    const snapB: any = await listWorktrees()
+    const viewsB: any[] = snapB?.items ?? []
+    const aInB = byBranch(viewsB, 'probe-a')
+    const bInB = byBranch(viewsB, 'probe-b')
+    info('根=B：probe-a', JSON.stringify({ insideRoot: aInB?.insideRoot, path: aInB?.path }))
+    info('根=B：probe-b（老记录）', JSON.stringify({ insideRoot: bInB?.insideRoot, path: bInB?.path }))
+
+    /*
+     * 这是本轮 P0 的核心断言。用 `createdUnderRoot` 算的话，probe-a 冻结在 A，
+     * 改成 B 之后它仍会返回 true —— 那条断言会在这里失败。
+     * 需求 §11.2 原文：「恢复默认后，之前的根外标注要**按新根重算**（不是一次性快照）」。
+     */
+    check(
+      'A11d. **改根后重算**：根改成 B 后，A 下那条记录变成 insideRoot === false',
+      aInB?.insideRoot === false,
+      `实际=${JSON.stringify(aInB?.insideRoot)}（若仍为 true，说明按创建时根算、徽标永不出现）`
+    )
+    check(
+      'A11e. 改根后：B 下的老记录变成 insideRoot === true',
+      bInB?.insideRoot === true,
+      `实际=${JSON.stringify(bInB?.insideRoot)}`
+    )
+    check(
+      'A11f. insideRoot 恒为布尔值（不是 undefined，也不是缺字段）',
+      typeof aInB?.insideRoot === 'boolean' && typeof bInB?.insideRoot === 'boolean',
+      `a=${typeof aInB?.insideRoot} b=${typeof bInB?.insideRoot}`
+    )
   }
 }
 

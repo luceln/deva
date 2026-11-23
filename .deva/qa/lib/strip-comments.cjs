@@ -36,6 +36,16 @@ function stripComments(src) {
   let state = 'code'
   /** 上一个有意义的（非空白）代码字符，用来判断 `/` 是正则起点还是除号。 */
   let prevSig = ''
+  /**
+   * 是否在正则的字符类 `[...]` 内。
+   *
+   * 类内的 `/` 不结束正则（`/[a\/b]/`）。不跟踪这个标志，
+   * 遇到 `.replace(/[\s\\/:*?"<>|]+/g,'-')` 这类写法就会把 `[` 后的第一个 `/` 当结束符，
+   * 状态机跑偏后整段注释漏剥。
+   */
+  let inClass = false
+  /** 上一个完整的标识符（`return` / `typeof` 这类关键字后缀要回看它才能判对）。 */
+  let prevWord = ''
   while (i < n) {
     const c = src[i]
     const next = src[i + 1]
@@ -79,26 +89,59 @@ function stripComments(src) {
        * 判据：`/` 出现在「不能是除号」的位置才是正则起点。粗略但够用 —— 看上一个
        * 有意义的字符是不是 `)`、`]`、标识符/数字结尾；若是，则这多半是除法。
        */
-      if (c === '/' && isRegexStart(prevSig)) {
+      if (c === '/' && isRegexStart(prevSig, prevWord)) {
         state = 'regex'
+        inClass = false
         out += c
         i += 1
         continue
       }
       out += c
-      if (!/\s/.test(c)) prevSig = c
+      if (!/\s/.test(c)) {
+        /*
+         * 维护 `prevWord`：标识符字符就累积，遇到非标识符就清空。
+         * 这样 `/` 前面若是 `return` 整个词，`prevWord` 就是 'return'（不是单字符 'n'）。
+         */
+        if (/[A-Za-z0-9_$]/.test(c)) {
+          if (prevSig === '' || /[A-Za-z0-9_$]/.test(prevSig)) prevWord += c
+          else prevWord = c
+        } else {
+          prevWord = ''
+        }
+        prevSig = c
+      }
       i += 1
       continue
     }
 
     if (state === 'regex') {
-      // 正则内部：`\x` 转义整体跳过；`/` 结束（后面可能跟 flags）
+      // 正则内部：`\x` 转义整体跳过；字符类 `[...]` 内的 `/` 不算结束
       if (c === '\\') {
         out += c + (src[i + 1] ?? '')
         i += 2
         continue
       }
-      if (c === '/') {
+      /*
+       * 字符类：`/[\s\/]+/` 里那个 `/` 是**类内**的斜杠，不是正则结束符。
+       *
+       * 不认它的话状态机会在这里提前收工、回到 code，接着把后面的 `"` 当成字符串起点，
+       * 一头扎进「字符串」里再也不出来 —— 其后所有注释都不再被剥。
+       * 实测：`NewSessionDialog.tsx` 17 个块注释只剥掉 4 个（截断点在 `.replace(/[\s\\/:*?"<>|]+/g,'-')`）。
+       * 这是本轮最硬的假绿源：本轮多条判据的自保机制全押在这个库上。
+       */
+      if (c === '[') {
+        inClass = true
+        out += c
+        i += 1
+        continue
+      }
+      if (c === ']' && inClass) {
+        inClass = false
+        out += c
+        i += 1
+        continue
+      }
+      if (c === '/' && !inClass) {
         state = 'code'
         out += c
         prevSig = '/'
@@ -108,6 +151,7 @@ function stripComments(src) {
       // 正则不能跨行；遇到换行说明不是正则（比如除号误判），回到 code
       if (c === '\n') {
         state = 'code'
+        inClass = false
         out += c
         i += 1
         continue
@@ -142,8 +186,32 @@ function stripComments(src) {
  * 依据是「除号左边一定是一个值」：`)`、`]`、标识符、数字之后跟着的 `/` 是除法；
  * 行首或 `(`、`,`、`=`、`:`、`!`、`&`、`|`、`?`、`{`、`;`、`return` 之后则是正则。
  */
-function isRegexStart(prevSig) {
+/**
+ * `... { path } = ...` 这类不换行——判据全靠它。
+ *
+ * ## 为什么还需要「前一个完整标识符」
+ *
+ * `prevSig` 只是**上一个字符**。`return /'/`、`typeof /x/`、`case /re/` 这些写法里
+ * 前一个字符是标识符末字符（`n`、`f`、`e`），按「标识符结尾 = 除号」会误判成正则外的除法，
+ * 于是那个 `'` 被当字符串起点，后续注释整段漏剥。
+ *
+ * 所以除了 prevSig，还要看**前一个完整标识符**是不是这些关键字 —— 它们是运算符位置，
+ * 后面必是正则而非除法。
+ */
+const REGEX_AFTER_KEYWORD = new Set([
+  'return', 'typeof', 'case', 'in', 'of', 'new', 'delete', 'void', 'yield', 'await',
+  'instanceof', 'do', 'else', 'Throw', 'throw'
+])
+
+/**
+ * 判断 `/` 是否为正则起点。
+ *
+ * @param prevSig 上一个有意义的字符
+ * @param prevWord 上一个完整的标识符（可为空串）
+ */
+function isRegexStart(prevSig, prevWord = '') {
   if (prevSig === '') return true
+  if (REGEX_AFTER_KEYWORD.has(prevWord)) return true
   if (/[A-Za-z0-9_$)\]'"`]/.test(prevSig)) return false
   return true
 }

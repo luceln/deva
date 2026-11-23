@@ -2,7 +2,7 @@ import { statSync, readdirSync, lstatSync } from 'fs'
 import { join } from 'path'
 import { runGitRaw } from '../git'
 import { listRecords, type WorktreeRecord } from './store'
-import { compareKeyOfPath, repoKeyOf, isInsideRoot } from './paths'
+import { compareKeyOfPath, repoKeyOf, isKeyInsideRoot, rootKeyOf, worktreeRoot } from './paths'
 import { parseWorktreeList, type WorktreeEntry } from './git-worktree'
 import { trustRoot } from '../fs-guard'
 import { gitLockHolder } from './lock'
@@ -396,6 +396,11 @@ async function runLimited<T>(
 export async function listWorktrees(): Promise<WorktreeSnapshot> {
   const records = listRecords()
   const counts = sessionCounts()
+  /*
+   * 当前生效根算一次，整批记录共用 —— 逐条调 `worktreeRoot()` 会重复读配置模块缓存，
+   * 且万一配置中途变了，同一份列表里会出现两种「当前根」，徽标自相矛盾。
+   */
+  const currentRoot = worktreeRoot()
 
   /*
    * 第一段并行：按 repoRoot 去重后各自跑一次 `git worktree list`。
@@ -520,14 +525,24 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
         mergeInProgress,
         mergeGate: computeMergeGate({ state, deps: rec.deps, targetBranch: rec.targetBranch }),
         /*
-         * 「是否在创建时那个根内」。用 `createdUnderRoot`（创建时冻结）而不是当前根，
-         * 理由同 `remove.ts` 的 `blockDirRemovalOutsideRoot`：用户改根不该让历史记录集体变红。
+         * 「是否在**当前**工作区根内」—— 界面据此显示「不在当前根内」徽标（A11 / A28 / §10.1b）。
          *
-         * 老记录（`undefined`）**不给 `insideRoot`**，让界面知道「无法判断」而不是「在根外」。
+         * 必须跟**当前生效根**比，不能跟 `createdUnderRoot` 比：
+         * `createdUnderRoot` 是创建时冻结的根，而记录本来就建在那个根下，两者同源 →
+         * 那个比较恒为 true，徽标永不出现，功能等于没实现。
+         *
+         * 需求原文三处都写「当前」：§11.2「恢复默认后，之前的根外标注要按新根重算
+         * （不是一次性快照）」、§10.1b「不在当前根的辖区」、§10.2「这个目录不在当前根内」。
+         * 且 A11 要求老记录也标注，而老记录没有 `createdUnderRoot` —— 按创建时根根本算不出来。
+         *
+         * 删除侧（`remove.ts`）才用创建时根：取舍二 `:164-171` 把 `createdUnderRoot` 的用途
+         * 限定为「跳过根校验」，那是决定「能不能删」，不是「在不在根内」。两处口径本就不同。
+         *
+         * 两个入参都走 compareKey：`compareKeyOfPath` 是归一化**产物**，再交给 `isInsideRoot`
+         * 会被 `normalizeWorktreePath` 当相对路径 resolve 一次（Linux 上 `/tmp/a` → `tmp/a`），
+         * 两侧基准不同就把同根判成根外 —— `remove.ts:139-148` 点名禁止这个组合。
          */
-        ...(rec.createdUnderRoot === undefined || rec.createdUnderRoot === ''
-          ? {}
-          : { insideRoot: isInsideRoot(rec.createdUnderRoot, rec.path), createdUnderRoot: rec.createdUnderRoot })
+        insideRoot: isKeyInsideRoot(rootKeyOf(currentRoot), rec.compareKey),
       }
       return item
     }),

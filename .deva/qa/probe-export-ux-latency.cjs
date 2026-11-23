@@ -250,6 +250,19 @@ async function main() {
     !!writeLast && writeLast.done === writeLast.total,
     writeLast ? `${writeLast.done}/${writeLast.total}` : '无 write 事件'
   )
+  /*
+   * 全局上限：任何一步都不能 done > total。
+   *
+   * 防的是「total 漏算某一类文件」：`write` 段的 total 曾经漏了符号链接目标副本，
+   * 而循环里每个副本都 tick() —— 有链接时 done 就会超过 total，界面显示「2003/2002」。
+   * 上面那条「收尾 done === total」在**没有链接**的夹具上照样 PASS，抓不到它。
+   */
+  const overrun = log.filter((e) => e.total > 0 && e.done > e.total)
+  check(
+    '任何步骤都没有 done > total（total 没漏算某类文件）',
+    overrun.length === 0,
+    overrun.length ? overrun.map((e) => `${e.step} ${e.done}/${e.total}`).join(', ') : `共 ${log.length} 个事件`
+  )
   const hashCount = log.filter((e) => e.step === 'hash').length
   check(
     'hash 的 tick 已节流（事件数远少于文件数）',

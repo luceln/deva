@@ -139,7 +139,7 @@ async function main() {
   fs.writeFileSync(RESULT, '')
   seedRecords()
 
-  const phases = ['main', 'write-custom', 'verify-custom', 'write-reset', 'verify-reset']
+  const phases = ['main', 'write-custom', 'verify-custom', 'write-reset', 'verify-reset', 'inside-root']
   const allFails = []
   let totalPass = 0
   for (const p of phases) {

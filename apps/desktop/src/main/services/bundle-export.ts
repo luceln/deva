@@ -253,7 +253,13 @@ async function writeZip(
   secrets: Buffer | null,
   onProgress?: (p: ExportProgress) => void
 ): Promise<void> {
-  const total = manifest.files.length + 1 // +1：manifest.json 本身
+  /*
+   * 总数必须把**符号链接目标副本**也算进去：下面 `manifest.links` 的每个文件也会 `tick()`。
+   * 漏算时 done 会超过 total，界面显示「正在打包 2003/2002」这种越界数字。
+   * hash 段的 `total` 已经含链接文件（`bundle-manifest.ts`），两段口径必须一致。
+   */
+  const linkFileCount = (manifest.links ?? []).reduce((sum, t) => sum + (t.files?.length ?? 0), 0)
+  const total = manifest.files.length + linkFileCount + 1 // +1：manifest.json 本身
   let n = 0
   const tick = (): void => onProgress?.({ step: 'write', done: (n += 1), total })
 

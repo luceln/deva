@@ -161,6 +161,26 @@ export function loadProjectDocChain(root: string | null): ProjectDoc[] {
     // `walk` 内部已逐处兜住异常，这里只是兜底：任何意外都不阻断本轮
     return found
   }
+  /*
+   * **按目录深度稳定排序**（同深度按路径名），上面 `walk` 是「先按名字排序的深度优先」，
+   * 产出的顺序与深度无关。实测本仓：深度序列是 `0, 6, 5, 6, 6, 5, 1` ——
+   * `redesign/AGENTS.md`（深 6）排在 `notes/AGENTS.md`（深 1）和 `shared/AGENTS.md`（深 5）之前。
+   *
+   * 不排序有两层实际后果：
+   *   ① 注入顺序与「近者优先」相反 —— 后出现的更具体，模型会把最宽的当最终依据；
+   *   ② `budgetProjectDocChain` 按数组下标「从最宽的整份丢弃」时，丢掉的其实是深层那份。
+   * 排序放在这里（而不是让 budget 自己排），是因为 budget 的下标语义依赖输入已按宽→窄。
+   */
+  const depthOf = (d: string | undefined): number => (!d ? 0 : d.split('/').length)
+  const dirOf = (d: string | undefined): string => d ?? ''
+  found.sort((a, b) => {
+    const da = depthOf(a.dir)
+    const db = depthOf(b.dir)
+    if (da !== db) return da - db
+    const x = dirOf(a.dir)
+    const y = dirOf(b.dir)
+    return x < y ? -1 : x > y ? 1 : 0
+  })
   return found
 }
 

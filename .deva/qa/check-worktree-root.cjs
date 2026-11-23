@@ -434,7 +434,23 @@ function readConfig() {
   const item11 = snap11.items.find((it) => M.compareKeyOfPath(it.path) === M.compareKeyOfPath(oldRecPath))
   assert('A11a 老记录出现在列表里', item11 !== undefined, '共 ' + snap11.items.length + ' 条')
   if (item11) {
-    assert('A11b 老记录 insideRoot 缺省（无法判断，不谎报根外）', item11.insideRoot === undefined, String(item11.insideRoot))
+    /*
+     * A11b：老记录**必须也算得出** insideRoot。
+     *
+     * 这条断言原先写的是 `insideRoot === undefined`（「无法判断、不谎报根外」），是错的。
+     * 需求 A11 原文（`notes/implemented/2026-11-23-worktree-root-custom.md:601`）：
+     *   「根外的**老记录**在列表里可见，且带『不在当前根内』标注」
+     * ——老记录也要标注，所以它必须算得出，不能是 undefined。
+     * 而老记录没有 `createdUnderRoot`，按「创建时根」根本算不出来，反证基准必须是**当前根**。
+     *
+     * 这条错断言正是本轮 P0 的帮凶：它把「永远算不出」当成正确行为锁住，
+     * 于是 `list.ts` 用 `createdUnderRoot` 比较（恒真）时判据全绿，功能却是死的。
+     */
+    assert(
+      'A11b 老记录也算得出 insideRoot（A11 要求老记录也标注；不能是 undefined）',
+      typeof item11.insideRoot === 'boolean',
+      String(item11.insideRoot)
+    )
     /*
      * 其它字段不受影响：这里只能查结构字段（state / mergeGate 存在且非 undefined）。
      * 「按钮可用性不变」属界面，见本文件头的「看不见的」清单。
@@ -544,10 +560,21 @@ function readConfig() {
   }))
   eq('A13a/A14b 条数不变', after.length, before.length)
   eq('A13b/A14c 每条 state / mergeGate 逐字段相等', after, before)
-  /* 老记录（无 createdUnderRoot）改根后仍然不给 insideRoot */
+  /*
+   * A14d：改根后老记录的标注必须**重算**，而且这个案例里它应当变成「根外」。
+   *
+   * 原断言是 `insideRoot === undefined`（「改根后仍不标根外」），错在两点：
+   * ① 需求 §11.2 原文「恢复默认后，之前的根外标注要**按新根重算**（不是一次性快照）」；
+   * ② 老记录没有 `createdUnderRoot`，若坚持 undefined，A11「老记录也带标注」就永远实现不了。
+   * 这里 rootC 与老记录所在目录无包含关系，所以正确结果是 `false`。
+   */
   const snap14 = await M.listWorktrees()
   const old14 = snap14.items.find((it) => M.compareKeyOfPath(it.path) === M.compareKeyOfPath(oldRecPath))
-  assert('A14d 老记录改根后仍不标根外', old14 && old14.insideRoot === undefined, String(old14 && old14.insideRoot))
+  assert(
+    'A14d 老记录改根后按新根重算（rootC 与它无包含关系 → 标为根外）',
+    old14 !== undefined && old14.insideRoot === false,
+    `实际=${String(old14 && old14.insideRoot)}（若为 undefined 或 true，说明没按新根重算）`
+  )
 
   /* ───────── A15/A27：根在仓库内 → 拒绝保存，且文案含仓库路径 ───────── */
   console.log('\n-- A15/A27 保存校验：仓库内 --')

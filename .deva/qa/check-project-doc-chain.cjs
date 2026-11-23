@@ -66,11 +66,30 @@ async function bundleOne(entryTs, outName) {
 }
 
 /**
- * 取「改动前」的版本：从 `HEAD` 的 blob 里落一份临时 ts 再打包。
- * 基线用 `HEAD` 而不是某个提交哈希 —— 本次改动尚未提交，`HEAD` 就是改前状态。
+ * 取「改动前」的版本：从一个**固定基线 ref** 的 blob 里落一份临时 ts 再打包。
+ *
+ * 为什么不能用 `HEAD`：本次改动一旦提交、或进了 CI 检出，`HEAD` 就是**被测版本**本身，
+ * 「单份逐字节不变」这条判据会退化成「新版 vs 新版」自比，恒真。
+ * 实测过：`HEAD:project-doc.ts` 与分支上的 `project-doc.ts` 逐字节相同，
+ * 于是那条守「提示缓存前缀不被破坏」的断言，实际上什么都没守。
+ *
+ * 基线钉成引入链式注入之前的最后一个提交（`be5925c^`）。拿不到就判 FAIL，
+ * **不要静默换成 HEAD** —— 那正是本条原先的失效方式。
  */
+const BASELINE_REF = process.env.QA_PDOC_BASELINE || 'be5925c^'
+
 function bundleBaselineVersions() {
-  const raw = execFileSync('git', ['show', `HEAD:${SRC_FILE}`], { cwd: REPO, encoding: 'utf8' })
+  let raw
+  try {
+    raw = execFileSync('git', ['show', `${BASELINE_REF}:${SRC_FILE}`], { cwd: REPO, encoding: 'utf8' })
+  } catch (e) {
+    throw new Error(
+      `取不到基线版本 ${BASELINE_REF}:${SRC_FILE}（${e.message.split('\n')[0]}）。\n` +
+        '  基线必须显式存在：拿不到就判失败，不能退回 HEAD —— HEAD 是被测版本本身，' +
+        '用它做基线会让「单份逐字节不变」变成新版自比、恒真假绿。\n' +
+        '  若基线提交被改写，用 QA_PDOC_BASELINE=<ref> 指定新的基线。'
+    )
+  }
   /*
    * 基线版本内部只 `import { join } from 'path'`，没有相对导入，所以可以原样放到临时目录打包。
    */
@@ -174,6 +193,21 @@ async function main() {
     const iRoot = dirs.indexOf('')
     const iSvc = dirs.indexOf('apps/desktop/src/main/services')
     assert('C2f4 根在 services 之前', iRoot < iSvc, `${iRoot} < ${iSvc}`)
+    /*
+     * C2f6：真实仓库里深度序列必须**单调不减**。
+     *
+     * 这是守「由宽到窄」的真断言。原来只有 C2f4（根在 services 之前），而 DFS 顺序下
+     * 根天然排最前，所以那条抓不住问题 —— 实测 DFS 产出的深度序列是 `0, 6, 5, 6, 6, 5, 1`，
+     * 深 6 的 `redesign/AGENTS.md` 排在深 1 的 `notes/AGENTS.md` 之前，
+     * 但 C2f4 照样 PASS。
+     */
+    const depths = dirs.map((d) => (d === '' ? 0 : d.split('/').length))
+    const monotonic = depths.every((v, i) => i === 0 || depths[i - 1] <= v)
+    assert(
+      'C2f6 真实仓库深度序列单调不减（由宽到窄，不是 DFS 序）',
+      monotonic,
+      `深度=${JSON.stringify(depths)} 目录=${JSON.stringify(dirs)}`
+    )
     assert('C2f5 没扫进 node_modules', !dirs.some((d) => d.includes('node_modules')), dirs.filter((d) => d.includes('node_modules')).join(',') || '干净')
   }
 
