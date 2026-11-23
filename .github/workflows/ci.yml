@@ -108,6 +108,20 @@ jobs:
       - name: 重复代码
         run: pnpm check:dup
 
+      # AI 索引体系本身：这些判据守着「文档写了但内容漂了」这类失效——
+      # 能力表指向不存在的文件、注入链超预算、原型用了产品没有的类名。
+      # 全部只读源码与文档，不跑应用，几秒内跑完，所以放在同一组里。
+      #
+      # 为什么要进 CI：本轮之前这 4 条都只在本机手工跑过，等于「建了但不生效」。
+      # 索引的价值全在长期一致，不上 CI 就一定漂。
+      - name: AI 索引体系
+        run: |
+          node .deva/qa/check-agents-table.cjs
+          node .deva/qa/check-project-doc-chain.cjs
+          node .deva/qa/check-prototype-classes.cjs
+          node .deva/qa/check-worktree-root-ui.cjs
+          node .deva/qa/check-worktree-inside-root-ui.cjs
+
       # 导入功能的行为场景（esbuild 打包后逐个独立进程跑）。
       # Linux 上有 2 个场景的夹具不成立（full 要真实 ~/.deva、gate 要 powershell.exe），
       # 它们会被显式 SKIP 并在汇总里点名，不算通过；其余必须全绿。
