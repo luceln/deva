@@ -2408,6 +2408,34 @@ async function scenarioWorktreeStore(): Promise<void> {
   eq('store：拒绝写入后原文件内容原样保留（没被空表覆盖）', fs.readFileSync(file, 'utf8'), '{bad json ,,,')
 }
 
+/**
+ * 把 worktree 根目录指到夹具自己的目录（`<DST>/wts` 等）。
+ *
+ * 为什么需要：worktree 根目录可配置之后（`paths.ts:206`），默认根是
+ * `<DEVA_HOME>/worktrees`，而这些场景把工作区建在 `<DST>/wts` / `<DST>/mwts`。
+ * 创建时的 `path-outside-root` 校验（正确行为）会拒掉它们 —— 所以夹具必须显式设根，
+ * 而不是绕过校验：绕过就验证不到「设了根之后创建/预检/删除还正常」。
+ *
+ * 走 `setWorktreeRoot()` 而不是直接改 `config.json`：它内部走 `setConfigDetailed`，
+ * 会重读磁盘再合并，避免和 `getConfig()` 的模块级缓存打架（夹具里读到的根必须是刚设的值）。
+ * 返回 false 表示没设上，调用方应当直接判失败 —— 静默继续会让后面的断言全变成噪声。
+ */
+async function useWorktreeRoot(root: string): Promise<boolean> {
+  const RS = await import('../../apps/desktop/src/main/services/worktree/root-setting')
+  const res = RS.setWorktreeRoot(root)
+  if (!res.ok) {
+    fail('夹具：设置 worktree 根目录失败', JSON.stringify(res))
+    return false
+  }
+  const P = await import('../../apps/desktop/src/main/services/worktree/paths')
+  const effective = P.worktreeRoot()
+  if (P.normalizeWorktreePath(effective).path !== P.normalizeWorktreePath(root).path) {
+    fail('夹具：worktree 根目录没生效', `期望 ${root}，实际 ${effective}`)
+    return false
+  }
+  return true
+}
+
 /** 建一个真实的临时 git 仓库（worktree 相关场景共用）。 */
 function makeRepo(root: string, files: Record<string, string> = { 'a.txt': 'a\n' }): string {
   fs.mkdirSync(root, { recursive: true })
@@ -2441,6 +2469,8 @@ const gitOut = (cwd: string, ...args: string[]): string =>
  * A12b/A23（分支已存在必须拒绝，不得静默复用）、A22（路径已存在不得覆盖）。
  */
 async function scenarioWorktreePrecheck(): Promise<void> {
+  if (!(await useWorktreeRoot(path.join(DST, 'wts')))) return
+  const P = await import('../../apps/desktop/src/main/services/worktree/paths')
   const PC = await import('../../apps/desktop/src/main/services/worktree/precheck')
   const S = await import('../../apps/desktop/src/main/services/worktree/store')
 
@@ -2479,10 +2509,20 @@ async function scenarioWorktreePrecheck(): Promise<void> {
     return
   }
   info('自动生成的路径', auto.path)
+  /*
+   * 期望值跟着**当前生效的根**走，不写死 `<DEVA_HOME>/worktrees`：
+   * 根目录可配置之后（`paths.ts:206`），自动生成的路径一定是 `<根>/<repoKey>/<slug>-<shortid>`。
+   * 本场景上面把根设成了 `<DST>/wts`，所以这里应当以那个根为准 ——
+   * 写死 `worktrees` 会让「设了根之后自动生成仍然正确」这条反而验不到。
+   */
+  const autoRoot = path.join(DST, 'wts')
+  const autoPrefixOk = P.normalizeWorktreePath(auto.path).path.startsWith(
+    P.normalizeWorktreePath(autoRoot).path
+  )
   check(
-    'precheck 0.8：省略 path 时按 §6.1 自动生成（<DEVA_HOME>/worktrees/<repoKey>/<slug>-<shortid>）',
-    auto.path.includes(path.join('worktrees')) && /feat-auto-path-[0-9a-z]+$/.test(auto.path.replace(/\\/g, '/')),
-    auto.path
+    'precheck 0.8：省略 path 时按 §6.1 自动生成（<配置的根>/<repoKey>/<slug>-<shortid>）',
+    autoPrefixOk && /feat-auto-path-[0-9a-z]+$/.test(auto.path.replace(/\\/g, '/')),
+    `${auto.path}（根 ${autoRoot}）`
   )
   eq('precheck 0.8：slug 从分支名派生', auto.slug, 'feat-auto-path')
   eq('precheck 0.8：自动生成的路径在仓库外', PC.keyOf(auto.path) !== PC.keyOf(repo), true)
@@ -2629,6 +2669,7 @@ async function scenarioWorktreePrecheck(): Promise<void> {
  * A7 与 A4 是清单里明确要求「必须显式构造场景，不能靠代码走查」的两条，这里逐条造。
  */
 async function scenarioWorktreeCreate(): Promise<void> {
+  if (!(await useWorktreeRoot(path.join(DST, 'wts')))) return
   const CR = await import('../../apps/desktop/src/main/services/worktree/create')
   const S = await import('../../apps/desktop/src/main/services/worktree/store')
   const GW = await import('../../apps/desktop/src/main/services/worktree/git-worktree')
@@ -2868,6 +2909,7 @@ async function scenarioWorktreeCreate(): Promise<void> {
  * 反向验证：把 `removeWorktree` 改回「直接返回 ok:true 什么都不做」，下面四组必须全红。
  */
 async function scenarioWorktreeRemove(): Promise<void> {
+  if (!(await useWorktreeRoot(path.join(DST, 'wts')))) return
   const CR = await import('../../apps/desktop/src/main/services/worktree/create')
   const RM = await import('../../apps/desktop/src/main/services/worktree/remove')
   const S = await import('../../apps/desktop/src/main/services/worktree/store')
@@ -2963,6 +3005,7 @@ async function scenarioWorktreeRemove(): Promise<void> {
  * A13 的另一半：会话的 focusRoot 与终端 cwd 必须**两处一致**（都指向 worktree）。
  */
 async function scenarioWorktreeBrief(): Promise<void> {
+  if (!(await useWorktreeRoot(path.join(DST, 'wts')))) return
   const CR = await import('../../apps/desktop/src/main/services/worktree/create')
   const B = await import('../../apps/desktop/src/main/services/worktree/brief')
   const P = await import('../../apps/desktop/src/main/services/chat-prompts')
@@ -3075,6 +3118,7 @@ async function scenarioWorktreeBrief(): Promise<void> {
  * A33：**不做**任何 git worktree prune —— 用户目录被外部删除后的登记要留着给用户看。
  */
 async function scenarioWorktreeSweep(): Promise<void> {
+  if (!(await useWorktreeRoot(path.join(DST, 'wts')))) return
   const CR = await import('../../apps/desktop/src/main/services/worktree/create')
   const S = await import('../../apps/desktop/src/main/services/worktree/store')
   const SW = await import('../../apps/desktop/src/main/services/worktree/sweep')
@@ -3333,6 +3377,7 @@ async function scenarioWorktreeLock(): Promise<void> {
  * 这个场景是 spec §9.1 里 R1/R8/R13 三条风险的落点，也是 T1.2/T1.3/T1.4b/T1.6 的验收处。
  */
 async function scenarioWorktree(): Promise<void> {
+  if (!(await useWorktreeRoot(path.join(DST, 'wts')))) return
   const CR = await import('../../apps/desktop/src/main/services/worktree/create')
   const S = await import('../../apps/desktop/src/main/services/worktree/store')
   const L = await import('../../apps/desktop/src/main/services/worktree/list')
@@ -5859,6 +5904,8 @@ async function scenarioMemCondense(): Promise<void> {
  *  ④ stderr 解析的两种缩进
  */
 async function scenarioWorktreeMerge(): Promise<void> {
+  // 合并场景把工作区建在 <DST>/mwts（见下面各处的 path.join(DST,'mwts',...)），根要跟着指过去
+  if (!(await useWorktreeRoot(path.join(DST, 'mwts')))) return
   /*
    * `mergeWorktree` 内部走 `runGitRaw`，它继承 `process.env`。`git merge --no-ff` 要造合并提交，
    * 没有身份就会 `Committer identity unknown` → 我们这边看到的是 `merge-failed`，
