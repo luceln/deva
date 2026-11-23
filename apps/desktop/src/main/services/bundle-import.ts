@@ -1,11 +1,14 @@
 import { existsSync, lstatSync, readlinkSync } from 'fs'
+import * as fsp from 'fs/promises'
 import { cp, lstat, mkdir, mkdtemp, readdir, rename, rm, symlink, utimes } from 'fs/promises'
 
 import { dirname, join } from 'path'
 import {
+  LINK_PREFIX,
   MANIFEST_NAME,
   SECRETS_ENC_NAME,
   type BundleManifest,
+  type ManifestLinkTree,
   type RestoreProgress,
   type RestoreResult,
   type SecretsRestore
@@ -91,6 +94,132 @@ const RESTORE_SCOPE_FILES = new Set([
   'worktrees.json'
 ])
 
+/**
+ * 把 staging 里 `links/<链接路径>/…` 那份内容副本落到目标目录。
+ *
+ * 返回**逐条如实**的结果：搬成多少、哪些没搬成、为什么。绝不只返回一个计数 ——
+ * 只返回 `copied` 时，调用方无法区分「25 个全搬成」和「搬成 5 个、20 个失败」，
+ * 于是后者会被报成「已降级为副本」，剩下 20 个静默消失。这与 `J2c` 抓的
+ * 「建出空目录却报告成功」是同一个病，只是门槛从 0 抬到了 1。
+ *
+ * 为什么不回滚已成功的部分（整条判失败、删掉重来）：`cp` 已经落地的文件是有效内容，
+ * 删掉只会让用户从「缺 20 个」变成「缺 25 个」。如实报缺多少，比追求状态干净有用。
+ *
+ * 为什么按 `tree.files` 逐条搬而不是 `cp(recursive)`：
+ *  - `cp` 会把 staging 里**不该存在**的东西也带过去（这部分目录是解压出来的，不是原样副本）；
+ *  - 逐条走才能顺手把空目录按 `tree.dirs` 建出来，且能逐条记失败。
+ */
+async function copyLinkTreeFromStage(
+  fromDir: string,
+  dstDir: string,
+  tree: ManifestLinkTree
+): Promise<{ copied: number; failed: string[]; dirFailed: string[] }> {
+  let copied = 0
+  const failed: string[] = []
+  const dirFailed: string[] = []
+  try {
+    await mkdir(dstDir, { recursive: true })
+  } catch (e) {
+    /*
+     * 连目标目录都建不出来 → 这一条全废。返回 0 条 + 全部标失败，
+     * 让调用方走「未恢复」而不是「已降级为副本」。
+     */
+    return { copied: 0, failed: tree.files.map((f) => f.path), dirFailed: [...(tree.dirs ?? [])] }
+  }
+  for (const rel of tree.dirs ?? []) {
+    /*
+     * 链接目标里的空目录建不出来 → 也算「这条副本不完整」。
+     *
+     * 不静默：空目录本身不影响技能可用（靠 SKILL.md 是否可读来判），但建失败通常意味着
+     * 目标上有东西占位或没权限 —— 那下一条文件也很可能建不出来。记进 `dirFailed`
+     * 让调用方如实报「不完整」，而不是当它不存在。
+     *
+     * 与 `failed`（文件）分开记：`missing` 的语义是「缺多少个文件」，
+     * 目录混进去会让那个数字对不上用户实际看到缺的文件数。
+     */
+    try {
+      await mkdir(join(dstDir, rel), { recursive: true })
+    } catch {
+      dirFailed.push(rel)
+    }
+  }
+  for (const f of tree.files) {
+    const src = join(fromDir, f.path)
+    const dst = join(dstDir, f.path)
+    /*
+     * staging 里没有这个条目 → 记失败，**不 continue**。
+     *
+     * 什么时候会缺：包里没解出来（旧包没带 `links`、解压跳过了不认识的条目）。
+     * 以前这里直接跳过，等于把「包里缺」伪装成「本来就少一条」——同一条 M1 纪律。
+     */
+    if (!existsSync(src)) {
+      failed.push(f.path)
+      continue
+    }
+    try {
+      await mkdir(dirname(dst), { recursive: true })
+      await cp(src, dst, { force: true })
+      copied += 1
+    } catch {
+      // 单条搬不动（权限 / 占用 / 磁盘满）：跳过这一条，但**必须记下来**
+      failed.push(f.path)
+    }
+  }
+  return { copied, failed, dirFailed }
+}
+
+/**
+ * 旧密钥库读不出来时，把它改名挪走，为即将写入的新密钥库腾位置。
+ *
+ * 返回挪走后的文件名（没挪 = undefined）。**只在确实"读不出来"时动手**：
+ * 文件不存在（absent）、或内容能解析（ok）都不该被碰 —— 后者马上会被 `replaceAllSecrets` 整份替换。
+ *
+ * 判定复用 `secrets.ts` 的同一套口径（`readSecretKind`），不在这里另写一份 JSON.parse 判据：
+ * 两处判据一旦漂移，就会出现"这里认为能读、那里认为坏了"的死局，正是这次要修的东西。
+ */
+async function quarantineCorruptSecrets(home: string): Promise<string | undefined> {
+  const file = join(home, 'secrets.json')
+  if (!existsSync(file)) return undefined
+  const kind = await readSecretKind(file)
+  if (kind !== 'corrupt') return undefined
+  const moved = `${file}.bad-${Date.now()}`
+  try {
+    await rename(file, moved)
+    return moved
+  } catch (e) {
+    /*
+     * 挪不动（被占用 / 无权限）→ **中止还原**，把失败前移到替换之前。
+     *
+     * 这一步之后马上就写密钥；挪不走就意味着 `replaceAllSecrets` 会被 corrupt 判据挡住，
+     * 那时用户数据已经替换完 —— 那是最糟的"报失败但已改一半"。宁可现在失败，什么都没动。
+     */
+    throw new RestoreError(
+      'write-failed',
+      `旧密钥库读不出来，且无法移开它（${(e as Error)?.message ?? e}）。为免替换到一半失败，已中止，用户数据未改动。`
+    )
+  }
+}
+
+/**
+ * 读盘判断密钥库现状：不存在 / 能解析 / 读不出来。
+ *
+ * 与 `secrets.ts:ensureLoaded()` 的判据保持一致（ENOENT = absent，解析失败 = corrupt）。
+ */
+async function readSecretKind(file: string): Promise<'absent' | 'ok' | 'corrupt'> {
+  let raw: string
+  try {
+    raw = await fsp.readFile(file, 'utf8')
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'corrupt'
+  }
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? 'ok' : 'corrupt'
+  } catch {
+    return 'corrupt'
+  }
+}
+
 async function findStaleEntries(home: string, keep: Set<string>): Promise<string[]> {
   const stale: string[] = []
   let tops: string[]
@@ -118,6 +247,9 @@ async function findStaleEntries(home: string, keep: Set<string>): Promise<string
         /*
          * 目录本身不在清单里（清单只列文件），要看它**子树**里有没有包内条目：
          * 有就继续下潜，没有才整棵算残留。
+         *
+         * 注意 `keep` 里既有文件条目也有目录条目（调用方把 `manifest.dirs` 也并了进去），
+         * 所以「包里声明的空目录」在上面的 `keep.has(rel)` 分支就被保住了，走不到这里。
          */
         const hasInner = [...keep].some((k) => k.startsWith(`${rel}/`))
         if (hasInner) await walk(rel)
@@ -136,7 +268,12 @@ async function findStaleEntries(home: string, keep: Set<string>): Promise<string
   for (const top of tops) {
     if (top === 'worktrees') continue // 用户代码，永不删
     if (!RESTORE_SCOPE.has(top) && !RESTORE_SCOPE_FILES.has(top)) continue
-    if (keep.has(top)) continue // 备份里有同名根文件
+    /*
+     * 在包里（同名文件，或 `manifest.dirs` 声明的目录）：不整个跳过，取决于它是文件还是目录。
+     *
+     * 目录必须进去继续清子树 —— 否则「包里有 data/media 这个空目录」会让整个 data/media
+     * 底下包外的残留也跟着保住，退回到「只覆盖不替换」（已修的 P0-2）。
+     */
     const st = await lstat(join(home, top)).catch(() => null)
     if (!st) continue
     if (st.isDirectory() && !st.isSymbolicLink()) await walk(top)
@@ -283,7 +420,16 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
      * 先解到 staging 而不是直接写 home：哈希对不上时要能干净退出，不能留下半套已覆盖的数据。
      */
     const want = new Set(manifest.files.map((f) => `home/${f.path}`))
-    report('verify', 0, manifest.files.length)
+    /*
+     * 符号链接的内容副本也要解出来（`links/<链接路径>/…`）。
+     *
+     * 只在这一步解、且解到 staging：目标路径存在时根本用不到它（会重建链接），
+     * 只有换机降级那一条路才需要。解出来放在 staging 里，用完随 staging 一起清掉。
+     */
+    for (const tree of manifest.links ?? []) {
+      for (const f of tree.files) want.add(`${LINK_PREFIX}${tree.path}/${f.path}`)
+    }
+    report('verify', 0, manifest.files.length + (manifest.links ?? []).reduce((a, t) => a + t.files.length, 0))
     try {
       await extractTo(opts.bundlePath, staging, want, (done, total) => {
         if (done % 32 === 0 || done === total) report('verify', done, total)
@@ -309,7 +455,34 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
         )
       }
     }
-    report('verify', manifest.files.length, manifest.files.length)
+    /*
+     * 链接内容副本同样逐条核对。
+     *
+     * 缺条目不算致命：旧包本就没有 `links`，或导出时因超限没收全（`truncated`）——
+     * 那种情况下 `copyLinkTreeFromStage` 搬不到东西，会如实进 `symlinkUnrecovered`。
+     * 但**内容对不上**必须致命：那是包真的坏了，照搬会把坏内容当副本落进用户目录。
+     */
+    for (const tree of manifest.links ?? []) {
+      for (const f of tree.files) {
+        const abs = join(staging, LINK_PREFIX, tree.path, f.path)
+        if (!existsSync(abs)) continue
+        const got = await hashFile(abs)
+        if (got !== f.sha256) {
+          throw new RestoreError(
+            'corrupt',
+            `备份包里符号链接内容与清单不符（${tree.path}/${f.path}）：期望 ${f.sha256.slice(
+              0,
+              12
+            )}…，实际 ${got.slice(0, 12)}…。包可能已损坏。`
+          )
+        }
+      }
+    }
+    report(
+      'verify',
+      manifest.files.length + (manifest.links ?? []).reduce((a, t) => a + t.files.length, 0),
+      manifest.files.length + (manifest.links ?? []).reduce((a, t) => a + t.files.length, 0)
+    )
 
     /*
      * ---- 5. 先解析密钥段，再动目标 ----
@@ -323,6 +496,24 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
      */
     report('secrets', 0, 1)
     const secretsPlan = await prepareSecrets(secretsBuf, manifest)
+    /*
+     * 旧密钥库读不出来（用户正是因为旧库坏了才来还原）→ **在这里就把它挪走**。
+     *
+     * ## 为什么必须在动用户数据之前
+     *
+     * `replaceAllSecrets` 在 `loadKind === 'corrupt'` 时会拒绝写入（`secrets.ts:236` 的保护：
+     * 此刻内存 store 是空的，覆盖会毁掉那份还能救的文件）。而还原流程里 `keepSet` 把
+     * `secrets.json` 留在磁盘上 → `resetForRestore()` 清完内存态，下一次 `ensureLoaded()` 又读到
+     * 同一个坏文件 → 又判定 corrupt → 又拒绝写入。
+     *
+     * 于是出现最糟的组合：文件已经替换完、密钥写不进去、还原报失败（`write-failed`），
+     * 用户数据**已被改了一半**。`probe-bundle-corrupt.cjs` 的 C1a/C1b 抓的就是这个。
+     *
+     * 挪走是正确语义而不是绕过校验：还原本来就要整份替换密钥库，坏库没有任何保留价值，
+     * 而"用户当前那份新密钥"根本不存在（文件是坏的）。改名成 `.bad-<时间戳>` 而不是删掉：
+     * 万一里面其实还有能抢救的片段，用户找得回来；沿用的是项目里既有的坏文件命名约定。
+     */
+    const corruptBackup = await quarantineCorruptSecrets(home)
     report('secrets', 1, 1)
 
     // ---- 6. 替换 home 内容 ----
@@ -340,6 +531,17 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
     const removedStale: string[] = []
     const keepSet = new Set(manifest.files.map((f) => f.path))
     for (const link of manifest.symlinks) keepSet.add(link.path)
+    /*
+     * 包里声明要重建的目录也并进 `keepSet`。
+     *
+     * 清理逻辑只有一套判据（「这个路径在包里吗」），目录和文件在这里是同一种东西：
+     * 在包里 = 不当残留。并进来之后，`findStaleEntries` 对它们的处理是「保留目录、继续清子树」，
+     * 所以包外的残留文件照样被删，不会退回「只覆盖不替换」。
+     *
+     * 不并的后果（probe-bundle-edge B1/B2/B3）：源里 `data/media` 恰好是空目录 → 包里没有它的
+     * 任何文件条目 → 被判成残留 `rm -rf`，而包里也没有目录条目可重建 → 该目录消失。
+     */
+    for (const rel of manifest.dirs ?? []) keepSet.add(rel)
     /*
      * `secrets.json` 不在文件清单里（它由密钥段单独负责），但**必须加进 keep**。
      *
@@ -395,9 +597,37 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
     }
     report('replace', manifest.files.length, manifest.files.length)
 
+    /*
+     * 重建包里声明的空目录。
+     *
+     * `mkdir({recursive:true})` 是幂等的：目录已被上面某个文件的父目录创建过也不报错。
+     * 必须在「清理残留」之后 —— 清理会把它们删掉，这是这次修的 P2（probe-bundle-edge B1/B2/B3）。
+     *
+     * 失败**进报告**而不是只打日志：`console.warn` 用户在界面上看不见，而那正是这次要修的
+     * 「静默失效」—— 用户以为空目录回来了，实际没有。常见原因是同名文件占了位置。
+     */
+    const dirsFailed: string[] = []
+    for (const rel of manifest.dirs ?? []) {
+      try {
+        await mkdir(join(home, rel), { recursive: true })
+      } catch (e) {
+        dirsFailed.push(rel)
+        console.warn(`[restore] 空目录重建失败：${rel}：${(e as Error)?.message ?? e}`)
+      }
+    }
+
     // ---- 7. 重建符号链接 ----
     report('symlinks', 0, manifest.symlinks.length)
     const symlinkAsCopy: string[] = []
+    const symlinkUnrecovered: string[] = []
+    const symlinkIncomplete: Array<{
+      path: string
+      total: number
+      copied: number
+      missing: number
+      missingDirs?: number
+      truncated?: 'too-big' | 'too-many' | 'unreadable'
+    }> = []
     let relinked = 0
     for (const link of manifest.symlinks) {
       const dst = join(home, link.path)
@@ -412,10 +642,52 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
          *
          * 不为此让整个还原失败：换台机器还原时，外部仓库路径本来就不存在。
          * 但也不能静默 —— 静默的话用户会以为技能还跟外部仓库联动，实际改外部仓库再也不生效。
+         *
+         * 以前这里从 `stageHome/<link.path>` 拷，而 `scanHome` 对链接**不跟进去收文件**，
+         * 那里永远是空的 → 建出一个空目录，报告却说「已降级为副本」（probe-bundle-junction J2c）。
+         * 现在内容副本在 `links/<link.path>/…`（见 `ManifestLinkTree`），从那里解。
          */
-        const from = join(stageHome, link.path)
-        if (existsSync(from)) await cp(from, dst, { recursive: true, force: true })
-        symlinkAsCopy.push(link.path)
+        const tree = (manifest.links ?? []).find((t) => t.path === link.path)
+        const res = tree
+          ? await copyLinkTreeFromStage(join(staging, LINK_PREFIX, link.path), dst, tree)
+          : { copied: 0, failed: [] as string[], dirFailed: [] as string[] }
+        /*
+         * 三态上报，**不许把中间态塞进两头**。
+         *
+         *  - 一条都没落地 → `symlinkUnrecovered`（内容没恢复，用户必须自己去弄）；
+         *  - 全落地且导出时没截断 → `symlinkAsCopy`（内容全在，只是不联动外部仓库）；
+         *  - 落了但缺一些（搬失败 / staging 缺条目 / 导出时就 truncated）
+         *    → `symlinkIncomplete`，如实报缺多少。
+         *
+         * 以前只有前两态，判据是 `copied > 0`，于是「25 个里搬成 5 个」也报成「已降级为副本」。
+         */
+        if (res.copied === 0) {
+          /*
+           * 连一份内容副本都没有（旧包没带 `links`、或导出时超限/目标不可读）：
+           * 目录会是空的。这时**不能**只说「已降级为副本」—— 那正是 J2c 抓的谎报。
+           * 如实进 `symlinkUnrecovered`，界面据此告警。
+           */
+          await mkdir(dst, { recursive: true }).catch(() => undefined)
+          symlinkUnrecovered.push(link.path)
+        } else if (res.failed.length > 0 || res.dirFailed.length > 0 || tree?.truncated) {
+          /*
+           * 部分成功，或导出时就已截断。
+           *
+           * `truncated` 必须算进这里：那种情况下 `tree.files` 只是「已知的那部分」，
+           * 逐条全搬成功也不代表副本完整（`skippedFiles` 条从未进过包）。
+           * 不把它算进来的话，超限的链接会被报成「完整副本」—— 又是一次谎报。
+           */
+          symlinkIncomplete.push({
+            path: link.path,
+            total: (tree?.files.length ?? 0) + (tree?.skippedFiles ?? 0),
+            copied: res.copied,
+            missing: res.failed.length + (tree?.skippedFiles ?? 0),
+            ...(res.dirFailed.length ? { missingDirs: res.dirFailed.length } : {}),
+            ...(tree?.truncated ? { truncated: tree.truncated } : {})
+          })
+        } else {
+          symlinkAsCopy.push(link.path)
+        }
       }
     }
     report('symlinks', manifest.symlinks.length, manifest.symlinks.length)
@@ -450,7 +722,11 @@ export async function restoreBundle(opts: RestoreOptions): Promise<RestoreResult
       files: manifest.files.length,
       relinked,
       removedStale,
+      ...(dirsFailed.length ? { dirsFailed } : {}),
       symlinkAsCopy,
+      ...(symlinkUnrecovered.length ? { symlinkUnrecovered } : {}),
+      ...(symlinkIncomplete.length ? { symlinkIncomplete } : {}),
+      ...(corruptBackup ? { corruptSecretsBackup: corruptBackup } : {}),
       secrets,
       ...(previousBackup ? { backupOfPrevious: previousBackup } : {}),
       excluded: manifest.excluded,

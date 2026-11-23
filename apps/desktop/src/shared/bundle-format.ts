@@ -43,6 +43,14 @@ export const SECRETS_ENC_NAME = 'secrets.enc'
 export const HOME_PREFIX = 'home/'
 
 /**
+ * 链接目标内容副本的包内前缀：`links/<链接在 home 下的路径>/…`。
+ *
+ * 与 `home/` 分开的理由见 `ManifestLinkTree`：`home/` 必须与 home 目录逐文件对应（E2b 判据），
+ * 备用副本不能混进去。根目录也就不会有第三条前缀与用户文件混淆。
+ */
+export const LINK_PREFIX = 'links/'
+
+/**
  * 一条符号链接。**必须单独记**：`skills/` 下常有指向外部仓库的链接（本机实测 4 个技能 3 个是链接）。
  *
  * 只搬内容的话，重装后链接变成实体副本，与原仓库脱钩——用户在外部仓库改的东西不再生效；
@@ -66,6 +74,48 @@ export interface ManifestFile {
 }
 
 /**
+ * 一条「符号链接目标内容」的副本。
+ *
+ * ## 为什么需要它
+ *
+ * `scanHome` 对链接只记 `.symlink` 条目、**不跟进去收文件**。同机还原时目标路径还在，
+ * 重建链接即可，没问题；但**换机还原**（外部仓库不在原路径）会退化成「建一个空目录」——
+ * 报告写 `symlinkAsCopy`「已降级为副本」，用户以为内容还在，实际技能整个消失。
+ * 探针 `probe-bundle-junction.cjs` 的 J2c、`probe-bundle-edge.cjs` 的 A3 抓的就是这个：
+ * 要求降级后 `SKILL.md` 真的能读到。
+ *
+ * 解法：导出时把链接指向的目录内容**再收一份**进包，存在 `links/<path>/…` 前缀下
+ * （**不放进 `home/`**，否则 `verify-bundle-real.cjs` 的 E2b「包内文件数 = home 非链接文件数」
+ * 会立刻对不上）。还原时目标存在就照旧重建链接，`links/` 里那份不用；目标不存在才解出来当副本。
+ */
+export interface ManifestLinkTree {
+  /** 链接自身在 `home/` 下的相对路径，`/` 分隔（与 `SymlinkEntry.path` 相同）。 */
+  path: string
+  /** 该链接目标下收进包的文件（相对**链接路径**，`/` 分隔）。 */
+  files: ManifestFile[]
+  /** 目标下（含链接自身）需要重建的空目录，相对链接路径。 */
+  dirs: string[]
+  /**
+   * 目标下未能收全的原因（缺省 = 收全了）。
+   *
+   * ## 它最后会走到哪（还原侧的实际行为）
+   *
+   *  - **目标路径存在**（同机重装）→ 重建链接，`links/` 里那份副本根本不用。
+   *    `truncated` 没有任何影响 —— 链接指向的真实目录还在，内容一条不少。
+   *  - **目标路径不存在**（换机）→ 从副本解出实体目录。这时：
+   *    - 一条都没解出来 → 进 `RestoreResult.symlinkUnrecovered`；
+   *    - 解出来一部分、或 `truncated` 表明本就不全 → 进 `RestoreResult.symlinkIncomplete`，
+   *      **绝不进 `symlinkAsCopy`**。
+   *
+   * 换句话说：`truncated` 的链接**永远不会被报成「完整副本」**。这条在
+   * `bundle-import.ts` 的三态分流里守着（`res.failed.length > 0 || tree?.truncated`）。
+   */
+  truncated?: 'too-big' | 'too-many' | 'unreadable'
+  /** 因 `truncated` 而没进包的文件数（仅展示用）。 */
+  skippedFiles?: number
+}
+
+/**
  * 包内清单。
  *
  * 为什么带 `files[]` 的逐文件哈希：zip 自带 CRC32，但它只能查出「字节坏了」，
@@ -82,8 +132,27 @@ export interface BundleManifest {
   platform: string
   /** home 下**实际写进包**的文件清单。 */
   files: ManifestFile[]
+  /**
+   * home 下需要重建的**空目录**（相对 `home/`，`/` 分隔，只记最底层的空目录）。
+   *
+   * ## 为什么必须记
+   *
+   * `files` 只列文件，还原时的残留清理（`findStaleEntries`）据此判断「目标里这个目录包里有没有」。
+   * 空目录在 `files` 里找不到任何子项 → 被判成残留 `rm -rf` 删掉，而包里也没有目录条目 → 不重建。
+   * 结果：源里有 `data/media`、`data/tool-results`、`uploads` 这些空目录，还原后它们不见了
+   * （`probe-bundle-edge.cjs` 的 B1/B2/B3）。
+   *
+   * 缺省（旧包没有这个字段）= 没有要重建的空目录，与改动前行为一致。
+   */
+  dirs?: string[]
   /** home 下的符号链接。 */
   symlinks: SymlinkEntry[]
+  /**
+   * 符号链接目标内容的副本（见 `ManifestLinkTree`）。
+   *
+   * 缺省（旧包）= 只有链接条目、没有内容副本，换机还原时降级只能是空目录，与改动前一致。
+   */
+  links?: ManifestLinkTree[]
   /**
    * 本次**明确排除**的路径（相对 home），要写进包里让用户能看见。
    *
@@ -155,12 +224,69 @@ export type RestoreResult =
       relinked: number
       /** 目标不存在、降级为实体副本的符号链接（路径列表）。 */
       symlinkAsCopy: string[]
+      /**
+       * 目标不存在**且包里没有它的内容副本**、只能留个空目录的符号链接。
+       *
+       * 与 `symlinkAsCopy` 分开的原因：两者对用户的含义完全不同 ——
+       * `symlinkAsCopy` 是「内容在，但不再跟外部仓库联动」，这一项是「内容没恢复」。
+       * 合成一个字段就会出现 probe-bundle-junction J2c 抓的那种谎报：报告说已降级为副本，
+       * 实际目录是空的。
+       */
+      symlinkUnrecovered?: string[]
+      /**
+       * 降级成副本、但**副本不完整**的符号链接：只落地了一部分文件。
+       *
+       * ## 为什么单独一个字段，而不是并入上面两个
+       *
+       * 这三种状态对用户的含义各不相同，混进同一个字段就会重演同一类谎报：
+       *  - `symlinkAsCopy`：内容**全在**，只是不再联动外部仓库 → 不用管；
+       *  - `symlinkUnrecovered`：内容**一条都没有** → 必须自己去恢复；
+       *  - `symlinkIncomplete`（本项）：内容**缺了一部分** → 能用，但要知道缺什么。
+       *
+       * 曾经 `symlinkAsCopy` 是唯一出口，判据又只是 `copied > 0`，于是「25 个文件里搬成 5 个」
+       * 也会被报成「已降级为副本」，剩下 20 个静默消失。门槛从 0 抬到 1 不改变问题的性质。
+       *
+       * ## 什么时候会出现
+       *
+       *  - 单条文件搬不动（权限 / 被占用 / 磁盘满）；
+       *  - 包里这个条目本来就没解出来（staging 里缺）；
+       *  - **导出时就不全**（`ManifestLinkTree.truncated`：超 64MB / 2000 文件，或目标读不出来）。
+       *    这种情况即使逐条都搬成功，副本也是残缺的，同样进这个字段。
+       */
+      symlinkIncomplete?: Array<{
+        /** 链接在 home 下的相对路径。 */
+        path: string
+        /** 应当有的文件数（`ManifestLinkTree.files` 的长度 + `truncated` 时已知漏掉的数）。 */
+        total: number
+        /** 实际落地并核对通过的文件数。 */
+        copied: number
+        /** 没能恢复的文件数（`total - copied`，另加 `truncated` 时**未知**的那部分不计入）。 */
+        missing: number
+        /** 连空目录都建不出来的个数（文件全搬成但目录缺了，也属于不完整）。 */
+        missingDirs?: number
+        /** 导出时就已截断时的原因（此时 missing 只是「已知」的那部分）。 */
+        truncated?: 'too-big' | 'too-many' | 'unreadable'
+      }>
       /** 被删掉的目标残留（包里有、目标多出来的用户数据）。不报出来用户不知道少了什么。 */
       removedStale: string[]
+      /**
+       * 包里声明、但**重建失败**的空目录（相对 home 的路径）。
+       *
+       * 与 `removedStale` 分开：那个是「清掉了多余的东西」（正常），这个是「该建没建成」（异常）。
+       * 不报的话用户以为目录回来了 —— 常见原因是同名文件占了位置。
+       */
+      dirsFailed?: string[]
       /** 密钥还原结果。 */
       secrets: SecretsRestore
       /** 覆盖前的自动备份落在哪（目标非空时才有）。 */
       backupOfPrevious?: string
+      /**
+       * 旧密钥库读不出来、被改名挪到这里的路径。
+       *
+       * 出现它就说明「用户原来的密钥库是坏的」—— 那份坏文件被保留下来供抢救，
+       * 而不是在替换过程中被整份覆盖掉。用户该知道它去了哪。
+       */
+      corruptSecretsBackup?: string
       /** 被排除的路径（包里本来就没有的）。 */
       excluded: string[]
       /** 是否建议重启（内存里还留着旧配置 / 会话缓存）。 */

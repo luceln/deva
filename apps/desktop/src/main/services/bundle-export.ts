@@ -2,8 +2,8 @@ import { createWriteStream, existsSync } from 'fs'
 import { mkdir, readFile, rename, rm, stat } from 'fs/promises'
 import { join, dirname } from 'path'
 import { Zip, ZipDeflate, ZipPassThrough } from 'fflate'
-import { MANIFEST_NAME, SECRETS_ENC_NAME, type BundleManifest, type ExportResult } from '../../shared/bundle-format'
-import { buildManifest, hashFiles, scanHome, toEntryName } from './bundle-manifest'
+import { MANIFEST_NAME, SECRETS_ENC_NAME, LINK_PREFIX, type BundleManifest, type ExportResult } from '../../shared/bundle-format'
+import { buildManifest, hashFiles, resolveLinkTarget, scanHome, toEntryName } from './bundle-manifest'
 
 import { getDevaHome } from './config'
 
@@ -279,6 +279,34 @@ function writeZip(
             Buffer.from(JSON.stringify({ target: link.target }), 'utf8'),
             true
           )
+        }
+
+        /*
+         * 链接目标的**内容副本**，放在 `links/<链接路径>/…`。
+         *
+         * 为什么不放 `home/`：那会让「包内 home 条目数 = home 非链接文件数」这条判据
+         * （`verify-bundle-real.cjs` E2b）立刻对不上，而且会让还原时的「同路径文件」与「链接」
+         * 争同一个位置。放独立前缀，语义清楚：`home/` 就是 home 原样，`links/` 是备用副本。
+         */
+        for (const tree of manifest.links ?? []) {
+          if (!tree.files.length) continue
+          const targetAbs = await resolveLinkTarget(home, tree.path)
+          for (const f of tree.files) {
+            let data: Buffer
+            try {
+              data = await readFile(join(targetAbs, f.path))
+            } catch (e) {
+              throw new Error(`读取符号链接内容失败：${tree.path}/${f.path}：${(e as Error)?.message ?? e}`)
+            }
+            if (data.length !== f.size) {
+              throw new Error(
+                `符号链接内容在导出过程中被修改：${tree.path}/${f.path}（清单 ${f.size} 字节，实际 ${data.length}）。请重试。`
+              )
+            }
+            addBuffer(zip, `${LINK_PREFIX}${tree.path}/${f.path}`, data, shouldCompress(f.path))
+            tick()
+            if (n % 16 === 0) await new Promise((r) => setImmediate(r))
+          }
         }
 
         zip.end()
