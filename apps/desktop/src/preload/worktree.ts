@@ -23,6 +23,8 @@ import type {
   WorktreeSetTargetResult,
   WorktreeSizeUpdate,
   WorktreeSnapshot,
+  WorktreeRootView,
+  WorktreeRootSetResult,
   MergeResult
 } from '../shared/worktree-protocol'
 
@@ -98,6 +100,21 @@ export const worktreeApi = {
   /** 某个 focusRoot 对应的边界信息；不是工作区则 null。只用于显示标签。 */
   brief: (focusRoot: string | null): Promise<WorktreeBriefView | null> =>
     ipcRenderer.invoke('worktree:brief', focusRoot),
+  /**
+   * 当前生效的 worktree 根 + 它是不是默认。
+   *
+   * 设置项用它渲染（默认的要明确写「默认」，不能把默认路径当用户设定值显示）。
+   */
+  root: (): Promise<WorktreeRootView> => ipcRenderer.invoke('worktree:root'),
+  /**
+   * 设置 worktree 根。传 `undefined` = **恢复默认**（删键，跟随 `DEVA_HOME`）。
+   *
+   * 保存前主进程会拒三种情况并给出含具体路径的说明（根在某个仓库内、根太深导致
+   * 路径超 180、路径无法归一化）——**不要**在渲染层先自己判一遍：根要归一化
+   * （大小写 / 尾斜杠 / `\\?\`），两套判据必然漂移，漂移的表现是「界面说能存、保存却失败」。
+   */
+  setRoot: (value: string | undefined): Promise<WorktreeRootSetResult> =>
+    ipcRenderer.invoke('worktree:root-set', value),
   /**
    * 订阅「列表该重取了」。
    *

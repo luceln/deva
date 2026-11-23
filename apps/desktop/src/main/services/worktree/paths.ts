@@ -1,6 +1,7 @@
 import { createHash } from 'crypto'
 import { isAbsolute, join, relative, resolve } from 'path'
 import { realResolve } from '../fs-guard'
+import { getConfig, getDevaHome } from '../config'
 
 /**
  * worktree 的路径工具：归一化、比较键、repoKey、slug。
@@ -165,4 +166,76 @@ export function baseNameOf(p: string): string {
 /** 路径拼接（避免各处手写 `+ sep +`）。 */
 export function joinPath(...parts: string[]): string {
   return join(...parts)
+}
+
+/* ───────────── worktree 根（`<root>/<repoKey>/<slug>-<shortid>`） ───────────── */
+
+/**
+ * `config.json` 里存放根的键。
+ *
+ * 为什么是 `config.json` 顶层而不是 `worktrees.json`（需求 §6.1）：后者是**机器状态**
+ * （以路径 compareKey 为主键的记录表，文件级 `schemaVersion` 强校验），混进用户偏好会让
+ * 「改一个偏好」与「改机器状态」互相牵连；而偏好要能跟 config 一起被备份 / 手改 / 版本化。
+ */
+export const WORKTREE_ROOT_KEY = 'worktreeRoot'
+
+/**
+ * 默认根：`<DEVA_HOME>/worktrees`。
+ *
+ * **只在这一处拼**（需求 §7.4 的硬要求）。别处再拼一次，改根时必然漏掉某一处，
+ * 而后果是静默的：那个入口继续往旧位置建目录，用户以为根已经统一了。
+ *
+ * A8 用一条 grep 守着这条：在 `apps/desktop/src` 下搜「把 DEVA_HOME 与 worktrees 拼在一起」
+ * 的那段源码，命中数必须恒为 1。**这也是本注释不写出那串字面量的原因** ——
+ * 写出来会让 grep 命中注释，判据自己把自己弄成假红。
+ */
+export function defaultWorktreeRoot(): string {
+  return join(getDevaHome(), 'worktrees')
+}
+
+/**
+ * 当前生效的根。
+ *
+ * 缺键 / 空串 / 非字符串 → 默认根（需求 §6.2：**默认值不写进文件**）。
+ * 这样 `DEVA_HOME` 迁移时默认根自动跟着走，而「恢复默认」就是删键。
+ *
+ * 返回值已归一化（`normalizeWorktreePath().path`）——展示、传给 git、拼子路径都用它。
+ * 归一化在 `realResolve` 上做过「最近存在祖先的 realpath + 尚不存在的尾段」，
+ * 所以根目录此刻还不存在也能得到正确形态。
+ */
+export function worktreeRoot(): string {
+  const raw = getConfig()[WORKTREE_ROOT_KEY]
+  const picked = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : defaultWorktreeRoot()
+  return normalizeWorktreePath(picked).path
+}
+
+/**
+ * `p` 是否在根内（含根自身）。**不得用 `startsWith`** —— 需求 §7.2 的四种形态：
+ *
+ * | 形态 | `startsWith` 的错 | compareKey 为什么对 |
+ * |---|---|---|
+ * | 大小写不同 `E:\WT` / `e:\wt` | 误判根外 | Windows/macOS 全小写化（R5） |
+ * | `\\?\E:\wt\…` 长路径前缀 | 误判根外 | 剥 `//?/`（R6） |
+ * | 尾斜杠 / 冗余斜杠 | 误判根外 | 折叠 `/`、去尾 `/`（R2/R3） |
+ * | `E:\wt2` vs 根 `E:\wt` | **误判根内**（前缀相同） | 逐段比较，`wt2` ≠ `wt` |
+ *
+ * 最后一行是安全问题：`startsWith` 会把 `E:\wt2` 当成 `E:\wt` 的子目录，于是「根外创建」被放行。
+ * 所以判定与 `isInsideRepo` 同构：归一化后逐段 `relative()`，看是否以 `..` 起头。
+ *
+ * **不数层数**（需求 Q1 定案：任意深度）。
+ */
+export function isInsideRoot(root: string, p: string): boolean {
+  const rel = relative(normalizeWorktreePath(root).path, normalizeWorktreePath(p).path)
+  if (!rel) return true // 就是根本身
+  return !rel.startsWith('..') && !isAbsolute(rel)
+}
+
+/**
+ * 记录侧「创建时根」的比较键。
+ *
+ * 为什么返回 compareKey 而不是原始串（需求 §6.3）：原始串的大小写 / 尾斜杠 / `\\?\` 差异会让
+ * 「同一个根」被判成两个，从而把根内误判成根外、或者反过来。
+ */
+export function rootKeyOf(root: string): string {
+  return compareKeyOfPath(root)
 }

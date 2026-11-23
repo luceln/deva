@@ -106,6 +106,22 @@ const BLOCKER_KEY: Record<MergeBlocker, string> = {
 /**
  * 重建失败原因 → 文案。`reason` 缺席时按 `add-failed` 兜底（协议里 `ok:false` 必然带一个原因，
  * 这里只是让类型闭合，不是「猜一个」）。
+ *
+ * ## 为什么这张表以前是死代码
+ *
+ * 调用点原来写的是 `res.message ?? t(REBUILD_FAIL_KEY[...])`。`res.message` 是后端的技术原文，
+ * 六条 reason 它**条条都填**，于是 `??` 一次都轮不到右边 —— 这张表整张没被用到。
+ * 用户看到的是「目录还在（E:\xxx），不需要重建」这类后端口吻，而不是「怎么办」。
+ *
+ * ## 现在怎么分工（按 reason 分流，不是一刀切）
+ *
+ * 后端 `message` 与这六条词条的关系并不一样，所以不能统一处理：
+ *
+ * - **技术型**（`add-failed` 是 Git stderr、`verify-failed` 是逐项不符清单）：
+ *   词条只说「该怎么办」，原始报错是排查的唯一线索 —— 两行都给（title 词条 + message 原文）。
+ * - **描述型**（`dir-exists` / `branch-missing`）：后端 message 与词条说的是同一件事，
+ *   两行会把同一句话显示两遍。词条承担全部信息，路径 / 分支名用占位符嵌进去。
+ * - **`not-found` / `installing`**：后端 message 没有额外信息，只显示词条。
  */
 const REBUILD_FAIL_KEY: Record<NonNullable<WorktreeRebuildResult['reason']>, string> = {
   'not-found': 'cf.wt.rebuildFail.notFound',
@@ -115,6 +131,17 @@ const REBUILD_FAIL_KEY: Record<NonNullable<WorktreeRebuildResult['reason']>, str
   'add-failed': 'cf.wt.rebuildFail.addFailed',
   'verify-failed': 'cf.wt.rebuildFail.verifyFailed'
 }
+
+/**
+ * 这些 reason 的 `message` 是**纯技术细节**（Git 原始报错 / 逐项不符清单），
+ * 与词条不重叠，必须作为第二行原样显示：里面往往有日志里才有、界面又没别处能看到的线索。
+ *
+ * 其余 reason 的 `message` 与词条同义，显示两行就是重复，所以只显示词条。
+ */
+const REBUILD_FAIL_KEEPS_DETAIL = new Set<NonNullable<WorktreeRebuildResult['reason']>>([
+  'add-failed',
+  'verify-failed'
+])
 
 /** 字节数 → 人读的形态。`null` 由调用方区分「统计中」与「占用未知」，不在这里兜。 */
 function formatBytes(n: number): string {
@@ -312,9 +339,21 @@ function WorktreeCard({ view }: { view: WorktreeListItem }): React.JSX.Element {
     try {
       const res = await window.deva.worktree.rebuild({ path: view.path })
       if (!res.ok) {
+        /*
+         * 分因文案为主，技术细节按 reason 分流（见 REBUILD_FAIL_KEEPS_DETAIL）。
+         *
+         * 路径 / 分支名取 `view` 而不是从 `res.message` 里解析：`view` 的 `path`、`branch`
+         * 在协议里都是**必填**（`WorktreeListItem`），后端那两处失败时并没有回填 `path`/`branch`，
+         * 它只在 `message` 里拼了一句话。用 `view` 才能保证占位符一定有值、不出现「目录还在（）」。
+         */
+        const reason = res.reason ?? 'add-failed'
+        const text = t(REBUILD_FAIL_KEY[reason])
+          .replace('{path}', view.path)
+          .replace('{branch}', view.branch)
         toast.show({
           variant: 'error',
-          message: res.message ?? t(REBUILD_FAIL_KEY[res.reason ?? 'add-failed'])
+          title: text,
+          ...(REBUILD_FAIL_KEEPS_DETAIL.has(reason) && res.message ? { message: res.message } : {})
         })
         return
       }

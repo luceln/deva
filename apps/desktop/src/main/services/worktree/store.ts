@@ -52,6 +52,31 @@ export interface WorktreeRecord {
   deps: DepsState
   depsDetail?: string
   depsUpdatedAt?: number
+  /**
+   * 「创建这条记录时，worktree 根是什么」——归一化后的 compareKey（需求 §6.3）。
+   *
+   * ## 为什么是可选字段，而不是升级 `schemaVersion`
+   *
+   * 文件级 `SCHEMA = 1` 在 `ensureLoaded()` 里做**强校验**：不匹配就整份判 `corrupt`，
+   * 于是所有写操作 fail closed、用户所有 worktree 记录变成不可写。升级它等于为了一个偏好
+   * 废掉全部历史记录。
+   *
+   * 所以这里新增**独立可选字段**：老记录没有它（`undefined`），`ensureLoaded()` 的必填校验
+   * （见下方 `invalidRecord` 那段）**不得**把它列进去，否则老记录被判 invalid → 同样全盘 corrupt。
+   *
+   * ## 三种取值
+   *
+   *  - `undefined`：老记录（此字段引入前创建的）→ **跳过根校验**（需求 取舍二）。
+   *    理由：删除是收尾动作，不该拦。用户清理存量目录时被「你没在根内建的所以我不能删」挡住，
+   *    后果是又留下一个删不掉的目录 —— 正是本需求要解决的问题。
+   *  - 字符串：创建时的根 compareKey → 创建与删除都严格校验。
+   *  - 空串：不该出现；出现时按「有值但不匹配」处理（不放行），避免坏数据静默拿到豁免。
+   *
+   * ## 为什么存 compareKey 而不是原始串
+   *
+   * 原始串的大小写 / 尾斜杠 / `\\?\` 差异会让「同一个根」被判成两个，从而把根内误判成根外。
+   */
+  createdUnderRoot?: string
 }
 
 const FILE = 'worktrees.json'
