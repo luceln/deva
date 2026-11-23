@@ -122,8 +122,8 @@ looks most like what it lets through」），我们把它变成了两个判据�
 
 **H1. 文档里的引用必须核对到源码，链接必须真的解析得开。**（对应 magpie `Docs match the source`）
 为什么没法机械化：判断「这句话说的还是不是当前代码」需要读懂语义；能机械查的只有链接是否 404。
-- 证据（本仓库自己的反例）：`.deva/rules-by-phase.md` 说「A7 的陷阱就是它自己标出来的」，
-  而 `.deva/req-worktree-parallel.md` 明确写 A7 是「**已拍板并改写场景**」——引用没核对，结论说反了。
+- 证据（本仓库自己的反例）：`notes/proposed/2026-11-18-rules-by-phase.md` 说「A7 的陷阱就是它自己标出来的」，
+  而 `notes/archived/2026-11-18-worktree-parallel-scope-v3.md` 明确写 A7 是「**已拍板并改写场景**」——引用没核对，结论说反了。
   另一例：`AGENTS.md` 曾引用 `MEMBERS.md` 的行号，那份文件一改行号全漂。
 - 处置：**改规则**。写「文件里的某处说了 X」之前，先把那处读一遍；引用优先写**函数名 / 小节名**，不写行号。
 - 落到哪：`AGENTS.md` 五、维护这个文件。
@@ -167,8 +167,8 @@ looks most like what it lets through」），我们把它变成了两个判据�
 | 验收终止条件 = 清单翻完（原 T1） | 改规则 | `MEMBERS.md`「验收」节：`N/M 通过` + 每条一行 + 证据 |
 | 断言总数对不上必须解释（原 T2） | 建脚本 | `driver.cjs` 末尾打印 `合计 N 条 / PASS n / FAIL m`；SKIP 单独列 |
 | 守卫要跑全部入口（原 T3） | 建脚本 | CI（`.github/workflows/ci.yml`）固定跑 typecheck + build + scan + driver |
-| 高频路径按频率计成本（原 O1） | 不管 | 已写进 `.deva/spec-worktree-parallel.md` §T1.4b 的设计里 |
-| 需求待澄清必须拍板并标落位（原 O3） | 不管 | `.deva/req-worktree-parallel.md` 第四节已把它做成固定格式 |
+| 高频路径按频率计成本（原 O1） | 不管 | 已写进 `notes/implemented/2026-11-18-worktree-parallel-spec.md` §T1.4b 的设计里 |
+| 需求待澄清必须拍板并标落位（原 O3） | 不管 | `notes/archived/2026-11-18-worktree-parallel-scope-v3.md` 第四节已把它做成固定格式 |
 
 **已删除**（内容已被覆盖或从未复现）：`O2`（一次只做一件事 → 并入 H5）、
 `D2`（i18n key 同步 → 并入 R4，等 R4 的脚本建好就有机械形态）、

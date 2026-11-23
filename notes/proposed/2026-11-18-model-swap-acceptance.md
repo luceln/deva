@@ -1,5 +1,13 @@
 # 模型切换 · 验收清单
 
+> **状态：proposed（部分已实现，未整体验收）** —— 2026-11-23 归档时核实：
+> - `main/services/model-swap.ts`（`scanSessionsByModel` / `applyModelSwap`）、`model-availability.ts`、
+>   `renderer/src/store/modelSwap.ts`、`ModelSwapDialog.tsx` **均已在**，并有 4 个 fix 提交
+>   （`f713e94` / `eb53fb0` / `bf1d1fe` / `0858afc`）
+> - i18n 六类文案齐备（`missing` / `disabled` / `model-disabled` / `malformed` / `nokey` / `keyunreadable`）
+> - **本清单 B1（左侧列表标红）仍未实现**：`detectAllBrokenRefs` 全仓 0 处调用（`grep -c` 返回 0）
+> - 因此**不是** implemented：B1 与部分 A 档断言未逐条跑过，不能凭「文件在」判通过
+
 > 状态：无既有需求文档，本清单靠代码审查反推「做对了长什么样」；不含实现方案
 > 基线：`my/dev` @ `b5e79ca` · 被审提交 `5fd87a4`（2026-11-15，16 文件 / +1174 行）
 > 依据：`.deva/qa/review-model-swap.md`（只读审查，10 条风险点，P1 四条已由主控核实成立）

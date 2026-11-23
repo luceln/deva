@@ -1,10 +1,21 @@
 # 需求：worktree 根目录可统一管理（自定义根目录 + 根内校验）
 
-状态：**可施工**（原为「已记录，未排期」；两项取舍 + 四项细则均已拍板，见 §四、§十四）
-基线：`feat/member-worktree` @ `bcad9a3`
-来源：用户口头诉求（见 §二）+ 主控 2026-11-23 实测清理数据 + 本次代码复核
-版本：**v2**（2026-11-23 补入 Q1~Q4 定案与「老目录不能新建」答复，见 §十四）
-规格交叉引用：`.deva/spec-worktree-parallel.md`
+> **已实现（2026-11-23 归档时核实）**
+> 落盘证据：
+> - `apps/desktop/src/main/services/worktree/root-setting.ts`（新增，根目录设置与校验）
+> - `paths.ts:180` `WORKTREE_ROOT_KEY`、`:206` `worktreeRoot()`、`:222` `worktreeRootView()`
+> - `precheck.ts:232-234` 根内校验 → `path-outside-root`（带当前根实际路径）
+> - `create.ts:120` `createdUnderRoot: rootKeyOf(worktreeRoot())`
+> - `remove.ts:155` 根外拒绝删目录的 warning 文案
+> - `shared/worktree-protocol.ts:65` 类型；`messages.ts:1627` / `:3259` 中英文案（含根路径）
+> - 提交：`e84e564` feat(worktree): 工作区根目录可配置 + `cda8759` fix: 删除侧改用 compareKey
+> 验收脚本已存在：`.deva/qa/check-worktree-root-ui.cjs`、`.deva/qa/probe-worktree-default-root.cjs`
+
+> 状态：**可施工**（原为「已记录，未排期」；两项取舍 + 四项细则均已拍板，见 §四、§十四）
+> 基线：`feat/member-worktree` @ `bcad9a3`
+> 来源：用户口头诉求（见 §二）+ 主控 2026-11-23 实测清理数据 + 本次代码复核
+> 版本：**v2**（2026-11-23 补入 Q1~Q4 定案与「老目录不能新建」答复，见 §十四）
+> 规格交叉引用：`../implemented/2026-11-18-worktree-parallel-spec.md`
 
 > **本文档是重建的。** 原记录 `784df7e`（2026-11-22）写入过一份 30 行的「已记录」版本，该文件在
 > `bf30126`（`revert: 撤回未完成的成员工作区功能`）中随功能一起被删除；`76757f5` 恢复成员工作区实现时
@@ -785,5 +796,5 @@ targetKey = norm.compareKey                          // precheck.ts:211 已算�
 
 ### 15.3 交叉引用
 
-在 `.deva/spec-worktree-parallel.md` 的根目录相关段落（§6.1 / §6.2.2 / `:1270` 附近）
+在 `../implemented/2026-11-18-worktree-parallel-spec.md` 的根目录相关段落（§6.1 / §6.2.2 / `:1270` 附近）
 加一句：worktree 根可自定义，约束与校验见本文档。**不重复描述**，避免两份文档漂移。
