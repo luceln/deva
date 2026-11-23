@@ -198,8 +198,8 @@ export const forkZhCN = {
       revealFailed: '打不开这个目录（可能已不在受信范围内），请从合并面板或工作区列表重试。',
       rebuildFail: {
         notFound: '找不到这条工作区记录，可能已被移除。',
-        dirExists: '目录已经存在，不需要重建。',
-        branchMissing: '分支已经不在了。重建等于新开一个同名分支，需要你先决定分支怎么处理。',
+        dirExists: '目录还在（{path}），不需要重建。要重置请先删除再重建。',
+        branchMissing: '分支 {branch} 已经不在了。重建等于新开一个同名分支，需要你先决定分支怎么处理。',
         installing: '正在安装依赖，等它结束或失败后再重建。',
         addFailed: 'git worktree add 失败，详见日志。',
         verifyFailed: '建出来了，但回读核对不上（目录 / 分支 / git 登记有一项不符），请先手工确认再使用。'
@@ -497,8 +497,8 @@ export const forkEn = {
       revealFailed: 'Could not open this folder (it may be outside the trusted roots); retry from the merge panel or the worktree list.',
       rebuildFail: {
         notFound: 'This worktree record no longer exists.',
-        dirExists: 'The folder already exists, so there is nothing to rebuild.',
-        branchMissing: 'The branch is gone. Rebuilding would create a new branch of the same name, so you need to decide how to handle the branch first.',
+        dirExists: 'The folder still exists ({path}), so there is nothing to rebuild. To reset it, remove it first and then rebuild.',
+        branchMissing: 'Branch {branch} is gone. Rebuilding would create a new branch of the same name, so you need to decide how to handle the branch first.',
         installing: 'Dependencies are installing; wait for it to finish or fail before rebuilding.',
         addFailed: 'git worktree add failed; see the log.',
         verifyFailed: 'It was created, but the read-back check did not match (folder / branch / git entry); verify it manually before use.'
