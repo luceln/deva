@@ -231,6 +231,22 @@ export function isInsideRoot(root: string, p: string): boolean {
 }
 
 /**
+ * 两个 **compareKey** 之间的「在根内」判定（含根自身，任意深度）。
+ *
+ * 为什么不复用 `isInsideRoot`：那个函数会对入参再跑一次 `normalizeWorktreePath`，
+ * 而 compareKey 是归一化的**产物**——在 Linux 上 `/tmp/a` 的 compareKey 是 `tmp/a`
+ * （前导 `/` 已去掉），再拿去 `resolve()` 会被当成相对路径解析成 `<cwd>/tmp/a`，
+ * 两侧基准不同就会把「同一个根」判成根外。
+ *
+ * 记录里的 `createdUnderRoot` 和 `compareKey` 都已经是这个形态，用它们比较必须走这里。
+ */
+export function isKeyInsideRoot(rootKey: string, pKey: string): boolean {
+  if (pKey === rootKey) return true // 就是根本身
+  // 根后必须紧跟 `/`：`tmp/wt2` 不得被 `tmp/wt` 当成子项（与 isInsideRoot 的逐段语义一致）
+  return pKey.startsWith(`${rootKey}/`)
+}
+
+/**
  * 记录侧「创建时根」的比较键。
  *
  * 为什么返回 compareKey 而不是原始串（需求 §6.3）：原始串的大小写 / 尾斜杠 / `\\?\` 差异会让

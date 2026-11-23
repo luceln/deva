@@ -3,7 +3,7 @@ import { runGitRaw } from '../git'
 import { publishWorktreeChanged } from '../chat-bus'
 import { listRecords, getRecord, removeRecord, type WorktreeRecord } from './store'
 import { looksLikeOurWorktreeDir, listWorktrees, hasWorktreeEntry } from './git-worktree'
-import { isInsideRoot, rootKeyOf, worktreeRoot } from './paths'
+import { compareKeyOfPath, isKeyInsideRoot, rootKeyOf, worktreeRoot } from './paths'
 import { withGitLock } from './lock'
 import { invalidateSize } from './list'
 
@@ -135,7 +135,17 @@ function blockDirRemovalOutsideRoot(rec: WorktreeRecord, path: string): string |
   if (createdKey === '') {
     return `目录未删：这条记录的「创建时根」是空值，无法确认它该不该删。记录已清理，目录请自行核对：${path}`
   }
-  if (isInsideRoot(createdKey, path)) return null
+  /*
+   * 这里**不能**调 `isInsideRoot(createdKey, path)`：`createdKey` 是 compareKey
+   * （已经去掉尾斜杠、在 Linux 上还去掉了前导 `/`），而 `isInsideRoot` 会对入参走
+   * `normalizeWorktreePath` → `resolve(expandHome(p))`，把一个 `tmp/a` 形式的串当相对路径
+   * 解析成 `<cwd>/tmp/a`，于是「根」和「路径」两边的基准不同，判出根外。
+   *
+   * Linux CI 上就是这么红的：提示里两个路径长得一模一样，却报「不在根内」。
+   * 正确做法是两边都用 compareKey 逐段比较（与 `isInsideRoot` 同构，但不重复归一化）。
+   */
+  const pathKey = rec.compareKey || compareKeyOfPath(path)
+  if (isKeyInsideRoot(createdKey, pathKey)) return null
   /*
    * 文案必须含**实际路径**与**当初的根**（需求 §8.3）：只说「不在根内」用户不知道该去哪儿找。
    * `createdUnderRoot` 是 compareKey（小写、正斜杠），直接展示不好读 —— 但它就是当初的真实值，

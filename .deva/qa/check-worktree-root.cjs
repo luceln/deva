@@ -480,6 +480,42 @@ function readConfig() {
   assert('A12c 目录确实还在磁盘上', fs.existsSync(rmPath12) === true, rmPath12)
   if (fs.existsSync(rmPath12)) fs.rmSync(rmPath12, { recursive: true, force: true })
 
+  /* ───────── A12d：compareKey 形态的根判定（Linux CI 曾在此爆红）─────────
+   *
+   * 记录里的 `createdUnderRoot` 和 `compareKey` 都是**归一化的产物**，在 Linux 上
+   * `/tmp/a` 的 compareKey 是 `tmp/a`（前导 `/` 已去掉）。把它们喂给 `isInsideRoot()`
+   * 会再走一次 `resolve()`，`tmp/a` 被当成相对路径解析成 `<cwd>/tmp/a`，两侧基准不同，
+   * 于是「同一个根」被判成根外 —— 全量场景 `wtremove` 在 ubuntu-latest 上就是这么红的
+   * （提示里两个路径一模一样，却说不在根内），而 Windows 上恰好通过（盘符让它保持绝对）。
+   *
+   * 守的是 `isKeyInsideRoot()` 的语义；反向验证：把它改成 `startsWith(rootKey)` 后 A12d-e 变红。
+   */
+  console.log('\n-- A12d compareKey 形态的根判定 --')
+  const keyRoot = 'tmp/deva-qa/wtremove-1/dst/wts'
+  assert('A12d-a 根本身判为根内', M.isKeyInsideRoot(keyRoot, keyRoot) === true, keyRoot)
+  assert(
+    'A12d-b 根下子目录判为根内',
+    M.isKeyInsideRoot(keyRoot, `${keyRoot}/a`) === true,
+    `${keyRoot}/a`
+  )
+  assert(
+    'A12d-c 深层子目录判为根内（不数层数，需求 Q1）',
+    M.isKeyInsideRoot(keyRoot, `${keyRoot}/a/b/c/d`) === true,
+    `${keyRoot}/a/b/c/d`
+  )
+  assert(
+    'A12d-d 兄弟目录 wt2 判为根外（startsWith 会误放行）',
+    M.isKeyInsideRoot(keyRoot, 'tmp/deva-qa/wtremove-1/dst/wts2') === false,
+    'wts2 不得被 wts 当成子项'
+  )
+  assert(
+    'A12d-e 父目录判为根外',
+    M.isKeyInsideRoot(keyRoot, 'tmp/deva-qa/wtremove-1/dst') === false,
+    '父目录不得判为根内'
+  )
+
+  if (fs.existsSync(rmPath12)) fs.rmSync(rmPath12, { recursive: true, force: true })
+
   /* ───────── A13/A14：改根不改变老记录的表现 ───────── */
   console.log('\n-- A13/A14 改根不影响存量 --')
   const before = (await M.listWorktrees()).items.map((it) => ({
