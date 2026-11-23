@@ -37,24 +37,58 @@ const i18n = fs.readFileSync(I18N, 'utf8')
 const code = pane.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
 
 /*
- * 判据：每个字段都必须在**非类型声明**的位置被读取，并且读出来的东西要进 JSX。
+ * 判据：每个字段都必须真的走到用户眼前。三关，缺一关都不算：
  *
- * 具体做法：字段名出现次数 ≥ 2（一次类型声明 + 一次实际使用）。
- * 只出现一次 → 只有类型，就是验收抓到的那个状态。
+ * 1. 字段在**非注释**代码里出现 ≥ 2 次（一次类型声明 + 一次读取）；
+ * 2. 该字段读出后要进 `notes`/JSX —— 用「它配套的词条被 `t('cf.backup.xxx')` 取用」来验，
+ *    这比数出现次数硬得多：条件被写成 `false && ...`、或被 `if (0)` 短路时，
+ *    词条取用点跟着一起失效，第三关会红。
+ * 3. 词条 zh + en 齐全。
  */
 const FIELDS = [
-  ['backupOfPrevious', '覆盖前那份数据备份在哪（想退回时找不到）'],
-  ['symlinkAsCopy', '哪些技能降级成了独立副本（以为还联动外部仓库）'],
-  ['relinked', '多少个外部链接重新连上'],
-  ['configReloadError', '配置重读失败（界面说完成，实际是旧配置）'],
-  ['needsRestart', '需要重启才能全部生效']
+  ['backupOfPrevious', '覆盖前那份数据备份在哪（想退回时找不到）', 'restoreBackupAt'],
+  ['symlinkAsCopy', '哪些技能降级成了独立副本（以为还联动外部仓库）', 'restoreDowngraded'],
+  ['relinked', '多少个外部链接重新连上', 'restoreRelinked'],
+  ['configReloadError', '配置重读失败（界面说完成，实际是旧配置）', 'restoreConfigStale'],
+  ['needsRestart', '需要重启才能全部生效', 'restoreRestart'],
+  /*
+   * 2026-11 追加：主进程新增这两个字段并如实填写，界面同样零渲染 ——
+   * 与首轮五个字段一模一样的静默失效，只是晚了两轮才被发现。
+   */
+  ['symlinkUnrecovered', '哪些技能/目录内容没恢复（只剩空目录，却显示还原完成）', 'restoreUnrecovered'],
+  ['symlinkIncomplete', '哪些只恢复了一部分（以为内容全在，实际缺了一半）', 'restoreIncomplete'],
+  ['dirsFailed', '哪些空目录没建回来（以为目录回来了）', 'restoreDirsFailed'],
+  ['corruptSecretsBackup', '坏掉的旧密钥库被挪到哪（不说清会以为密钥凭空丢了）', 'restoreCorruptSecrets']
 ]
 
 console.log('== 字段是否进入渲染路径 ==')
-for (const [field, why] of FIELDS) {
+for (const [field, why, key] of FIELDS) {
   const hits = (code.match(new RegExp(`\\b${field}\\b`, 'g')) || []).length
-  if (hits >= 2) ok(`${field} 已被渲染`, `${hits} 处：类型 + 使用`)
-  else bad(`${field} 只出现在类型里`, `${hits} 处 —— ${why}`)
+  if (hits < 2) {
+    bad(`${field} 只出现在类型里`, `${hits} 处 —— ${why}`)
+    continue
+  }
+  /*
+   * 第二关：配套词条必须被真正取用（字段读了却拼出别的文案，等于没显示这一项）。
+   * 第三关再管「取用点会不会永远执行不到」。
+   * （needsRestart 的文案是固定句、不走 fill，用 restoreRestart 直接对上。）
+   */
+  const usedKey = new RegExp(`t\\('cf\\.backup\\.${key}'\\)`).test(code)
+  /*
+   * 第三关：取用点不能被静态短路。
+   *
+   * 抓的是这个真实漏网：把条件写成 `if (false && r.dirsFailed ...)` 时，字段名照样出现两次、
+   * `t('cf.backup.xxx')` 也还在源码里，只查「有没有取用」的判据完全看不见 —— 假绿。
+   * 这里把「该字段的 if 条件」摘出来，条件里出现 `false &&` / `if (0` 之类字面量短路就判红。
+   * 不做完整的控制流分析（那要靠真编译），只钉住这一种确实会发生的写法。
+   */
+  const guardRe = new RegExp(`if \\(([^)\\n]*\\b${field}\\b[^)\\n]*)\\)`, 'g')
+  const conds = [...code.matchAll(guardRe)].map((m) => m[1])
+  const shorted = conds.find((c) => /\bfalse\s*&&|\b0\s*&&|\btrue\s*\|\|/.test(c))
+  if (!usedKey) bad(`${field} 没有真正渲染`, `词条 ${key} 没有被取用 —— ${why}`)
+  else if (conds.length === 0) bad(`${field} 没有条件守卫`, `字段没出现在任何 if 条件里，可能被无条件读取或读错地方 —— ${why}`)
+  else if (shorted) bad(`${field} 的渲染条件被短路`, `if (${shorted.trim()}) 永远不成立 —— ${why}`)
+  else ok(`${field} 已被渲染`, `${hits} 处：类型 + 使用，词条 ${key} 有取用`)
 }
 
 /*
@@ -75,7 +109,12 @@ const KEYS = [
   'restoreBackupAt',
   'restoreRelinked',
   'restoreDowngraded',
-  'restoreConfigStale'
+  'restoreConfigStale',
+  'restoreUnrecovered',
+  'restoreIncomplete',
+  'restoreIncompleteTruncated',
+  'restoreDirsFailed',
+  'restoreCorruptSecrets'
 ]
 for (const k of KEYS) {
   const n = (i18n.match(new RegExp(`${k}:`, 'g')) || []).length
