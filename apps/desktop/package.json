@@ -1,6 +1,6 @@
 {
   "name": "devaplus",
-  "version": "0.1.16-plus.5",
+  "version": "0.1.16-plus.6",
   "description": "Deva 桌面应用",
   "main": "./out/main/index.js",
   "author": "sqfcy",
