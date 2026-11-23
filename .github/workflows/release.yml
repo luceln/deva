@@ -3,8 +3,8 @@
 #  - 在 GitHub 网页上新建 Release（顺带建 tag）并直接发布：CI 几分钟后传上安装包、把自动生成的说明接在
 #    网页上写的说明后面（没写就只有自动生成的）。之后随时可以在网页上改说明。
 #    安装包传完之前，应用里「检查更新」不会提示这个版本。
-#  - 本地 git tag v<version> && git push origin v<version>：CI 建成草稿 Release，检查 / 改写说明后再点
-#    「Publish release」；发布前对外不可见。（网页上「Save draft」不会建 tag，触发不了 CI，所以要先审再发只能走这条。）
+#  - 本地 git tag v<version> && git push origin v<version>：CI 直接打包并发布 Release，版本说明按提交自动生成。
+#    二开版由 AI 自动发版，不设人工审稿环节，所以不走草稿。
 # 本地预览版本说明：node .github/scripts/release-notes.mjs v<version> HEAD
 # 只想试打包（比如改了打包配置）：在 Actions 页选 Release →「Run workflow」，各平台的包作为 artifact 留在本次运行里，
 # 不建 Release、不校验版本。
@@ -114,8 +114,12 @@ jobs:
           body_path: release-notes.md
           # 网页上已发布的 Release：接在原说明后面，不覆盖网页上写的内容
           append_body: true
-          # 本次新建的 Release 建成草稿，发版人看过说明再手动发布；网页上已发布的不受影响（保持已发布）
-          draft: true
+          # 直接发布，不建草稿。
+          #
+          # 二开版由 AI 自动发版、不人工审版本说明，草稿这一步没有意义：草稿状态下 updater 读的
+          # `releases/latest` 看不到它（只认 non-draft + non-prerelease），等于发版了用户却收不到更新。
+          # 版本说明本就由 release-notes.mjs 按提交自动生成，事后再改也行。
+          draft: false
           # 预发布判定：只认「真预发布」的后缀。
           #
           # 不能简单按「带连字符就算」——二开版用 `<上游版本>-plus.<序号>` 做正式版号，那也带连字符，
