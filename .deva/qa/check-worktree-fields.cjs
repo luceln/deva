@@ -61,8 +61,19 @@ const read = (p) => {
   }
 }
 
-const pane = read(PANE)
-if (pane === null) bad('G0 读得到 WorktreePane.tsx', PANE)
+const { stripComments } = require('./lib/strip-comments.cjs')
+
+const paneRaw = read(PANE)
+if (paneRaw === null) bad('G0 读得到 WorktreePane.tsx', PANE)
+/*
+ * 断言只看**剥掉注释**的源码。
+ *
+ * 这个文件的注释里恰好写着 `disabled 只读 mergeGate.mayMerge`（第 37 行）与
+ * `BLOCKER_KEY` 的说明，不剥的话 G1 会从注释里命中 —— 实测把真正的
+ * `disabled={!view.mergeGate.mayMerge}` 改成 `disabled={false /*!view.…mayMerge*\/}`
+ * 仍然 11 PASS 全绿。剥注释之后这类形状立刻变红。
+ */
+const pane = paneRaw === null ? null : stripComments(paneRaw)
 
 /** i18n 词条（运行时值）。读失败给 null，依赖它的检查会如实报红。 */
 let i18n = null
@@ -95,10 +106,20 @@ if (pane !== null && i18n !== null) {
   } else {
     const seg = pane.slice(Math.max(0, mergeIdx - 600), mergeIdx + 900)
     const expr = mergeBtn[1].trim()
-    if (/mergeGate\s*\.\s*mayMerge/.test(expr) && /!\s*view\s*\.\s*mergeGate\s*\.\s*mayMerge/.test(expr)) {
+    /*
+     * 判据收紧：表达式**整体**必须是 `!view.mergeGate.mayMerge`（允许任意空白与括号）。
+     *
+     * 原判据是「expr 里出现 mergeGate.mayMerge 且出现 !view.mergeGate.mayMerge」——
+     * 那只要表达式里**任何位置**带着这段子串就算过，于是
+     *     disabled={false /* !view.mergeGate.mayMerge *\/}
+     * 只要中间那段没剥注释就仍然 PASS（实测假绿）。现在要求整串相等语义：
+     * 去掉所有空白与多余括号后必须恰好是 `!view.mergeGate.mayMerge`。
+     */
+    const compact = expr.replace(/\s+/g, '').replace(/^\(+|\)+$/g, '')
+    if (compact === '!view.mergeGate.mayMerge') {
       ok('G1 合并按钮的 disabled 绑 mergeGate', expr)
     } else {
-      bad('G1 合并按钮的 disabled 绑 mergeGate', `实际是 ${expr}`)
+      bad('G1 合并按钮的 disabled 绑 mergeGate', `实际是 ${expr}（应为 !view.mergeGate.mayMerge）`)
     }
 
     // ── G2：title 从 blocker 取文案 ──
@@ -177,28 +198,45 @@ if (pane !== null && i18n !== null) {
   else ok('G4 dirtyCount > 0 单独处理', '')
   if (!hasZero) bad('G4 dirtyCount === 0 单独处理', '没找到零值文案（dirtyClean）')
   else ok('G4 dirtyCount === 0 单独处理', 'dirtyClean')
-  // null 与 0 必须落到不同的词条（不能都写成 dirtyMeta）
+  /*
+   * null 与 0 必须落到不同的词条。
+   *
+   * 原写法用 `/dirtyCount\s*===\s*null[\s\S]{0,200}?t\('(cf\.wt\.\w+)'\)/` 跨行抓——
+   * 200 字符能跨过好几个 JSX 分支，于是「null 分支里其实没取词条、只是后面某处取了」
+   * 也算过。现在只取**紧接着的这一个三元分支**（从 `=== null` 到下一个 `:` 或 `) :`），
+   * 在剥过注释的文本里找该分支自己的词条。
+   */
   if (hasNull && hasZero) {
-    const nullK = pane.match(/dirtyCount\s*===\s*null[\s\S]{0,200}?t\('(cf\.wt\.\w+)'\)/)
-    const cleanK = pane.match(/dirtyClean/)
-    if (nullK && cleanK) {
-      // 读运行时值判断 `cf.wt.dirtyClean` 是否存在（原来在 messages.ts 文本里找 `dirtyClean:`）
-      const zeroLiteral = i18n.locales.every((loc) => Object.hasOwn(i18n.entry('cf.wt.dirtyClean') ?? {}, loc))
-      if (!zeroLiteral) bad('G4 null 与 0 用不同词条', 'cf.wt.dirtyClean 词条不存在')
-      else ok('G4 null 与 0 用不同词条', `null → ${nullK[1]}，0 → cf.wt.dirtyClean`)
-    }
+    const at = pane.indexOf('view.dirtyCount === null')
+    const branch = at === -1 ? null : pane.slice(at, pane.indexOf(') :', at + 20) + 1)
+    const key = branch === null ? null : branch.match(/t\('(cf\.wt\.[A-Za-z0-9_.]+)'\)/)
+    const cleanOk = i18n.locales.every((loc) => Object.hasOwn(i18n.entry('cf.wt.dirtyClean') ?? {}, loc))
+    if (branch === null) bad('G4 null 分支可定位', '找不到 view.dirtyCount === null')
+    else if (!key) bad('G4 null 与 0 用不同词条', `null 分支里没有词条取用：${branch.trim().slice(0, 120)}`)
+    else if (key[1] === 'cf.wt.dirtyClean') bad('G4 null 与 0 用不同词条', 'null 分支用了 dirtyClean，与 0 同义')
+    else if (!cleanOk) bad('G4 null 与 0 用不同词条', 'cf.wt.dirtyClean 词条不存在')
+    else ok('G4 null 与 0 用不同词条', `null → ${key[1]}，0 → cf.wt.dirtyClean`)
   }
 
   // ── G5：mergeInProgress 非 null 时渲染 unmergedCount ──
-  // 窗口放在 1500 字符：这块后来加了三个收尾出口（中止 / 终端 / 打开目录），
-  // 600 已经装不下，而判据要守的是「拿到 unmergedCount 就渲染出来」，与块的长度无关。
-  const mip = pane.match(/view\.mergeInProgress\s*!==\s*null[\s\S]{0,1500}?<\/div>/)
-  if (!mip) {
+  /*
+   * 原写法 `view.mergeInProgress !== null[\s\S]{0,1500}?</div>` 有两个假绿来源：
+   *   ① 1500 字符足够跨过整块、落到**下一块**里去找 unmergedCount；
+   *   ② 注释里出现 `unmergedCount` 也算。
+   * 现在改成：定位含 `mergeInProgress !== null` 的那一行起、到块结束（按缩进/闭合兜底），
+   * 在**剥过注释**的这段里找 unmergedCount。
+   */
+  const mipAt = pane.indexOf('view.mergeInProgress !== null')
+  if (mipAt === -1) {
     bad('G5 mergeInProgress 非 null 时渲染', '没找到 mergeInProgress !== null 的渲染块')
-  } else if (!/unmergedCount/.test(mip[0])) {
-    bad('G5 mergeInProgress 渲染了 unmergedCount', '块里没有 unmergedCount')
   } else {
-    ok('G5 mergeInProgress 渲染了 unmergedCount', '')
+    const blockStart = pane.indexOf('{', mipAt)
+    const block = blockStart === -1 ? pane.slice(mipAt, mipAt + 1500) : sliceBraced(pane, blockStart) ?? pane.slice(mipAt, mipAt + 1500)
+    if (!/unmergedCount/.test(block)) {
+      bad('G5 mergeInProgress 渲染了 unmergedCount', `块里没有 unmergedCount（块长 ${block.length}）`)
+    } else {
+      ok('G5 mergeInProgress 渲染了 unmergedCount', `块内命中（块长 ${block.length}）`)
+    }
   }
 }
 

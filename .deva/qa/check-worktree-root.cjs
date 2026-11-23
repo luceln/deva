@@ -2,7 +2,7 @@
 /**
  * worktree 根目录可配置 —— CI 可跑的断言（驱动真实逻辑，不是「字符串在文件里」）。
  *
- * 需求：`.deva/req-worktree-root-custom.md`（A1~A28）。
+ * 需求：`notes/implemented/2026-11-23-worktree-root-custom.md`（A1~A28）。
  *
  * ## 为什么这个功能必须有判据
  *
@@ -298,8 +298,18 @@ function readConfig() {
 
   /* ───────── A7：类型与 i18n 中英都有 ───────── */
   console.log('\n-- A7 类型与 i18n --')
-  const proto = fs.readFileSync(path.join(APP, 'shared', 'worktree-protocol.ts'), 'utf8')
-  const msgFile = fs.readFileSync(path.join(APP, 'renderer', 'src', 'i18n', 'messages.ts'), 'utf8')
+  /*
+   * 断言看**剥掉注释**的源码（`.deva/qa/lib/strip-comments.cjs`）。
+   *
+   * `path-outside-root` 这个 reason 在协议注释与 i18n 注释里都可能被提到
+   * （「它会报 path-outside-root」），不剥注释时 A7a 会在类型删掉后照样 PASS，
+   * A7b 的「中英各一处」也可能被注释里的字样凑数。
+   */
+  const { stripComments: stripCommentsRoot } = require('./lib/strip-comments.cjs')
+  const proto = stripCommentsRoot(fs.readFileSync(path.join(APP, 'shared', 'worktree-protocol.ts'), 'utf8'))
+  const msgFile = stripCommentsRoot(
+    fs.readFileSync(path.join(APP, 'renderer', 'src', 'i18n', 'messages.ts'), 'utf8')
+  )
   const protoHits = (proto.match(/path-outside-root/g) || []).length
   const msgHits = (msgFile.match(/'path-outside-root'/g) || []).length
   assert('A7a 协议类型里有 path-outside-root', protoHits >= 1, protoHits + ' 处')
@@ -747,7 +757,17 @@ console.log(JSON.stringify({ state, count: recs.length, wrote }))`
   /* ───────── A22：schemaVersion 仍是 1 ───────── */
   console.log('\n-- A22 schemaVersion 未动 --')
   {
-    const storeSrc = fs.readFileSync(path.join(SRC_MAIN, 'worktree', 'store.ts'), 'utf8')
+    /*
+     * 断言看**剥掉注释**的源码（`.deva/qa/lib/strip-comments.cjs`）。
+     *
+     * 这两条查的是「某个字面量在不在」，而 `store.ts` 的注释里很可能出现
+     * 「schemaVersion 仍是 1」「SCHEMA 不要随便动」这类句子 —— 不剥注释时，
+     * 把真正的字段删掉、只留一句注释也会照样 PASS。
+     */
+    const { stripComments } = require('./lib/strip-comments.cjs')
+    const storeSrc = stripComments(
+      fs.readFileSync(path.join(SRC_MAIN, 'worktree', 'store.ts'), 'utf8')
+    )
     assert('A22a 文件级 SCHEMA = 1', /const SCHEMA = 1\b/.test(storeSrc), 'const SCHEMA = 1')
     assert('A22b 记录级 schemaVersion: 1', /schemaVersion: 1\b/.test(storeSrc), 'schemaVersion: 1')
     /*

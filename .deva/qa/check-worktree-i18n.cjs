@@ -41,7 +41,8 @@ const pane = fs.readFileSync(PANE, 'utf8')
 const i18n = fs.readFileSync(I18N, 'utf8')
 
 /** 去掉注释，避免「注释里提到了所以判过」。 */
-const code = pane.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+const { stripComments, sliceBracket } = require('./lib/strip-comments.cjs')
+const code = stripComments(pane)
 
 const REASONS = ['not-found', 'dir-exists', 'branch-missing', 'installing', 'add-failed', 'verify-failed']
 
@@ -53,9 +54,23 @@ console.log('== 1. 六个分因词条都被渲染路径取用 ==')
  */
 if (/t\(REBUILD_FAIL_KEY\[/.test(code)) ok('词条经 REBUILD_FAIL_KEY 动态取用', 't(REBUILD_FAIL_KEY[...])')
 else bad('词条没有被取用', '找不到 t(REBUILD_FAIL_KEY[...])')
-if (/REBUILD_FAIL_KEY\[res\.reason \?\? 'add-failed'\]|REBUILD_FAIL_KEY\[reason\]/.test(code))
-  ok('reason 缺失时仍有 add-failed 兜底')
-else bad('reason 兜底丢失', '协议里 ok:false 必带 reason，但界面仍需闭合类型')
+/*
+ * 第 2 条原来写成 `/REBUILD_FAIL_KEY[res.reason ?? 'add-failed']|REBUILD_FAIL_KEY[reason]/`，
+ * 是 `|` 兜底的两个候选：只要其中一个在就判过。左边那个形状在源码里根本不存在（实际是
+ * 先算 `const reason = res.reason ?? 'add-failed'` 再 `REBUILD_FAIL_KEY[reason]`），
+ * 于是这条断言**实际上只查了右边** —— 把兜底删掉也照样 PASS（实测过）。
+ *
+ * 改为直接查那个语义：`??` 兜底的赋值必须在，且取表时用的是兜底后的变量。
+ */
+const fallbackAssign = /=\s*[^=\n]*\.reason\s*\?\?\s*'add-failed'/.test(code)
+const usesFallbackVar = /REBUILD_FAIL_KEY\[(?!res\.reason\s*\?\?)[^\]]+\]/.test(code)
+if (fallbackAssign && usesFallbackVar)
+  ok('reason 缺失时仍有 add-failed 兜底', "res.reason ?? 'add-failed' → REBUILD_FAIL_KEY[reason]")
+else
+  bad(
+    'reason 兜底丢失',
+    `赋值处=${fallbackAssign}，取表处=${usesFallbackVar}（协议里 ok:false 必带 reason，但界面仍需闭合类型）`
+  )
 
 /*
  * 核心反例：`res.message ?? t(...)`。这个写法下 `t(...)` 永远不执行，
@@ -78,10 +93,23 @@ console.log('\n== 2. 技术型两条的 message 确实进了渲染（方案 C �
  * 方案 C 的取舍：`add-failed`（Git stderr）与 `verify-failed`（逐项不符清单）的原始报错
  * 是排查唯一线索，必须作为第二行显示。只验证词条取用会漏掉这一半 —— 那等于把 C 做成了「B」。
  */
-const keepsMatch = code.match(/REBUILD_FAIL_KEEPS_DETAIL[\s\S]{0,400}?\]\)/)
-if (!keepsMatch) bad('找不到 REBUILD_FAIL_KEEPS_DETAIL 集合', '技术型的判据无处可查')
+/*
+ * 集合体的定位原来用 `REBUILD_FAIL_KEEPS_DETAIL[\s\S]{0,400}?\]\)` 跨行抓 —— 400 字符足够
+ * 从**注释里**那句 `见 REBUILD_FAIL_KEEPS_DETAIL` 一路吞到别处的 `])`，于是集合被清空、
+ * 或定义被删掉时仍可能命中一段无关文本。改为按方括号配平取真实集合体。
+ */
+const keepsAt = code.indexOf('REBUILD_FAIL_KEEPS_DETAIL = new Set')
+/*
+ * 定位集合体的 `[` 时不能直接 `indexOf('[')` —— 类型参数里先有
+ * `NonNullable<WorktreeRebuildResult['reason']>`，那个 `['reason']` 会先被找到，
+ * 配平出来只有 `['reason']`，于是集合里写了什么都查不到（会误报两条 FAIL）。
+ * 找构造函数实参的起点 `([` 才准。
+ */
+const bracketAt = keepsAt === -1 ? -1 : code.indexOf('([', keepsAt) + 1
+const keepsBody = keepsAt === -1 || bracketAt === 0 ? null : sliceBracket(code, bracketAt)
+if (keepsBody === null) bad('找不到 REBUILD_FAIL_KEEPS_DETAIL 集合', '技术型的判据无处可查')
 else {
-  const body = keepsMatch[0]
+  const body = keepsBody
   for (const r of ['add-failed', 'verify-failed']) {
     if (body.includes(`'${r}'`)) ok(`${r} 的 message 会作为第二行显示`, `在 KEEPS_DETAIL 里`)
     else bad(`${r} 的 message 被丢掉`, '技术细节与词条不重叠，必须保留原文')
@@ -115,12 +143,30 @@ for (const [key, ph, field] of PLACEHOLDERS) {
   if (hits.length < 2) bad(`${key} 词条数不足`, `只有 ${hits.length} 处，应 zh + en 两处`)
   else if (!hits.every((s) => s.includes(ph))) bad(`${key} 占位符不全`, `不是每处都含 ${ph}`)
   else ok(`${key} 中英都带 ${ph}`, '2 处')
-  // 渲染：必须真的替换，且替换要**挂在词条取值上**（同一段表达式里）。
-  // 只查「文件里有 .replace('{path}', view.path)」会漏掉「写了但没接上」——
-  // 实测把 `.replace(...)` 从 `t(...)` 后面摘掉，那种查法仍然全绿。
-  const chainRe = new RegExp(`t\\(REBUILD_FAIL_KEY\\[[^\\]]*\\]\\)([\\s\\S]{0,160}?)\\.replace\\('${ph}',\\s*view\\.${field}\\)`)
-  if (chainRe.test(code)) ok(`${key} 的 ${ph} 被 view.${field} 填充`, '挂在同一段链式调用上，不会漏出空括号')
-  else bad(`${key} 的 ${ph} 没有被填充`, `词条取值后面没有接 .replace('${ph}', view.${field})，会漏出「…（${ph}）」`)
+  /*
+   * 渲染：必须真的替换，且替换要**挂在词条取值上**（同一段表达式里）。
+   *
+   * 原来用 `t\(REBUILD_FAIL_KEY\[[^\]]*\]\)([\s\S]{0,160}?)\.replace\('{path}',\s*view\.path\)`
+   * 跨行抓 —— 160 字符够跨过整条 toast.show({...})，落到另一个与词条无关的 `.replace` 上。
+   * 改为：定位含 `REBUILD_FAIL_KEY[` 取词条的那一行，从该行起按语句边界（到下一个 `toast.show`
+   * 或分号）取这段，断言 `.replace('{path}', view.path)` 在**同一段**里。
+   */
+  const takeAt = code.indexOf('t(REBUILD_FAIL_KEY[')
+  let chain = null
+  if (takeAt !== -1) {
+    const stop = code.indexOf('toast.show', takeAt)
+    chain = code.slice(takeAt, stop === -1 ? takeAt + 400 : stop)
+  }
+  const filled =
+    chain !== null && chain.includes(`.replace('${ph}', view.${field})`) && /t\(REBUILD_FAIL_KEY\[/.test(chain)
+  if (filled) ok(`${key} 的 ${ph} 被 view.${field} 填充`, '挂在词条取值同一段链式调用上，不会漏出空括号')
+  else
+    bad(
+      `${key} 的 ${ph} 没有被填充`,
+      chain === null
+        ? '找不到 t(REBUILD_FAIL_KEY[...]) 取词条处'
+        : `取词条之后没有接 .replace('${ph}', view.${field})，会漏出「…（${ph}）」`
+    )
 }
 
 console.log('\n== 4. 六条词条 zh + en 齐全 ==')

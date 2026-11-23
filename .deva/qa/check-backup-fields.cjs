@@ -30,11 +30,19 @@ const bad = (n, d) => {
   console.log(`  FAIL ${n}${d ? ` :: ${d}` : ''}`)
 }
 
-const pane = fs.readFileSync(PANE, 'utf8')
+const paneRaw = fs.readFileSync(PANE, 'utf8')
 const i18n = fs.readFileSync(I18N, 'utf8')
 
-/** 去掉注释，避免"注释里提到了所以判过"。 */
-const code = pane.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '')
+/**
+ * 去掉注释，避免「注释里提到了所以判过」。
+ *
+ * 原来用的是一条裸正则直接剥块注释与行注释，其中剥行注释那条会把**字符串里的双斜杠**
+ * 一起削掉（URL 变成残缺前缀），实测这个文件因此被削掉 3210 字符。削错的地方未必报红，
+ * 反而可能让断言在残缺文本上意外命中。改用共用实现
+ * （`lib/strip-comments.cjs`，走状态机、保护字符串字面量）。
+ */
+const { stripComments } = require('./lib/strip-comments.cjs')
+const code = stripComments(paneRaw)
 
 /*
  * 判据：每个字段都必须真的走到用户眼前。三关，缺一关都不算：

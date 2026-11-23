@@ -194,15 +194,29 @@ async function main() {
    * 这条不能替代运行时判据（改坏 sync 之外的东西它发现不了），但它是唯一能守住这一段的办法。
    */
   {
-    const writerSrc = fs.readFileSync(path.join(SRC, 'main/services/bundle-zip-writer.ts'), 'utf8')
+    /*
+     * 断言看**剥掉注释**的源码（`.deva/qa/lib/strip-comments.cjs`）。
+     *
+     * 这两处都是「某个字符串在源码里出现/不出现」型断言，而它们要守的东西
+     * （`this.fh.sync()` / `new Zip(` / `ZipWriter.create(`）恰恰是修复类注释里
+     * 会原样提到的写法 —— 注释里写「不要用 new Zip，它固定写 descriptor」时，
+     * 只要正则一宽松（或剥注释没做、判断写成跨行窗口），就会出现
+     * 「实现改回了 fflate Zip 也照样绿」。剥注释后注释中的字样不再参与断言。
+     */
+    const { stripComments } = require('./lib/strip-comments.cjs')
+    const writerSrc = stripComments(
+      fs.readFileSync(path.join(SRC, 'main/services/bundle-zip-writer.ts'), 'utf8')
+    )
     const endIdx = writerSrc.indexOf('async end()')
     const body = endIdx >= 0 ? writerSrc.slice(endIdx, writerSrc.indexOf('async abort()', endIdx)) : ''
     const hasSync = /this\.fh\.sync\s*\(\s*\)/.test(body)
     if (hasSync) ok('S0 end() 在关闭前 fsync（静态断言，运行时测不出来）', '找到 this.fh.sync()')
     else bad('S0 end() 在关闭前 fsync（静态断言，运行时测不出来）', '没找到 this.fh.sync()，rename 可能早于落盘')
-    const exportSrc = fs.readFileSync(path.join(SRC, 'main/services/bundle-export.ts'), 'utf8')
+    const exportSrc = stripComments(
+      fs.readFileSync(path.join(SRC, 'main/services/bundle-export.ts'), 'utf8')
+    )
     const usesWriter = /ZipWriter\.create\s*\(/.test(exportSrc) && !/\bnew Zip\s*\(/.test(exportSrc)
-    if (usesWriter) ok('S0b 导出走 ZipWriter，不再用 fflate 的 Zip（它固定写 descriptor）', 'ZipWriter.create 且无 new Zip')
+    if (usesWriter) ok('S0b 导出走 ZipWriter，不再用 fflate 的 Zip（它固定写 descriptor）', 'ZipWriter.create 且（非注释的）无 new Zip')
     else bad('S0b 导出走 ZipWriter，不再用 fflate 的 Zip（它固定写 descriptor）', '仍在用 fflate Zip')
   }
 

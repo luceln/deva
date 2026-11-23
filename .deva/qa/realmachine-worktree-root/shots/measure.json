@@ -1,0 +1,110 @@
+{
+  "light": {
+    "blockRect": {
+      "x": 468.5714416503906,
+      "y": 267.21429443359375,
+      "w": 510.857177734375,
+      "h": 123.71429443359375,
+      "cy": 329.0714416503906
+    },
+    "badgeText": "默认",
+    "badgeRect": {
+      "x": 785.4285888671875,
+      "y": 289.33929443359375,
+      "w": 36.142860412597656,
+      "h": 18.892858505249023,
+      "cy": 298.78572368621826
+    },
+    "badgeColor": "rgb(92, 92, 102)",
+    "pathText": "C:\\Users\\lucel\\AppData\\Local\\Temp\\deva-shot-test2\\deva-home\\worktrees",
+    "pathColor": "rgb(92, 92, 102)",
+    "btnCount": 3,
+    "btnSmHeight": "26px",
+    "btnSmRect": {
+      "x": 829.5714721679688,
+      "y": 285.7857360839844,
+      "w": 62.142860412597656,
+      "h": 26.000001907348633,
+      "cy": 298.7857370376587
+    },
+    "btnLabels": [
+      "更改",
+      "恢复默认",
+      "打开"
+    ],
+    "inputPresent": false,
+    "inputOutline": null,
+    "inputOutlineColor": null,
+    "inputBoxShadow": null,
+    "inputHeight": null,
+    "theme": "light",
+    "bodyBg": "rgb(255, 255, 255)"
+  },
+  "dark": {
+    "theme": "dark",
+    "bodyBg": "rgb(30, 30, 32)",
+    "badgeColor": "rgb(161, 161, 170)",
+    "badgeRect": {
+      "x": 785.4285888671875,
+      "y": 289.33929443359375,
+      "w": 36.142860412597656,
+      "h": 18.892858505249023,
+      "cy": 298.78572368621826
+    },
+    "badgeBg": "rgb(25, 25, 25)",
+    "pathColor": "rgb(161, 161, 170)",
+    "btnSmHeight": "26px",
+    "btnSmRect": {
+      "x": 829.5714721679688,
+      "y": 285.7857360839844,
+      "w": 62.142860412597656,
+      "h": 26.000001907348633,
+      "cy": 298.7857370376587
+    }
+  },
+  "focus": {
+    "focused": true,
+    "outline": "rgb(228, 228, 231) none 0px",
+    "outlineColor": "rgb(228, 228, 231)",
+    "outlineWidth": "0px",
+    "outlineStyle": "none",
+    "boxShadow": "rgba(124, 124, 240, 0.16) 0px 0px 0px 3px",
+    "borderColor": "rgb(124, 124, 240)",
+    "height": "34px",
+    "rect": {
+      "w": 383.4285888671875,
+      "h": 34
+    },
+    "badgeNow": "已修改"
+  },
+  "custom": {
+    "theme": "light",
+    "badgeText": "已修改",
+    "badgeColor": "rgb(91, 91, 214)",
+    "badgeRect": {
+      "x": 774.9285888671875,
+      "y": 289.33929443359375,
+      "w": 46.642860412597656,
+      "h": 18.892858505249023,
+      "cy": 298.78572368621826
+    },
+    "pathText": "C:\\Users\\lucel\\AppData\\Local\\Temp\\deva-shot-test2\\custom-root",
+    "pathColor": "rgb(31, 31, 36)",
+    "btnSmHeight": "26px",
+    "btnSmRect": {
+      "x": 829.5714721679688,
+      "y": 285.7857360839844,
+      "w": 62.142860412597656,
+      "h": 26.000001907348633,
+      "cy": 298.7857370376587
+    },
+    "blockRect": {
+      "x": 468.5714416503906,
+      "y": 267.21429443359375,
+      "w": 510.857177734375,
+      "h": 113.71429443359375,
+      "cy": 324.0714416503906
+    },
+    "resetDisabled": false
+  }
+}

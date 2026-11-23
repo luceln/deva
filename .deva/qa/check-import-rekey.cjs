@@ -25,7 +25,16 @@ const PANE = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redes
 const { readI18n, checkKeys } = require('./lib/i18n-source.cjs')
 const CSS = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'redesign.css')
 
-const pane = fs.readFileSync(PANE, 'utf8')
+const paneRaw = fs.readFileSync(PANE, 'utf8')
+/*
+ * 断言只看**剥掉注释**的源码（`.deva/qa/lib/strip-comments.cjs`）。
+ *
+ * 这个文件的注释里写着「`res.message ?? t(...)` 永远不执行」「不得出现 unrecoverable
+ * 混进失败计数」等句子 —— 全是断言要查的关键词。不剥注释时，一条跨行宽松正则
+ * 就能从注释里命中，把已经改错的实现判成绿。
+ */
+const { stripComments, sliceBraced } = require('./lib/strip-comments.cjs')
+const pane = stripComments(paneRaw)
 const i18n = readI18n()
 const css = fs.readFileSync(CSS, 'utf8')
 
@@ -40,12 +49,27 @@ const css = fs.readFileSync(CSS, 'utf8')
     : bad('A1 界面渲染了 unrecoverable', '没找到 <UnrecoverableNotice keys={...unrecoverable} />')
 }
 {
-  // 不得把 unrecoverable 混进 failureTotal / failure 清单（那会让标题变成「导入完成，但有 N 条失败」）
-  const bad1 = /failureTotal[\s\S]{0,200}unrecoverable/.test(pane)
-  const bad2 = /allFailures[\s\S]{0,300}unrecoverable/.test(pane)
-  !bad1 && !bad2
-    ? ok('A2 unrecoverable 没有混进失败计数 / 失败清单')
-    : bad('A2 unrecoverable 没有混进失败计数', '出现了 unrecoverable → failures 的关联')
+  /*
+   * A2：unrecoverable 不得混进失败计数 / 失败清单。
+   *
+   * 原实现是两条跨行宽松正则（`[\s\S]{0,200}` / `{0,300}`）用 `!bad1 && !bad2` 兜——
+   * 它们能从 `failureTotal` 一路吞到 200/300 字符之后的任何 `unrecoverable`，
+   * 于是「两者只是碰巧挨得近」也算缺陷（假红），而**真正**把 unrecoverable 加进
+   * 失败集合的写法（在不同行、距离更远）反而漏掉。
+   *
+   * 改为按语义查：不许出现 `[...unrecoverable]` 参与失败聚合的形状，也不许
+   * `unrecoverable.length` 出现在失败总数表达式里。逐行查，不跨行。
+   */
+  const codeLines = pane.split('\n')
+  const badLines = codeLines.filter((l) => {
+    const t = l.trim()
+    if (!t.includes('unrecoverable')) return false
+    // 与失败聚合直接相连：同一行里既提到 unrecoverable，又提到失败计数/清单
+    return /failureTotal|allFailures|\bfailed\b|failures\s*\./.test(t)
+  })
+  badLines.length === 0
+    ? ok('A2 unrecoverable 没有混进失败计数 / 失败清单', '逐行检查，无同行混用')
+    : bad('A2 unrecoverable 没有混进失败计数', `这些行同时出现两者：${badLines.map((l) => l.trim().slice(0, 90)).join(' | ')}`)
 }
 {
   // 警告面板用 cf-imp__warn 这一套（警示色），不用失败清单那套（cf-imp__fails，危险色）
@@ -61,9 +85,29 @@ const css = fs.readFileSync(CSS, 'utf8')
     : bad('A4 「去设置 › 模型」按钮', `按钮=${hasBtn} bus=${usesBus}`)
 }
 {
-  // 逐条列出 key 名（不是只报数字）
-  const listsKeys = /keys\.map\(/.test(pane) || /shown\.map\(/.test(pane)
-  listsKeys ? ok('A5 逐条列出要重填的 key 名') : bad('A5 逐条列出 key 名', '没有对 keys 的 map 渲染')
+  /*
+   * A5：逐条列出 key 名（不是只报数字）。
+   *
+   * 原写法 `/keys\.map\(/.test(pane) || /shown\.map\(/.test(pane)` 是典型 `||` 兜底：
+   * 两个候选只要有一个在就判过。它还有第二个毛病 —— `keys.map(` 这类泛化写法在别的
+   * 列表里也可能出现，于是「真正那条渲染被删了、但别处恰好有个 keys.map」仍然绿。
+   *
+   * 真正承载渲染的是 `UnrecoverableNotice` 组件**定义**（调用点只传 props），
+   * 所以在这里取该函数体（剥注释后），断言块内对 shown/keys 做了 map。
+   */
+  const defAt = pane.indexOf('function UnrecoverableNotice')
+  /*
+   * 不能直接取 `defAt` 之后的第一个 `{` —— 那里是参数解构 `({ keys })`，
+   * 配平出来只有 `{ keys }`，会误报「函数体里没有 map」。
+   * 先跨过参数列表的右括号，再取第一个 `{` 才是函数体。
+   */
+  const parenAt = defAt === -1 ? -1 : pane.indexOf(')', defAt)
+  const bodyStart = parenAt === -1 ? -1 : pane.indexOf('{', parenAt)
+  const body = bodyStart === -1 ? null : sliceBraced(pane, bodyStart)
+  const mapsKeys = body !== null && /\b(keys|shown)\s*\.map\s*\(/.test(body)
+  if (body === null) bad('A5 逐条列出 key 名', '没找到 UnrecoverableNotice 函数体')
+  else if (!mapsKeys) bad('A5 逐条列出 key 名', `函数体内没有对 keys/shown 的 map：${body.replace(/\s+/g, ' ').slice(0, 140)}`)
+  else ok('A5 逐条列出要重填的 key 名', 'UnrecoverableNotice 体内对 keys/shown 做了 map')
 }
 {
   // 条数很多时折叠，不把面板撑爆
@@ -83,8 +127,16 @@ const css = fs.readFileSync(CSS, 'utf8')
    * （原实现扫 `messages.ts` 文本，词条搬走后会误判为「已移除」——正好把这条检查变成假 PASS。）
    */
   const inPane = /secrets-rekey-failed/.test(pane)
-  const inI18n = i18n.locales.filter((loc) => Object.hasOwn(i18n.entry('settings.import.secretGroup.secretsRekeyFailed') ?? {}, loc)
-    || /secrets-rekey-failed/.test(Object.keys(i18n.locale(loc)).join(',')))
+  /*
+   * 词条侧两个来源都查（结构化 entry + 扁平 key 列表），任一命中即算残留。
+   * 原写法把 `||` 写在 filter 回调里、跨两行，既难读又容易被当成「兜底正则」——
+   * 这里拆成两个具名条件，语义不变但可核对。
+   */
+  const inI18n = i18n.locales.filter((loc) => {
+    const byEntry = Object.hasOwn(i18n.entry('settings.import.secretGroup.secretsRekeyFailed') ?? {}, loc)
+    const byFlatKey = Object.keys(i18n.locale(loc)).some((k) => k.includes('secrets-rekey-failed'))
+    return byEntry || byFlatKey
+  })
   const stale = inPane || inI18n.length > 0
   !stale
     ? ok('A8 不再引用已移除的 reason secrets-rekey-failed')
@@ -103,9 +155,27 @@ const css = fs.readFileSync(CSS, 'utf8')
   else ok('A9 unrecoverable 词条中英各一套', `${i18n.locales.join('/')} 各一套`)
 }
 {
-  // 字号只用 12px / 13px（规范），不引入 11.5/12.5
-  const badPx = /\.cf-imp__warn[\s\S]{0,600}font-size:\s*1[12]\.5px/.test(css)
-  !badPx ? ok('A10 新增样式字号合规（无 11.5 / 12.5px）') : bad('A10 字号', '出现 11.5/12.5px')
+  /*
+   * 字号只用 12px / 13px（规范），不引入 11.5/12.5。
+   *
+   * 原写法 `/\.cf-imp__warn[\s\S]{0,600}font-size:\s*1[12]\.5px/` 跨行吞 600 字符 ——
+   * 足够从 `.cf-imp__warn` 一路吞到**下一条规则**里，于是警告面板自己字号合规、隔壁
+   * 某条写了 12.5px 也会被判成「警告面板违规」（假红）；反之若警告面板真写了 12.5px
+   * 但排在 600 字符之后，又查不到（假绿）。
+   *
+   * 改为取该选择器的**规则块**（到配对的 `}`），只在块内查字号。
+   */
+  const selAt = css.indexOf('.cf-imp__warn')
+  const braceAt = selAt === -1 ? -1 : css.indexOf('{', selAt)
+  let ruleBody = null
+  if (braceAt !== -1) {
+    const end = css.indexOf('}', braceAt)
+    ruleBody = end === -1 ? null : css.slice(braceAt, end + 1)
+  }
+  const badPx = ruleBody !== null && /font-size:\s*1[12]\.5px/.test(ruleBody)
+  if (ruleBody === null) bad('A10 字号', '找不到 .cf-imp__warn 规则块')
+  else if (badPx) bad('A10 字号', `出现 11.5/12.5px：${ruleBody.replace(/\s+/g, ' ').slice(0, 100)}`)
+  else ok('A10 新增样式字号合规（无 11.5 / 12.5px）', '.cf-imp__warn 规则块内')
 }
 
 // ── B. 运行时：驱动真实的 secretsRow ────────────────────────────────

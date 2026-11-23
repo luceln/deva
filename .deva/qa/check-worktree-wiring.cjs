@@ -36,8 +36,17 @@ const REPO = path.resolve(__dirname, '..', '..')
 const PANE = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'redesign', 'WorktreePane.tsx')
 const FORK = path.join(REPO, 'apps', 'desktop', 'src', 'renderer', 'src', 'i18n', 'fork.ts')
 
-const pane = fs.readFileSync(PANE, 'utf8')
-const fork = fs.readFileSync(FORK, 'utf8')
+const { stripComments, sliceBraced } = require('./lib/strip-comments.cjs')
+
+/*
+ * 断言一律看**剥掉注释**的源码。
+ *
+ * 这个脚本查的都是「某个调用/属性在不在」，而这个文件的头注释里就写满了
+ * `onNotWired('rebuild')`、`deleteBranch`、`trustRoot(targetPath)` 这些要查的字样 ——
+ * 不剥注释时，把真实调用删掉、只留一句注释也照样 PASS（和备份页那个假绿同源）。
+ */
+const pane = stripComments(fs.readFileSync(PANE, 'utf8'))
+const fork = stripComments(fs.readFileSync(FORK, 'utf8'))
 
 let fails = 0
 const pass = (name, detail) => console.log(`  PASS ${name}${detail ? ` :: ${detail}` : ''}`)
@@ -85,9 +94,18 @@ for (const [name, re, fn] of [
 // 为什么不是「不许出现 deleteBranch」：remove 的默认语义是删整个工作区（`deleteBranch !== false`），
 // 漏传等于删分支。所以判据必须是「显式传了 false」，缺席本身就是失败。
 {
-  const m = pane.match(/const prune = async \(\): Promise<void> => \{[\s\S]*?\n  \}/)
+  /*
+   * 原写法 `/const prune = async \(\): Promise<void> => \{[\s\S]*?\n  \}/` 靠「行首两个空格 +
+   * 闭合花括号」收口 —— 函数里只要有任意一行的缩进恰好是两个空格再跟 `}`（比如内层的
+   * 箭头函数末端），截取就会提前结束，于是 `deleteBranch: false` 写在后面也查不到（假红）；
+   * 反过来若截取范围偏大吞到别的函数，又会把那里的 `deleteBranch: false` 算进来（假绿）。
+   * 改为按花括号配平取函数体。
+   */
+  const pruneAt = pane.indexOf('const prune = async')
+  const pruneBrace = pruneAt === -1 ? -1 : pane.indexOf('{', pane.indexOf('=>', pruneAt))
+  const m = pruneBrace === -1 ? null : sliceBraced(pane, pruneBrace)
   if (!m) fail('R4 prune 显式传 deleteBranch: false', '找不到 prune 函数体')
-  else if (/deleteBranch:\s*false/.test(m[0])) pass('R4 prune 显式传 deleteBranch: false', '分支保留')
+  else if (/deleteBranch:\s*false/.test(m)) pass('R4 prune 显式传 deleteBranch: false', '分支保留')
   else fail('R4 prune 显式传 deleteBranch: false', '未显式传 false —— remove 默认会连分支一起删')
 }
 
@@ -164,7 +182,10 @@ for (const [name, re] of [
 
 // R10：reveal 失败必须报出来（通道不抛错，只回 ok:false，吞掉就是「点了没反应」）
 {
-  const m = pane.match(/const revealTarget = async[\s\S]*?\n  \}/)?.[0] ?? ''
+  /* 同上：按花括号配平取 revealTarget 函数体，不用「\n  }」收口。 */
+  const revealAt = pane.indexOf('const revealTarget')
+  const revealBrace = revealAt === -1 ? -1 : pane.indexOf('{', revealAt)
+  const m = revealBrace === -1 ? '' : sliceBraced(pane, revealBrace)
   if (!m) fail('R10 reveal 失败有提示', '找不到 revealTarget')
   else if (/if \(!res\.ok\)/.test(m) && /toast\.show/.test(m)) pass('R10 reveal 失败有提示', 'ok:false 时报错')
   else fail('R10 reveal 失败有提示', 'ok:false 时没有提示 —— 静默失败')
@@ -172,8 +193,13 @@ for (const [name, re] of [
 
 // R11：主进程两处都 trustRoot(targetPath)，否则 reveal 一律返回 ok:false
 {
-  const merge = fs.readFileSync(path.join(REPO, 'apps/desktop/src/main/services/worktree/merge.ts'), 'utf8')
-  const list = fs.readFileSync(path.join(REPO, 'apps/desktop/src/main/services/worktree/list.ts'), 'utf8')
+  /* 这两个文件也剥注释：`trustRoot(targetPath)` 在修复类注释里会被原样提到。 */
+  const merge = stripComments(
+    fs.readFileSync(path.join(REPO, 'apps/desktop/src/main/services/worktree/merge.ts'), 'utf8')
+  )
+  const list = stripComments(
+    fs.readFileSync(path.join(REPO, 'apps/desktop/src/main/services/worktree/list.ts'), 'utf8')
+  )
   const inMerge = /trustRoot\(targetPath\)/.test(merge)
   const inList = /trustRoot\(targetPath\)/.test(list)
   if (inMerge && inList) pass('R11 targetPath 在主进程两处 trustRoot', 'merge + list')

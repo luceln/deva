@@ -167,30 +167,59 @@ async function main() {
   })
 
   // ── S7 / S8 / S9：静态部分（订阅真的接了、没有在回调里重拉、两个都清理）──
-  const src = fs.readFileSync(STORE, 'utf8')
+  /*
+   * 断言只看**剥掉注释**的源码（`.deva/qa/lib/strip-comments.cjs`）。
+   *
+   * 这个文件的头注释里就写着「上一轮踩过的坑（注释里也写着 onSize）还能让
+   * 『字符串存在』型判据照样绿」—— 可它自己原来也没剥注释：`src` 是原始文本，
+   * 于是 S7 的 `/window\.deva\.worktree\.onSize\s*\(/` 能从注释里命中。
+   * 实测：把真实订阅整句删掉、只在注释里留一句 `window.deva.worktree.onSize(...)`，
+   * 原判据仍然 9 PASS。剥注释后立刻变红。
+   */
+  const srcRaw = fs.readFileSync(STORE, 'utf8')
+  const { stripComments, sliceBraced } = require('./lib/strip-comments.cjs')
+  const src = stripComments(srcRaw)
+
+  /** 取 onSize 订阅的回调体：先定位调用，再跨过参数列表取函数体并按花括号配平。 */
+  function onSizeBody() {
+    const m = /window\.deva\.worktree\.onSize\s*\(\s*\(/.exec(src)
+    if (!m) return null
+    const parenClose = src.indexOf(')', m.index + m[0].length)
+    const braceAt = src.indexOf('{', parenClose === -1 ? m.index : parenClose)
+    return braceAt === -1 ? null : sliceBraced(src, braceAt)
+  }
 
   check('S7 store 订阅了 onSize 且走 applySizeUpdate', () => {
     // 必须出现 `worktree.onSize(` 调用（不是注释里的字样）：要求前面有 `window.deva.worktree.`
-    assert(/window\.deva\.worktree\.onSize\s*\(/.test(src), '没有 window.deva.worktree.onSize(...) 订阅')
+    assert(/window\.deva\.worktree\.onSize\s*\(/.test(src), '没有 window.deva.worktree.onSize(...) 订阅（注释里的不算）')
     // 回调体里必须调用 applySizeUpdate（不能自己另写一套更新逻辑）
-    const m = src.match(/window\.deva\.worktree\.onSize\s*\(\s*\(([^)]*)\)\s*=>\s*\{([\s\S]{0,400}?)\n\s*\}\)/)
-    assert(m, '没能定位 onSize 回调体')
-    assert(/applySizeUpdate\s*\(/.test(m[2]), `onSize 回调里没有 applySizeUpdate：${m[2].trim().slice(0, 120)}`)
+    const body = onSizeBody()
+    assert(body, '没能定位 onSize 回调体')
+    assert(/applySizeUpdate\s*\(/.test(body), `onSize 回调里没有 applySizeUpdate：${body.trim().slice(0, 120)}`)
   })
 
   check('S8 onSize 回调里没有触发 refresh（否则增量省下的时间全还回去）', () => {
-    const m = src.match(/window\.deva\.worktree\.onSize\s*\(\s*\(([^)]*)\)\s*=>\s*\{([\s\S]{0,400}?)\n\s*\}\)/)
-    assert(m, '没能定位 onSize 回调体')
-    assert(!/refresh\s*\(/.test(m[2]), `onSize 回调里调了 refresh：${m[2].trim().slice(0, 120)}`)
+    const body = onSizeBody()
+    assert(body, '没能定位 onSize 回调体')
+    assert(!/refresh\s*\(/.test(body), `onSize 回调里调了 refresh：${body.trim().slice(0, 120)}`)
   })
 
   check('S9 两个订阅都在 cleanup 里取消（无泄漏）', () => {
     assert(/offChanged\(\)/.test(src), 'cleanup 里没有 offChanged()')
     assert(/offSize\(\)/.test(src), 'cleanup 里没有 offSize()')
-    // 两个取消调用必须在同一个 return () => {...} 里
-    const cl = src.match(/return \(\) => \{([\s\S]{0,300}?)\}/)
+    /*
+     * 两个取消必须在**同一个** return () => {...} 里。
+     * 原来用 `[\s\S]{0,300}?` 抓 cleanup —— 300 字符能跨过这个 cleanup 落到下一个函数去，
+     * 于是「offSize 写在别的 effect 里」也算过。改为按花括号配平取函数体。
+     */
+    const at = src.indexOf('return () =>')
+    const braceAt = at === -1 ? -1 : src.indexOf('{', at)
+    const cl = braceAt === -1 ? null : sliceBraced(src, braceAt)
     assert(cl, '没找到 cleanup 函数')
-    assert(/offChanged\(\)/.test(cl[1]) && /offSize\(\)/.test(cl[1]), '两个取消不在同一个 cleanup 里')
+    assert(
+      /offChanged\(\)/.test(cl) && /offSize\(\)/.test(cl),
+      `两个取消不在同一个 cleanup 里：${cl.trim().slice(0, 160)}`
+    )
   })
 
   report()
