@@ -10,6 +10,16 @@
 | [worktree 根目录自定义](implemented/2026-11-23-worktree-root-custom.md) | 根可设、创建限根内、删除不删根外、老记录放行并标注 | `worktree/root-setting.ts`、`precheck.ts:232` `path-outside-root`、`e84e564` + `cda8759` |
 | [模型失效 UI 恢复](implemented/2026-11-18-model-swap-ui-restore.md) | 上游重写模型面板后，把失效标红 + 批量替换接回 `ModelPanel.tsx` | `ModelPanel.tsx:13-22,113-120`、`ModelSwapDialog` 已挂载 |
 | [导入功能提交拆分](implemented/2026-11-18-import-commit-plan.md) | 按小步原则把导入功能拆成 6 个可独立回退的提交 | `importer-source-dir.ts`、`importer-target.ts`、`invalidateIndexOnly()`、`copyFileFresh` |
+| [判据被注释骗过](implemented/2026-11-23-qa-comment-trap.md) | 正则断言先剥注释再匹配；元判据三态查假绿；`\|\|` 兜底本身是假绿来源 | `.deva/qa/lib/strip-comments.cjs`、`.deva/qa/check-qa-no-comment-trap.cjs`（15 脚本 45 PASS） |
+| [查重只拦新增](implemented/2026-11-23-duplication-gate.md) | jscpd baseline 拦新克隆；**`exitCode:1` 会让 `--fail-on-new-clones` 失效** | `.jscpd.json`（无 exitCode）、`.jscpd-baseline.json`（41 指纹）、`check-duplication.cjs`、`pnpm check:dup` |
+| [项目说明沿目录链注入](implemented/2026-11-23-project-doc-chain.md) | 向下扫 6 层、64KiB 预算、超限整份丢弃最宽的；单份注入逐字节不变 | `project-doc.ts` 的 `loadProjectDocChain` / `budgetProjectDocChain`、`check-project-doc-chain.cjs`（30 PASS） |
+
+## rejected —— 讨论过，决定不做（别再重提）
+
+| note | 否了什么 | 什么时候才该重看 |
+|---|---|---|
+| [不做代码符号索引](rejected/2026-11-23-code-symbol-index.md) | 不上 tree-sitter / ast-grep / repomap；dsh 11 万行也不做 | 单文件 1500 行变普遍，或 `AGENTS.md` 能力表涨到 30 行以上 |
+| [不做动态补读目录说明](rejected/2026-11-23-project-doc-dynamic-read.md) | 不接 `touchedPaths` 到 `agent-loop.ts`；当前 +3.3k token 可接受 | 预算开始被触发（出现「因超预算未注入」） |
 
 ## proposed —— 还没（完全）落地
 
@@ -38,7 +48,8 @@
 
 ## 怎么新增一条
 
-1. 先在 `implemented/` 与 `proposed/` 搜同一主题的旧 note
+1. 先在 `implemented/`、`proposed/`、`rejected/` 搜同一主题的旧 note
 2. 有完全取代 → 旧 note 移进 `archived/` 并加一行头部说明（正文不改）
 3. 有部分取代 → 旧 note 留原处，两边互相链接
-4. 写完更新本索引
+4. 决定**不做**的写进 `rejected/`，并写明「什么情况下该重新评估」——不是永远钉死
+5. 写完更新本索引
