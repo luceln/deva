@@ -1,5 +1,5 @@
 import { join } from 'path'
-import { getConfig, setConfigDetailed, type ConfigWriteResult } from '../config'
+import { setConfigDetailed, type ConfigWriteResult } from '../config'
 import { listRecords } from './store'
 import type { WorktreeRootSetResult, WorktreeRootView } from '../../../shared/worktree-protocol'
 import {
@@ -9,7 +9,8 @@ import {
   isInsideRepo,
   normalizeWorktreePath,
   repoKeyOf,
-  worktreeRoot
+  worktreeRoot,
+  worktreeRootView
 } from './paths'
 
 /**
@@ -173,11 +174,11 @@ function writeFailureText(res: ConfigWriteResult): string {
   return '配置写入失败（磁盘满或被占用），根目录没有改动。'
 }
 
-/** 只读：当前生效的根 + 是否默认。界面用它渲染设置项（需求 §9.2「若是默认要明确写默认」）。 */
+/** 只读：当前生效的根 + 默认根 + 是否默认。界面用它渲染设置项（需求 §9.2「若是默认要明确写默认」）。 */
 export function readWorktreeRoot(): WorktreeRootView {
-  const root = worktreeRoot()
-  // 与 `worktreeRoot()` 同一判据：非空字符串才算用户设定
-  const v = getConfig()[WORKTREE_ROOT_KEY]
-  const isDefault = !(typeof v === 'string' && v.trim() !== '')
-  return { root, isDefault }
+  /*
+   * 三个值来自 `paths.ts` 的同一次调用（`worktreeRootView()`），不再各自算一遍：
+   * 分开算时若中途 `DEVA_HOME` 或配置变了，会出现「当前 X / 默认 Y」互相矛盾。
+   */
+  return worktreeRootView()
 }

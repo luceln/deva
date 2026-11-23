@@ -15,6 +15,7 @@ import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
 import { useDialog } from '../components/DialogProvider'
 import { MergePanel } from './MergePanel'
+import { WorktreeRootSetting } from './WorktreeRootSetting'
 import { useWorktree } from '../store/worktree'
 import type {
   MergeBlocker,
@@ -181,6 +182,9 @@ export function WorktreePane(): React.JSX.Element {
           {t('cf.wt.refresh')}
         </button>
       </div>
+
+      {/* 根目录设置：放标题之后、列表之前 —— 它决定「列表里的目录在哪」，先于列表出现才对 */}
+      <WorktreeRootSetting />
 
       {error && (
         <div className="cf-wt__err" role="alert">

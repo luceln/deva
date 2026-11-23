@@ -496,6 +496,14 @@ export interface WorktreeRootView {
   root: string
   /** `config.json` 里没有该键 → 跟随 `DEVA_HOME`。 */
   isDefault: boolean
+  /**
+   * 默认根（已归一化），即 `<DEVA_HOME>/worktrees`。
+   *
+   * 界面要显示「当前生效」与「默认值是 X」，所以这里把默认值一并给出来 ——
+   * 渲染层**不能**自己写死 `~/.deva-plus/worktrees`：用户设过 `DEVA_HOME` 之后那个字符串就是错的。
+   * 取值与 `root` 来自同一次 `defaultWorktreeRoot()` 调用，不会出现两者互相矛盾的情况。
+   */
+  defaultRoot: string
 }
 
 /**
