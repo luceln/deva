@@ -10,6 +10,7 @@ const fs = require('fs')
 const path = require('path')
 
 const ROOT = path.resolve(__dirname, '../..')
+const DESIGN_DIR = path.join(ROOT, '.deva/design')
 const CSS_FILES = [
   'apps/desktop/src/renderer/src/styles/tokens.css',
   'apps/desktop/src/renderer/src/styles/app.css',
@@ -42,12 +43,29 @@ const css = CSS_FILES.map(f => {
 const DEFINED = new Set()
 for (const m of css.matchAll(/\.([a-zA-Z][\w-]*)/g)) DEFINED.add(m[1])
 
-const protos = fs.readdirSync(path.join(ROOT, '.deva/design'))
-  .filter(f => f.endsWith('.html') && !f.startsWith('_'))
+const protos = fs.existsSync(DESIGN_DIR)
+  ? fs.readdirSync(DESIGN_DIR).filter(f => f.endsWith('.html') && !f.startsWith('_'))
+  : []
+
+if (!fs.existsSync(DESIGN_DIR)) {
+  /*
+   * `.deva/design/` 被 `.gitignore` 忽略（`design/`），CI 检出后整目录不存在。
+   *
+   * 不能静默 exit 0：那会让人以为「检查过了、是全绿」，实际一条断言都没跑。
+   * 也不能报 FAIL：崩在 ENOENT 上看起来像判据坏了或实现写错了，而实际上判据里
+   * 根本没有可检查的对象。按 `.deva/qa/AGENTS.md` 的规定显式 SKIP。
+   */
+  console.log('==SKIP== 本判据未执行（不计入通过，也不是失败）')
+  console.log(`  判据对象不在此处：${path.relative(ROOT, DESIGN_DIR)}（被 .gitignore 的 design/ 规则忽略）`)
+  console.log('  原型稿属本机草稿区，不入库；CI 检出后没有可检查的 HTML。')
+  console.log('  本机写过原型时它会自动生效；在此之前它一条断言都没跑。')
+  console.log('  → 退出码 0，但请把它当作「没跑」，不要当作「全绿」。')
+  process.exit(0)
+}
 
 let fail = 0
 for (const f of protos) {
-  const src = fs.readFileSync(path.join(ROOT, '.deva/design', f), 'utf8')
+  const src = fs.readFileSync(path.join(DESIGN_DIR, f), 'utf8')
   const used = new Set()
   for (const m of src.matchAll(/class="([^"]+)"/g)) {
     for (const c of m[1].split(/\s+/)) if (c) used.add(c)
