@@ -45,7 +45,7 @@ const { stripComments } = require('./lib/strip-comments.cjs')
  * `useChatState()` 反例）在修复类注释里会原样出现 —— 头注释就在讲「bf30126 revert 掉了
  * 协议字段」「不要再读当前选中会话」。不剥注释时，把实现删掉、只留注释也照样 PASS。
  */
-const dialog = stripComments(fs.readFileSync(DIALOG, 'utf8'))
+const dialog = fs.existsSync(DIALOG) ? stripComments(fs.readFileSync(DIALOG, 'utf8')) : ''
 const preload = stripComments(fs.readFileSync(PRELOAD, 'utf8'))
 const i18n = fs.readFileSync(I18N, 'utf8')
 
@@ -67,11 +67,23 @@ const i18n = fs.readFileSync(I18N, 'utf8')
     'memberWorktreeReturnOriginal'
   ]
   const present = bridges.filter((b) => new RegExp(`\\b${b}\\b`).test(preload))
-  if (present.length === 0) {
+  /*
+   * 两个条件任一成立就算「功能不在此分支」：
+   *
+   * ① preload 里 4 个桥一个都没有 —— 功能整体被 revert 掉了
+   * ② 主文件 `MemberWorktreeDialog.tsx` 本身不存在 —— 桥可能还在（revert 不彻底），
+   *    但判据要读的文件没了，硬跑只会 ENOENT 崩掉、报成一堆假红
+   *
+   * ② 是实测补上的：删掉那个遗留文件后本判据直接抛 `ENOENT` 崩出栈，
+   * 既不是 SKIP 也不是干净的 FAIL，违反了「跳过必须显式打印」的规矩。
+   */
+  const dialogExists = fs.existsSync(DIALOG)
+  if (present.length === 0 || !dialogExists) {
     console.log('\n==SKIP== 本判据未执行（不计入通过，也不是失败）')
     console.log(
-      '  依赖的功能不在此分支：preload 里 4 个 memberWorktree* 桥一个都不在' +
-        '（apps/desktop/src/preload/index.ts）'
+      present.length === 0
+        ? '  依赖的功能不在此分支：preload 里 4 个 memberWorktree* 桥一个都不在（apps/desktop/src/preload/index.ts）'
+        : '  依赖的功能不在此分支：apps/desktop/src/renderer/src/redesign/MemberWorktreeDialog.tsx 不存在'
     )
     console.log('  该功能只在 feat/member-worktree 分支存在（本分支被 bf30126 revert 掉了）。')
     console.log('  合回 feat/member-worktree 后本判据自动生效；在此之前它一条断言都没跑。')
