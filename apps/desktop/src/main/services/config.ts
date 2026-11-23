@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { writeFileAtomic } from './atomic-write'
 import type { ConfigChangedEvent, ConfigSetResult } from '../../shared/config-protocol'
+import { DEVA_HOME_DIRNAME } from '../../shared/brand'
 
 /**
  * 应用配置存储（主进程）。
@@ -27,7 +28,7 @@ let home = ''
 export function getDevaHome(): string {
   if (home) return home
   const override = process.env.DEVA_HOME?.trim()
-  home = override && override.length > 0 ? override : join(app.getPath('home'), '.deva-plus')
+  home = override && override.length > 0 ? override : join(app.getPath('home'), DEVA_HOME_DIRNAME)
   try {
     if (!existsSync(home)) mkdirSync(home, { recursive: true })
   } catch {
@@ -202,6 +203,42 @@ export function endConfigHold(): Array<Record<string, unknown>> {
 export function getConfig(): Record<string, unknown> {
   ensureLoaded()
   return config
+}
+
+/**
+ * 备份还原专用：让内存态**重新从磁盘载入**。
+ *
+ * 为什么必须有：`ensureLoaded()` 只在本进程首次调用时读一次盘。还原流程是直接往磁盘写
+ * `config.json`，写完之后本进程的 `config` 还是还原前那份 —— 于是「还原了，但当前窗口里
+ * 服务商/模型/角色全是旧的，重启才好」。
+ *
+ * 与 `rereadForWrite()` 的区别：那个是写路径的即时体检（顺带更新内存），且对「文件缺失」有
+ * 「用户主动删除则不复活」的语义。这里是**用户明确要求**把磁盘上的那份接管过来，缺失也允许
+ * （交给下次 `ensureLoaded` 建基线）。
+ */
+export function reloadConfigFromDisk(): { ok: true } | { ok: false; reason: string } {
+  try {
+    const raw = readFileSync(configPath(), 'utf8')
+    const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, reason: 'config.json 顶层不是对象' }
+    }
+    config = parsed as Record<string, unknown>
+    loadKind = 'ok'
+    baselineEstablished = true
+    loaded = true
+    return { ok: true }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code
+    if (code === 'ENOENT') {
+      // 还原包里没有 config.json（不该发生，但真发生了也不能留着一份旧内存态）
+      config = {}
+      loadKind = 'absent'
+      loaded = true
+      return { ok: true }
+    }
+    return { ok: false, reason: `重读配置失败：${(e as Error)?.message ?? e}` }
+  }
 }
 
 /**

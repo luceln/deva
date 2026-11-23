@@ -1,15 +1,16 @@
 import { lstatSync } from 'fs'
 import { dirname, join } from 'path'
-import { getDevaHome } from '../config'
 import { runGitRaw } from '../git'
 import { trustRoot } from '../fs-guard'
 import {
   MAX_PATH_LEN,
   compareKeyOfPath,
   isInsideRepo,
+  isInsideRoot,
   normalizeWorktreePath,
   repoKeyOf,
-  slugifyBranch
+  slugifyBranch,
+  worktreeRoot
 } from './paths'
 import { findRecordByRepo } from './store'
 
@@ -48,6 +49,7 @@ export type PrecheckFailReason =
   | 'path-exists'
   | 'path-too-long'
   | 'path-inside-repo'
+  | 'path-outside-root'
   | 'slug-collision'
   | 'no-git'
   | 'error'
@@ -107,16 +109,20 @@ function nextBranchName(branch: string): string {
 }
 
 /**
- * 按 §6.1 生成工作区路径：`<DEVA_HOME>/worktrees/<repoKey>/<slug>-<shortid>/`。
+ * 按 §6.1 生成工作区路径：`<worktreeRoot>/<repoKey>/<slug>-<shortid>/`。
  *
  * `shortid` 用 `createdAt` 的 base36 后 4 位（§6.3）：它只是**降低碰撞概率**，不承担唯一性——
  * 唯一性由 `compareKey` 与 0.7 的「已存在就拒绝」保证。所以这里不需要随机数，
  * 确定性反而让测试能预测路径。
+ *
+ * **本函数是默认路径的唯一来源**（需求 §7.4）。根从 `worktreeRoot()` 取，缺键时它就是
+ * `<DEVA_HOME>/worktrees`，所以 `DEVA_HOME` 迁移时默认根自动跟着走。
+ * `suggestPath()`（`create.ts`）走 `nextFreeWorktreePath()` → 这里，因此也自动跟着变。
  */
 function defaultWorktreePath(repoRoot: string, slug: string, at = Date.now()): string {
   const repoKey = repoKeyOf(repoRoot)
   const shortid = at.toString(36).slice(-4)
-  return join(getDevaHome(), 'worktrees', repoKey, `${slug}-${shortid}`)
+  return join(worktreeRoot(), repoKey, `${slug}-${shortid}`)
 }
 
 /**
@@ -213,6 +219,19 @@ export async function precheck(req: PrecheckRequest): Promise<PrecheckOk | Prech
     return fail('path-too-long', `路径太长（${norm.path.length} ≥ ${MAX_PATH_LEN}）：${norm.path}`)
   if (isInsideRepo(repoRoot, norm.path))
     return fail('path-inside-repo', `工作区不能放在仓库内：${norm.path}`)
+  /*
+   * ── 0.8b 必须在根内（需求 §7.1 的位置：仓库外之后、已存在之前）──
+   *
+   * 为什么在 `path-inside-repo` 之后：先排除最严重的（仓库内），报错更准确。
+   * 为什么在 `path-exists` 之前：「根外」是比「已存在」更根本的错误 —— 一个根外且刚好重名的路径
+   * 应报 `path-outside-root`，不该让用户以为「换个名字就行」。
+   *
+   * 文案**必须带当前根的实际路径**（需求 §7.3）：`path-inside-repo` 那个错误用户知道仓库在哪，
+   * 这个不告诉他根在哪就没法改。
+   */
+  const root = worktreeRoot()
+  if (!isInsideRoot(root, norm.path))
+    return fail('path-outside-root', `工作区必须建在当前 worktree 根目录内（${root}）：${norm.path}`)
 
   // ── 0.7 目标路径已被占用 → 拒绝（A22：不得覆盖、不得删除；不做「空目录就复用」）──
   const probe = probePath(norm.path)

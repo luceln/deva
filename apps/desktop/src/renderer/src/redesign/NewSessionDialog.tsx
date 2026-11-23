@@ -370,6 +370,13 @@ export function NewSessionDialog({
 
 /** precheck 失败原因 → 文案。未知码原样显示，不吞掉（主进程新增原因时界面仍能显示）。 */
 function precheckMessage(res: WorktreePrecheckFail, t: (k: string) => string): string {
+  /*
+   * `path-outside-root` 优先用主进程的 `message`：那里带着**当前根的实际路径**。
+   *
+   * 为什么这一条特殊：`path-inside-repo` 用户知道仓库在哪，而这个不告诉他根在哪就无从修改。
+   * 若这里用 i18n 文案盖掉 message，根路径就丢了 —— 需求 §7.3 / A6 专门守这一点。
+   */
+  if (res.reason === 'path-outside-root' && res.message) return res.message
   const key = `cf.new.reason.${res.reason}`
   const mapped = t(key)
   const base = mapped === key ? res.reason : mapped

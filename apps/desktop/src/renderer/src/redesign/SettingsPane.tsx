@@ -3,6 +3,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
+  Archive,
   Brain,
   ChevronLeft,
   ChevronRight,
@@ -22,6 +23,7 @@ import {
 } from 'lucide-react'
 import { UpdateSection } from './UpdateSection'
 import { ImportPane } from './ImportPane'
+import { BackupPane } from './BackupPane'
 import { WorktreePane } from './WorktreePane'
 import devaIcon from '../../../../build/icon.svg'
 import type { McpKV, McpServer, McpStatus, Persona, Skill } from '../mock/extensions'
@@ -38,7 +40,7 @@ import { ModelSettings } from '../features/settings/ModelSettings'
 import { clipName, IS_MAC, AvatarStack, Segmented, Toggle } from './shell-common'
 
 /* ============================ 系统设置（Part H） ============================ */
-type SettingsSection = 'general' | 'models' | 'extensions' | 'worktrees' | 'import' | 'about'
+type SettingsSection = 'general' | 'models' | 'extensions' | 'worktrees' | 'import' | 'backup' | 'about'
 
 /** 打开设置时的落点：哪一页，以及（扩展页）直接打开哪一项的详情。 */
 export type SettingsInit = { section?: SettingsSection; ext?: { kind: 'skill' | 'mcp'; id: string } }
@@ -56,6 +58,8 @@ export function Settings({ initial, onClose }: { initial?: SettingsInit; onClose
     { id: 'worktrees', icon: <GitBranch size={15} />, label: t('cf.wt.paneTitle') },
     // 「导入」排在扩展之后、关于之前：是一次性的迁移动作，不放最显眼（日常用不到），也不埋到最后。
     { id: 'import', icon: <Download size={15} />, label: t('settings.import.title') },
+    // 「备份」紧挨着「导入」：两者都是「数据进出」类动作，放在一起用户才能分清导入是补缺、备份是复原。
+    { id: 'backup', icon: <Archive size={15} />, label: t('cf.backup.title') },
     { id: 'about', icon: <Info size={15} />, label: t('settings.about') }
   ]
   return (
@@ -90,6 +94,7 @@ export function Settings({ initial, onClose }: { initial?: SettingsInit; onClose
             {section === 'extensions' && <ExtensionsPane initialOpen={extTarget} />}
             {section === 'worktrees' && <WorktreePane />}
             {section === 'import' && <ImportPane />}
+            {section === 'backup' && <BackupPane />}
             {section === 'about' && <AboutPane />}
           </div>
         </div>

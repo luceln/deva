@@ -5,6 +5,7 @@ import { listWorktrees, type WorktreeEntry } from './git-worktree'
 import { getRecord, upsertRecord } from './store'
 import { withGitLock } from './lock'
 import { normalizeWorktreePath } from './paths'
+import { trustRoot } from '../fs-guard'
 import { publishWorktreeChanged, publishWorktreeProgress } from '../chat-bus'
 import type {
   MergeCheck,
@@ -504,6 +505,13 @@ export async function mergeWorktree(path: string, options: InternalOptions = {})
   const body = async (): Promise<MergeResult> => {
     const entries = await listWorktrees(rec.repoRoot)
     const targetPath = targetPathOf(entries, targetBranch)
+    /*
+     * targetPath 是**目标分支的检出目录**，可能既不是 repoRoot 也不是本 worktree（C4 只保证唯一）。
+     * 失败出口里的「在文件管理器打开」走 `fs:reveal-folder`，那条通道用 `isInsideRoot()` 判定，
+     * 未受信就返回 `{ ok: false }` ——**不抛错、不提示**，用户看到的是「点了没反应，冲突还在」。
+     * 所以这里必须把它登记进受信根（spec §4.7 明写）。
+     */
+    if (targetPath) trustRoot(targetPath)
     const { checks, frozenSha, overlap } = await runChecks({
       sourcePath: rec.path,
       sourceBranch: rec.branch,

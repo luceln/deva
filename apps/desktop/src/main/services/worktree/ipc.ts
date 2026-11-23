@@ -5,6 +5,7 @@ import { retryInstall } from './deps'
 import { briefForFocusRoot } from './brief'
 import { removeWorktree } from './remove'
 import { rebuildWorktree } from './rebuild'
+import { readWorktreeRoot, setWorktreeRoot } from './root-setting'
 import { mergeWorktree, setMergeTarget } from './merge'
 import { onWorktreeChanged, onWorktreeProgress, onWorktreeSize } from '../chat-bus'
 import type {
@@ -78,6 +79,17 @@ export function registerWorktreeIpc(getWin: () => BrowserWindow | null): void {
    * 「提示成功但目录不存在」正是 A34 要抓的那类静默失效。
    */
   ipcMain.handle('worktree:rebuild', (_e, req: WorktreeRemoveReq) => rebuildWorktree(req))
+  /*
+   * ── 根目录设置（worktree 根可配置需求 §9）──
+   *
+   * 两个通通都走主进程判定，渲染层不复算：根要归一化（大小写 / 尾斜杠 / `\\?\`），
+   * 渲染层再算一遍必然与主进程漂移，漂移的表现是「界面说能存、保存却失败」这类静默矛盾。
+   *
+   * `set` 收 `string | undefined`：`undefined` = 恢复默认（删键），与 `config` 既有的
+   * 「`undefined` 即删键」协议一致。
+   */
+  ipcMain.handle('worktree:root', () => readWorktreeRoot())
+  ipcMain.handle('worktree:root-set', (_e, value: string | undefined) => setWorktreeRoot(value))
 
   /*
    * 把总线上的两条 worktree 事件转给渲染层。

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { app } from 'electron'
 import { providerCustomHeaders } from '../services/model-resolve'
+import { APP_UA_PREFIX } from '../../shared/brand'
 
 /**
  * OpenCode Console 推理网关（Go 套餐与按量计费）对第三方客户端的两项要求，见官方文档
@@ -52,7 +53,7 @@ export function providerHeaders(
   providerId: string,
   sessionId?: string
 ): Record<string, string> {
-  const headers: Record<string, string> = { 'user-agent': `DevaPlus/${app.getVersion()}` }
+  const headers: Record<string, string> = { 'user-agent': `${APP_UA_PREFIX}/${app.getVersion()}` }
   if (isOpencodeInference(baseURL)) headers['x-opencode-session'] = sessionId?.trim() || runSessionId
   return { ...headers, ...providerCustomHeaders(providerId) }
 }

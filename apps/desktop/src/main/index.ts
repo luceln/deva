@@ -8,6 +8,7 @@ import { registerWorkspaceIpc } from './services/workspace'
 import { registerSecretsIpc } from './services/secrets'
 import { registerProviderIpc } from './services/provider'
 import { registerImportIpc } from './importer-ipc'
+import { registerBackupIpc } from './backup-ipc'
 import { hasActiveTurns, registerChatIpc, settleActiveTurns } from './services/chat'
 import { registerContextUsageIpc } from './services/context-usage'
 import { registerReadSyncIpc } from './services/read-sync'
@@ -40,6 +41,7 @@ import { registerUpdaterIpc } from './services/updater'
 import { registerToastIdentity } from './services/portable'
 import { recordDevaHome } from './services/deva-home-registry'
 import { integrateAppImage } from './services/appimage'
+import { APP_DISPLAY_NAME, DEVA_HOME_DIRNAME_DEV } from '../shared/brand'
 import {
   disposeAllPages,
   isBrowserHostWindow,
@@ -112,7 +114,7 @@ function isolateDevData(): void {
    * （driver.cjs 每个场景都设 DEVA_HOME，硬写会让所有场景写到真 home 去）。
    */
   if (!process.env.DEVA_HOME?.trim())
-    process.env.DEVA_HOME = join(app.getPath('home'), '.deva-plus-dev')
+    process.env.DEVA_HOME = join(app.getPath('home'), DEVA_HOME_DIRNAME_DEV)
 }
 
 // 同样必须早于 app ready（见上面 isolateDevData 的说明）
@@ -293,7 +295,7 @@ function createTray(): void {
     ? { show: 'Show DevaPlus', tasks: 'Scheduled tasks', quit: 'Quit' }
     : { show: '显示 DevaPlus', tasks: '定时任务概览', quit: '退出' }
   // 托盘提示与菜单都写应用名：两版共存时，托盘里两个同图标的条目靠它区分（Deva 与 DevaPlus）
-  tray.setToolTip('DevaPlus')
+  tray.setToolTip(APP_DISPLAY_NAME)
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: L.show, click: showMainWindow },
@@ -385,6 +387,7 @@ if (!app.requestSingleInstanceLock()) {
 
   // 从原版 Deva 导入数据（手动触发；只补缺、幂等，原版全程只读）
   registerImportIpc(() => mainWindow)
+  registerBackupIpc(() => mainWindow)
 
   // 会话编排（Agent 主循环：流式 → 工具 → 权限 → 回灌）
   registerChatIpc(() => mainWindow)

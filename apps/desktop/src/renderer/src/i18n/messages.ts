@@ -3,6 +3,8 @@
  * 新增语言只需在此追加一份同结构字典。
  */
 
+import { APP_DISPLAY_NAME } from '../../../shared/brand'
+
 export type Locale = 'zh-CN' | 'en'
 
 export interface MessageTree {
@@ -28,7 +30,7 @@ function mergeFork(base: MessageTree, fork: MessageTree): MessageTree {
 }
 
 const zhCN: MessageTree = {
-  app: { name: 'DevaPlus', tagline: '' },
+  app: { name: APP_DISPLAY_NAME, tagline: '' },
   activity: {
     chat: '对话',
     explorer: '资源管理器',
@@ -1622,6 +1624,7 @@ const zhCN: MessageTree = {
         'path-exists': '这个目录已存在，不会覆盖或删除它。请换一个路径。',
         'path-too-long': '路径太长，超过上限 180 字符。',
         'path-inside-repo': '工作区不能放在仓库里面。',
+        'path-outside-root': '工作区必须建在当前 worktree 根目录内。可以在「设置 → 工作区」里改根目录。',
         'slug-collision': '这个名称和已有工作区冲突，换一个。',
         'no-git': '没找到 git，请先安装。',
         error: '检查失败，稍后再试。'
@@ -1681,7 +1684,7 @@ const zhCN: MessageTree = {
 }
 
 const en: MessageTree = {
-  app: { name: 'DevaPlus', tagline: '' },
+  app: { name: APP_DISPLAY_NAME, tagline: '' },
   activity: {
     chat: 'Chat',
     explorer: 'Explorer',
@@ -3253,6 +3256,7 @@ const en: MessageTree = {
         'path-exists': 'That folder already exists; it will not be overwritten or deleted. Pick another path.',
         'path-too-long': 'The path is too long (limit 180 characters).',
         'path-inside-repo': 'A worktree cannot live inside the repo.',
+        'path-outside-root': 'A worktree must be created inside the current worktree root. You can change the root in Settings → Worktrees.',
         'slug-collision': 'That name collides with an existing worktree.',
         'no-git': 'git was not found; install it first.',
         error: 'Check failed; try again later.'

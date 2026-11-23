@@ -2,8 +2,9 @@ import { statSync, readdirSync, lstatSync } from 'fs'
 import { join } from 'path'
 import { runGitRaw } from '../git'
 import { listRecords, type WorktreeRecord } from './store'
-import { compareKeyOfPath, repoKeyOf } from './paths'
+import { compareKeyOfPath, repoKeyOf, isInsideRoot } from './paths'
 import { parseWorktreeList, type WorktreeEntry } from './git-worktree'
+import { trustRoot } from '../fs-guard'
 import { gitLockHolder } from './lock'
 import { publishWorktreeSize } from '../chat-bus'
 
@@ -273,6 +274,15 @@ async function mergeInProgressOf(
   const unmerged = await runGitRaw(targetPath, ['diff', '--name-only', '--diff-filter=U'])
   const unmergedCount =
     unmerged.code === 0 ? unmerged.stdout.split('\n').filter((l) => l.trim()).length : 0
+  /*
+   * 确认「合并进行中」就把 targetPath 登记进受信根。
+   *
+   * 这条路径与 merge.ts 里那次 trustRoot 是**两回事**，不能省：卡片上「解决冲突」按钮直接
+   * 用 `mergeInProgress.targetPath` 去调 `fs:reveal-folder` / `git:merge-abort`，
+   * 用户完全可能从没打开过合并面板。那条通道用 `isInsideRoot()` 判定，未受信就返回
+   * `{ ok: false }` 且不提示——表现正是「点了没反应，冲突还在」。
+   */
+  trustRoot(targetPath)
   return { targetPath, unmergedCount }
 }
 
@@ -508,7 +518,16 @@ export async function listWorktrees(): Promise<WorktreeSnapshot> {
         lockHolder: gitLockHolder(rec.path),
         dirtyCount,
         mergeInProgress,
-        mergeGate: computeMergeGate({ state, deps: rec.deps, targetBranch: rec.targetBranch })
+        mergeGate: computeMergeGate({ state, deps: rec.deps, targetBranch: rec.targetBranch }),
+        /*
+         * 「是否在创建时那个根内」。用 `createdUnderRoot`（创建时冻结）而不是当前根，
+         * 理由同 `remove.ts` 的 `blockDirRemovalOutsideRoot`：用户改根不该让历史记录集体变红。
+         *
+         * 老记录（`undefined`）**不给 `insideRoot`**，让界面知道「无法判断」而不是「在根外」。
+         */
+        ...(rec.createdUnderRoot === undefined || rec.createdUnderRoot === ''
+          ? {}
+          : { insideRoot: isInsideRoot(rec.createdUnderRoot, rec.path), createdUnderRoot: rec.createdUnderRoot })
       }
       return item
     }),

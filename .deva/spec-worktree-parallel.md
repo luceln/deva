@@ -453,7 +453,7 @@ skipped ──用户点「安装依赖」──────────▶ insta
 | 0.5 | `git check-ref-format --branch <branch>` 退出码 0 | `bad-branch` | B3 |
 | 0.6 | `git rev-parse --verify --quiet refs/heads/<branch>` → **成功 = 已存在** | `branch-exists`（A23：不得静默复用）+ 可用替代（§6.3 自动后缀） | A23 |
 | 0.7 | `existsSync(path)` | `path-exists`（A22：不得覆盖不得删） | A22 |
-| 0.8 | `normalizeWorktreePath(path).path.length < 180`，且路径在仓库外（§6.1） | `path-too-long`（A46）/ `path-inside-repo` | A46 |
+| 0.8 | `normalizeWorktreePath(path).path.length < 180`，且路径在仓库外（§6.1），且在 worktree 根内（见 `.deva/req-worktree-root-custom.md`） | `path-too-long`（A46）/ `path-inside-repo` / `path-outside-root` | A46 |
 | 0.9 | `git status --porcelain` in 主目录 → 行数 `dirtyCount` | `dirtyCount > 0 && !req.confirmedDirty` → `needs-confirm`（A17/A18） | A17-A21 |
 | 0.10 | `findRecordByRepo(repoRoot).length >= 5` | 返回 `softWarn: 'many-worktrees'`，**不阻断** | — |
 | 0.11 | `trustRoot(repoRoot)`；`trustRoot(dirname(path))` | — | 后续 git/fs IPC 的前提 |
@@ -1146,6 +1146,11 @@ export function gitLockHolder(path: string): { label: string; since: number } | 
 <DEVA_HOME>/worktrees.json                                ← 记录文件
 <DEVA_HOME>/worktrees/<repoKey>/<slug>-<shortid>/          ← 工作区（就是那个 worktree 目录）
 ```
+
+> **根可自定义**：上面的 `<DEVA_HOME>/worktrees` 只是**默认根**。用户可在设置里指定 `worktreeRoot`
+> （`config.json` 顶层键，缺键即用默认，`DEVA_HOME` 迁移时自动跟随）。创建必须落在根内、删除不删根外目录，
+> 以及存量记录的处理，见 **`.deva/req-worktree-root-custom.md`**。本节其余内容（repoKey 分桶、
+> 仓库外硬约束）不受影响，仍然有效。
 
 - `<DEVA_HOME>` 由 `getDevaHome()`（`config.ts:27`）给出，支持 `DEVA_HOME` 环境变量覆盖 → 用户可整体挪盘，与数据一起备份/迁移。
 - `<repoKey>` = `sha1(lower(repoRoot).replace(/\\/g,'/')).slice(0,16)`。**不得复用 `chat-store.ts:245 projectKey`**：那个函数的注释明写它是「权限系统按目录区分权限模式」用的；让两个语义共享一个标识，将来改任一个都会误伤另一个。同算法、另起函数（`worktree/paths.ts: repoKeyOf`）。

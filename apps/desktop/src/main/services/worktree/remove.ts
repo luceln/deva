@@ -1,8 +1,9 @@
 import { rmSync } from 'fs'
 import { runGitRaw } from '../git'
 import { publishWorktreeChanged } from '../chat-bus'
-import { listRecords, getRecord, removeRecord } from './store'
+import { listRecords, getRecord, removeRecord, type WorktreeRecord } from './store'
 import { looksLikeOurWorktreeDir, listWorktrees, hasWorktreeEntry } from './git-worktree'
+import { isInsideRoot, rootKeyOf, worktreeRoot } from './paths'
 import { withGitLock } from './lock'
 import { invalidateSize } from './list'
 
@@ -92,6 +93,58 @@ async function branchInUseElsewhere(repoRoot: string, branch: string, selfPath: 
     }
   }
   return false
+}
+
+/**
+ * 删目录前的根内校验（需求 §8.2）。返回一句话说明「为什么没删」，或 `null` 表示可以删。
+ *
+ * 三种记录的判定：
+ *
+ * | 记录类型 | 根内校验 | 删目录 |
+ * |---|---|---|
+ * | 新记录（有 `createdUnderRoot`） | 严格校验 | 根内才删 |
+ * | 老记录（缺该字段） | **跳过**（取舍二） | 允许 |
+ * | 记录读不出 | 走既有 fail closed（`getRecord` 返回 null，本函数到不了） | 不删 |
+ *
+ * ## 为什么老记录放行
+ *
+ * 删除是收尾动作，不该拦。用户清理存量目录时被「你没在根内建的所以我不能删」挡住，
+ * 后果是又留下一个删不掉的目录 —— 正是本需求要解决的问题。
+ *
+ * ## 为什么比较 `createdUnderRoot` 而不是「当前根」
+ *
+ * 用户随时可以改根。若拿**当前根**判老位置建的东西，那么一次「恢复默认」就会让之前所有
+ * 合法创建的工作区都变成「根外」而删不掉。判据必须是「这条记录当初是在哪个根下建的」，
+ * 那个值在创建时冻结，不受后续设置影响。
+ *
+ * ## 不做的事
+ *
+ * - **不得**把「在根内」当删除授权：根内仍要过 `getRecord` + `looksLikeOurWorktreeDir`
+ *   （根内可能有用户自己的目录，本需求不给额外删除权力）。
+ * - **不得**因为根外就跳过前面的脏检查 / 分支占用检查（已在上方执行完）。
+ * - **不得**在根外时改成「移到别处」或「先备份再删」（需求 §8.4 / Q3 定案：不做）。
+ */
+function blockDirRemovalOutsideRoot(rec: WorktreeRecord, path: string): string | null {
+  // 老记录：缺字段 → 放行（取舍二）
+  if (rec.createdUnderRoot === undefined) return null
+  const createdKey = rec.createdUnderRoot
+  /*
+   * 空串：不该出现。不当作「老记录」放行 —— 坏数据静默拿到豁免，比拒绝更危险。
+   * 按「有值但不匹配」处理，让用户看见并自行核对。
+   */
+  if (createdKey === '') {
+    return `目录未删：这条记录的「创建时根」是空值，无法确认它该不该删。记录已清理，目录请自行核对：${path}`
+  }
+  if (isInsideRoot(createdKey, path)) return null
+  /*
+   * 文案必须含**实际路径**与**当初的根**（需求 §8.3）：只说「不在根内」用户不知道该去哪儿找。
+   * `createdUnderRoot` 是 compareKey（小写、正斜杠），直接展示不好读 —— 但它就是当初的真实值，
+   * 不做美化，避免与 `rec.path` 的原生形态混在一起误导。
+   */
+  return (
+    `目录未删：它建在 ${createdKey} 这个根下，而当前设置的是 ${rootKeyOf(worktreeRoot())}。` +
+    `工作区记录已清理，目录保留在原处，可自行删除或把根设回去：${path}`
+  )
 }
 
 /** 删一个 worktree。调用方负责展示 `warnings`。 */
@@ -191,7 +244,22 @@ export async function removeWorktree(req: RemoveRequest): Promise<RemoveResult> 
 
     // ── 3. 删目录（只删「看起来确实是我们的 worktree 目录」）──
     const look = looksLikeOurWorktreeDir(path, rec.repoRoot)
-    if (!look.ok) {
+    /*
+     * ── 3a. 根内校验（需求 §8）──
+     *
+     * 三件事分开：
+     *  - **删目录**（`rmSync`）根外 → 拒绝。这是不可逆的磁盘操作。
+     *  - **解登记 + 删记录**根外 → **仍然允许**（已在上面两步做完）。它们是元数据操作、不碰用户数据；
+     *    拦掉的后果是「这个 worktree 永远留在列表里，还占着一个分支名」，用户更难收拾。
+     *  - 校验失败**必须进 warnings**：`remove.ts` 整个文件头的纪律就是「删不掉的地方一律进 warnings，
+     *    不静默」——删一半、报告说成功，用户以为干净了，实际还占着几百 MB。
+     *
+     * 老记录（`createdUnderRoot` 缺失）**跳过**这条（需求 取舍二）：删除是收尾动作，不该拦。
+     */
+    const rootBlock = blockDirRemovalOutsideRoot(rec, path)
+    if (rootBlock) {
+      warnings.push(rootBlock)
+    } else if (!look.ok) {
       /*
        * 不是我们建的那种形态：可能用户往里面放了别的东西，或者路径被换了。
        * **不 rmSync**——递归删一个来路不明的目录太危险，留给用户自己核对。

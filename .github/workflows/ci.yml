@@ -123,6 +123,27 @@ jobs:
       - name: 导入密钥重加密
         run: node .deva/qa/check-import-rekey.cjs
 
+      # 导出包必须能被**独立实现**解开：fflate 的 `Zip` 写侧固定写 data descriptor（本地头大小写 0、
+      # flag bit3 置位），而它的流式读侧在 store + descriptor 条目上不按中央目录 csize 定界，而是
+      # 扫描数据里的 `50 4b 07 08` 找 descriptor。随机媒体里撞到这四个字节就把条目提前截断——
+      # 2MB 随机数命中率约 0.05%，80 个媒体文件累计约 8%，用户拿到的包解不开。
+      # 这条判据用两种独立读法（unzipSync 按中央目录 + 真实 extractTo）逐条验哈希，连跑 30 次。
+      # 它曾经不存在，于是这个缺陷带着「CI 全绿」合入过——判据不进 CI，修的东西下次还会退回去。
+      - name: 导出包独立自检
+        run: node .deva/qa/check-export-selfcheck.cjs
+
+      # 「不许写 data descriptor」「end() 必须先 fsync 再 close」这两条只能静态守：进程内测不出
+      # fsync（正常退出时 OS 本来就刷页，去掉它 30 次照样全绿）。B1d/B1e 是随导出包自检一起补的。
+      - name: 导出写侧不得写 descriptor
+        run: node .deva/qa/check-bundle-wiring.cjs
+
+      # 流式还原的峰值内存不得随包体积增长。原判据「两次峰值比值 < 1.6」实测在 1.40~1.77 漂移
+      # （10 次里 3 次假红），已改为「峰值增量 / 包体积增量 < 0.8」。
+      # 这条同时守着 streamZip 的背压：早期用 `writes = writes.then(...)` 串行，每个闭包都持有
+      # 它捕获的 chunk 直到链尾才释放，整包被钉在内存里——600×1MB 时 external 601.8MB，跑完不归还。
+      - name: 备份包峰值内存
+        run: node .deva/qa/verify-bundle-memory.cjs
+
       # 插话带附件的**运行时**验证：上面那条 check-insert-attachments 只查形状（签名 + 子串），
       # 在 restoreToComposer 开头加一句 `if (attachments) return` 就能让它 19/0 全绿而功能已经废了。
       # 这里在真 Chromium 里渲染真实 Composer，跑 6 条用例，其中第 6 条守的正是
