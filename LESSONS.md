@@ -130,7 +130,7 @@ looks most like what it lets through」），我们把它变成了两个判据�
 
 **H2. 不许推翻已经拍板的设计决定；要翻，先问拍板的人。**（对应 magpie `Don't reverse deliberate decisions`）
 为什么没法机械化：「哪些是拍板过的」不在代码里，在决议记录里。
-- 证据：`.deva/design/rail-grouping.html` 裁定组头字号 / 折叠热区 / 行内信息维度，理由都写了；
+- 证据：`.deva/design/rail-grouping.html`（不纳入版本管理） 裁定组头字号 / 折叠热区 / 行内信息维度，理由都写了；
   这些裁决此前**只活在 HTML 稿里**，产品代码里连类名都还没有，实现方随手改掉没人拦。
 - 处置：**改规则** + 要求裁决带「怎么验」一列（见 H3）。
 - 落到哪：`AGENTS.md` 二（设计相关）。

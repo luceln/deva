@@ -11,7 +11,7 @@
 > `WorktreePane.tsx` / `MergePanel.tsx`（见 `git log --oneline -- apps/desktop/src/main/services/worktree/`）。
 
 > 状态：已拍板，可直接派工。供求实现方与验收方共同遵守。
-> 上游：`archived/2026-11-18-worktree-parallel-acceptance-v4.md`（v2 的 34 条断言）+ `archived/2026-11-18-worktree-parallel-scope-v3.md`（口径）+ `.deva/design/worktree-parallel.html`（界面原型，已校对）。
+> 上游：`archived/2026-11-18-worktree-parallel-acceptance-v4.md`（v2 的 34 条断言）+ `archived/2026-11-18-worktree-parallel-scope-v3.md`（口径）+ `.deva/design/worktree-parallel.html`（界面原型，不纳入版本管理）。
 > **本文件与 v2/v3 冲突时以本文件为准**（仅限本文件显式声明的覆盖项，见 §0.2）；与原型冲突时见 §11.2（四处，均已按原型修正）。
 > 阅读顺序：§0 → §1 → §3（实现主线）→ §4（合并）→ 其余按需。§10 是交付前自查清单，§11 是原型一致性核对。
 
@@ -1822,7 +1822,7 @@ A35~A55 —— 共 21 条，正文见 §0.3 与 §9.1/§9.4/§9.5。**这 21 条
 
 ---
 
-## 11. 原型（`.deva/design/worktree-parallel.html`）与规格的一致性
+## 11. 原型（`.deva/design/worktree-parallel.html`，不纳入版本管理）与规格的一致性
 
 ### 11.1 已对齐（规格覆盖原型画出的全部状态）
 

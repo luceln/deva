@@ -116,6 +116,46 @@ function walkMd(dir, out) {
   return out
 }
 
+/**
+ * **已入库**的文件集合。
+ *
+ * 为什么不用 `fs.existsSync` 判存在性：本地 `.deva/design/` 是被 `.gitignore` 忽略的草稿区，
+ * 目录里有一堆 html 原型。用磁盘存在性判，本机永远 PASS；CI 检出后那些文件根本不存在，
+ * 同一个引用在 CI 上就是悬空。**本地全绿、推上去红**——这类判据等于没有。
+ * （本轮实测就是这样：`check-doc-links` 本地 118 处 PASS，CI 在「文档链接」步红。）
+ *
+ * 改成只认 `git ls-files` 里有的东西，本地与 CI 判据就一致了：
+ * 引用一个不入库的文件，本机当场就红，不必等 CI。
+ *
+ * 不在 git 仓库里时（源码包、临时拷贝）退回磁盘存在性——否则整份判据会变成全红。
+ */
+function trackedPaths() {
+  const { spawnSync } = require('node:child_process')
+  const res = spawnSync('git', ['ls-files', '-z'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
+  if (res.status !== 0 || !res.stdout) return null
+  const files = new Set()
+  const dirs = new Set()
+  for (const rel of res.stdout.split('\0')) {
+    if (!rel) continue
+    files.add(rel)
+    // 同时记下所有祖先目录，让「引用一个目录」也能判
+    let d = rel
+    while (d.includes('/')) {
+      d = d.slice(0, d.lastIndexOf('/'))
+      dirs.add(d)
+    }
+  }
+  return { files, dirs }
+}
+
+/** 目标是否真实存在且已入库（tracked 为 null 时退回磁盘检查） */
+function targetExists(target, tracked) {
+  if (!tracked) return fs.existsSync(target)
+  const rel = path.relative(ROOT, target).replace(/\\/g, '/')
+  if (!rel || rel.startsWith('..')) return false
+  return tracked.files.has(rel) || tracked.dirs.has(rel)
+}
+
 /** 去掉围栏代码块（``` 或 ~~~），保持行号不变 */
 function stripFences(text) {
   const lines = text.split(/\r?\n/)
@@ -171,7 +211,13 @@ function asRepoRef(raw, mdDir) {
 
 function main() {
   const listOnly = process.argv.includes('--list')
-  const files = walkMd(ROOT, [])
+  const tracked = trackedPaths()
+  // 只扫**已入库**的 md：`fs.existsSync` 会连 `.deva/design/` 这类被忽略的草稿一起扫进来，
+  // 而那些文件在 CI 上根本不存在。本地扫、CI 不扫 → 两边结论不同，判据就失去意义。
+  const files = walkMd(ROOT, []).filter((f) => {
+    if (!tracked) return true
+    return tracked.files.has(path.relative(ROOT, f).replace(/\\/g, '/'))
+  })
   const dangling = []
   let checked = 0
 
@@ -199,7 +245,7 @@ function main() {
 // 只判真正属于本仓、且不可能属于 magpie 的前缀（`.deva/`、`apps/`、`.github/`）。
         if (isForeign && !FOREIGN_SAFE_PREFIXES.some((p) => ref.display.startsWith(p))) continue
         checked++
-        if (fs.existsSync(ref.target)) continue
+        if (targetExists(ref.target, tracked)) continue
         // 有意保留的陈旧引用
         if (SOFT_SUFFIX.test(line.trim()) || rawLines[i].includes('doclink:ignore')) continue
         if (FORMER_NAME.test(line) && line.indexOf(ref.display) > line.indexOf('（原')) continue
