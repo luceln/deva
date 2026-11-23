@@ -62,6 +62,7 @@ export type WorktreePrecheckReason =
   | 'path-exists'
   | 'path-too-long'
   | 'path-inside-repo'
+  | 'path-outside-root'
   | 'slug-collision'
   | 'no-git'
   | 'error'
@@ -176,6 +177,25 @@ export interface WorktreeListItem {
   mergeInProgress: { targetPath: string; unmergedCount: number } | null
   /** 合并可用性：主进程算好的门（不看 dirty，只做轻量判定）。见 §7.5 与 A48。 */
   mergeGate: MergeGate
+  /*
+   * ── 「创建时根」相关（worktree 根可配置需求 §11.2 / A11 / A14）──
+   *
+   * 这两个字段只用于**界面标注**，不参与任何可用性判定：根外老记录照样能删除、合并、重建、
+   * 装依赖（需求 §10.1 / §11.2「标注不得影响其他按钮的可用性」）。
+   *
+   * 为什么由主进程算、不给渲染层拼：根的读取要归一化（大小写 / 尾斜杠 / `\\?\`），
+   * 渲染层再算一遍必然与主进程漂移，而漂移的表现是「标了根外、实际删得掉」这种静默矛盾。
+   */
+  /**
+   * 这条记录是否在当前 `worktreeRoot` 内。
+   *
+   * **`undefined` 表示「老记录、无法判断」**（缺 `createdUnderRoot`）：这不是「在根外」，
+   * 界面不该给它打标注。把它折成 `false` 会让所有历史记录一上线就被标成根外 —— 那是假信息。
+   */
+  insideRoot?: boolean
+  /** 创建时生效的根（compareKey，老记录无此值）。界面「恢复默认后按新根重算」时不必，
+   *  但用户在核对「这个目录当初建在哪」时需要它。 */
+  createdUnderRoot?: string
 }
 
 /** 不受本功能管理的 git 登记项：只读展示，不参与任何操作。 */
@@ -461,3 +481,39 @@ export interface WorktreeSetTargetReq {
 export type WorktreeSetTargetResult =
   | { ok: true; targetBranch: string }
   | { ok: false; reason: 'not-found' | 'bad-branch' | 'write-failed'; message: string }
+
+/* ───────────── worktree 根目录设置（根可配置需求 §9） ───────────── */
+
+/**
+ * `worktree:root` 的返回：当前生效的根 + 它是不是默认。
+ *
+ * 为什么要 `isDefault`：界面上「默认的 `<DEVA_HOME>/worktrees`」与「用户自己设的同一个路径」
+ * 必须能区分 —— 前者应显示「默认」，后者显示为用户设定值。混在一起，用户会以为自己设过
+ * 一个和默认一样的根，改 `DEVA_HOME` 时却发现没跟着走。
+ */
+export interface WorktreeRootView {
+  /** 当前生效的根（已归一化）。 */
+  root: string
+  /** `config.json` 里没有该键 → 跟随 `DEVA_HOME`。 */
+  isDefault: boolean
+}
+
+/**
+ * `worktree:root-set` 的结果。
+ *
+ * 失败时 `message` 必须可直接展示，且**含具体路径**（需求 §9.4 / A27）：
+ * 被哪个仓库挡住、试算出的超限路径是什么 —— 只说「不允许」用户没法修。
+ */
+export type WorktreeRootSetResult =
+  | { ok: true; root: string; isDefault: boolean }
+  | {
+      ok: false
+      /**
+       * - `outside-repo-required`：根落在某个已登记仓库内（Q2：拒绝，不放行）
+       * - `path-too-long`：根太深，`<root>/<repoKey>/<slug>-<shortid>` 会超过 180
+       * - `bad-path`：路径无法归一化
+       * - `write-failed`：校验过了但配置没写进去
+       */
+      reason: 'outside-repo-required' | 'path-too-long' | 'bad-path' | 'write-failed'
+      message: string
+    }

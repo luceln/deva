@@ -2,7 +2,7 @@ import { mkdirSync } from 'fs'
 import { dirname } from 'path'
 import { getDevaHome } from '../config'
 import { publishWorktreeChanged } from '../chat-bus'
-import { repoKeyOf } from './paths'
+import { repoKeyOf, rootKeyOf, worktreeRoot } from './paths'
 import { upsertRecord, removeRecord, type WorktreeRecord } from './store'
 import {
   precheck,
@@ -109,7 +109,15 @@ async function doCreate(
     createdAt: now,
     phase: 'creating',
     intent: { branchExistedAtStart: false, pathExistedAtStart: false },
-    deps: 'pending'
+    deps: 'pending',
+    /*
+     * 记下「这次是在哪个根下创建的」（需求 §6.3）。删除时据此严格校验：
+     * 根外的新记录拒绝删目录，老记录（无此字段）放行。
+     *
+     * 取的是 precheck 已确认过的那个根。两者可能不同（用户在 precheck 与 create 之间改了设置），
+     * 但 `doCreate` 只在锁内跑、路径已定，记录里存「实际生效的根」比存「可能已变的设置」更诚实。
+     */
+    createdUnderRoot: rootKeyOf(worktreeRoot())
   }
   if (!upsertRecord(baseRecord))
     return {
