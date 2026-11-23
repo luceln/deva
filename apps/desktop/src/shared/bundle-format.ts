@@ -186,6 +186,29 @@ export interface RestoreProgress {
   total: number
 }
 
+/**
+ * 导出进度。
+ *
+ * ## 为什么要有 `scan` / `hash` 两段
+ *
+ * 导出在写 zip **之前**要先扫一遍 home（递归 `lstat` 每个文件）再逐个算 sha256，
+ * 实测这两段占全流程一半以上（388MB / 2002 文件：扫描 608~896ms + 哈希 3137~4006ms，
+ * 写 zip 约 2900~4100ms）。之前只在写 zip 时发进度，所以用户点下「导出到文件」后要等
+ * 4 秒以上才看到任何反馈，大 home 上会等几十秒 —— 表现就是「卡住了，一点反应都没有」。
+ *
+ * ## `total: 0` 的含义
+ *
+ * `scan` 阶段的总数**未知**：扫描前不知道有多少文件，而为了拿总数先扫一遍等于把这一步做两遍。
+ * 所以约定 `total === 0` 表示「总数未知」，界面按「已扫描 N 个文件…」显示，不画百分比。
+ * `hash` / `write` 阶段的总数是确定的，正常给值。
+ */
+export interface ExportProgress {
+  step: 'scan' | 'hash' | 'write' | 'done'
+  done: number
+  /** 0 = 总数未知（仅 `scan` 阶段会这样）。 */
+  total: number
+}
+
 /** 导出一轮的结果。 */
 export type ExportResult =
   | {

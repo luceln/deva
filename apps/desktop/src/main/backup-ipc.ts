@@ -1,5 +1,5 @@
 import { ipcMain, dialog, type BrowserWindow } from 'electron'
-import { MANIFEST_NAME, SECRETS_ENC_NAME, type RestoreProgress } from '../shared/bundle-format'
+import { MANIFEST_NAME, SECRETS_ENC_NAME, type ExportProgress, type RestoreProgress } from '../shared/bundle-format'
 import { exportBundle } from './services/bundle-export'
 import { restoreBundle, RestoreError } from './services/bundle-import'
 import { validateManifest } from './services/bundle-manifest'
@@ -91,14 +91,17 @@ export function registerBackupIpc(getWindow: () => BrowserWindow | null): void {
         }
       }
       try {
-        const send = throttle<{ step: string; done: number; total: number }>((p) => {
+        const send = throttle<ExportProgress>((p) => {
           const w = getWindow()
           if (w && !w.isDestroyed()) w.webContents.send('backup:export-progress', p)
         })
-        return await exportBundle({
+        const r = await exportBundle({
           targetPath: picked.filePath,
-          onProgress: (done, total) => send({ step: 'export', done, total })
+          // 三个阶段（scan / hash / write）都透传，界面据此显示不同文案
+          onProgress: send
         })
+        if (r.ok) send({ step: 'done', done: 1, total: 1 })
+        return r
       } finally {
         releaseLock(getDevaHome(), lock.fd)
       }

@@ -2,7 +2,7 @@ import { existsSync } from 'fs'
 import { mkdir, readFile, rename, rm, stat } from 'fs/promises'
 import { join, dirname } from 'path'
 import { ZipWriter } from './bundle-zip-writer'
-import { MANIFEST_NAME, SECRETS_ENC_NAME, LINK_PREFIX, type BundleManifest, type ExportResult } from '../../shared/bundle-format'
+import { MANIFEST_NAME, SECRETS_ENC_NAME, LINK_PREFIX, type BundleManifest, type ExportProgress, type ExportResult } from '../../shared/bundle-format'
 import { buildManifest, hashFiles, resolveLinkTarget, scanHome, toEntryName } from './bundle-manifest'
 
 import { getDevaHome } from './config'
@@ -31,7 +31,17 @@ function shouldCompress(relPath: string): boolean {
 export interface ExportOptions {
   /** 目标包路径。扩展名只用于展示，不影响格式。 */
   targetPath: string
-  onProgress?: (done: number, total: number) => void
+  /**
+   * 进度回调。三个阶段都会报：
+   *   · `scan`  扫文件（`total` 恒为 0，总数未知）
+   *   · `hash`  逐文件算 sha256
+   *   · `write` 写 zip
+   *
+   * 为什么 `scan` / `hash` 也要报：这两段合计占全流程一半以上（实测 388MB / 2002 文件时
+   * 扫描 608~896ms + 哈希 3137~4006ms，写 zip 约 2900~4100ms）。只在写 zip 时报进度，
+   * 用户点完要等 4 秒以上才看到任何反馈，大 home 上就是几十秒的「毫无反应」。
+   */
+  onProgress?: (p: ExportProgress) => void
 }
 
 /**
@@ -43,10 +53,20 @@ export interface ExportOptions {
  */
 export async function exportBundle(opts: ExportOptions): Promise<ExportResult> {
   const home = getDevaHome()
+  const report = opts.onProgress ?? ((): void => undefined)
 
+  /*
+   * 扫文件。`total` 给 0 = 总数未知（见 `ExportProgress` 的说明）：
+   * 扫描前不知道有多少文件，为了拿总数先扫一遍等于把这一步做两遍。
+   * 第一个 tick 在扫到**第一个文件**时发出，所以界面几乎是立刻有反馈。
+   */
+  let scanned = 0
   let scan
   try {
-    scan = await scanHome(home)
+    scan = await scanHome(home, () => {
+      scanned += 1
+      report({ step: 'scan', done: scanned, total: 0 })
+    })
   } catch (e) {
     return { ok: false, code: 'read-failed', message: (e as Error)?.message ?? String(e) }
   }
@@ -61,8 +81,14 @@ export async function exportBundle(opts: ExportOptions): Promise<ExportResult> {
   const room = await checkRoom(opts.targetPath, scan.bytes)
   if (room) return { ok: false, code: 'write-failed', message: room }
 
+  /*
+   * 算哈希。总数是确定的，所以这里能报百分比。
+   * `done` / `total` 由 `hashFiles` 直接给出 —— 它内部会节流，自己累加会漏。
+   */
   try {
-    await hashFiles(home, scan)
+    await hashFiles(home, scan, (done, total) => {
+      report({ step: 'hash', done, total })
+    })
   } catch (e) {
     return { ok: false, code: 'read-failed', message: `读取文件内容失败：${(e as Error)?.message ?? e}` }
   }
@@ -225,11 +251,11 @@ async function writeZip(
   home: string,
   manifest: BundleManifest,
   secrets: Buffer | null,
-  onProgress?: (done: number, total: number) => void
+  onProgress?: (p: ExportProgress) => void
 ): Promise<void> {
   const total = manifest.files.length + 1 // +1：manifest.json 本身
   let n = 0
-  const tick = (): void => onProgress?.((n += 1), total)
+  const tick = (): void => onProgress?.({ step: 'write', done: (n += 1), total })
 
   const zip = await ZipWriter.create(partPath)
   try {

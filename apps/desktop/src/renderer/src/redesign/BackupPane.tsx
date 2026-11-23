@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Archive, Download, Loader2, Upload } from 'lucide-react'
+import { Download, Loader2, Upload } from 'lucide-react'
 import { useI18n } from '../i18n/i18n'
+import type { ExportProgress } from '../../../shared/bundle-format'
 
 /**
  * 设置 › 备份：把当前数据导出成一个本地文件，或从这样一个文件还原。
@@ -47,13 +48,42 @@ function fill(tpl: string, vars: Record<string, string | number>): string {
   return out
 }
 
+/**
+ * 导出按钮上的文案，按进度阶段分三种。
+ *
+ * 分段的理由：导出在写 zip 之前要先扫文件、再逐个算 sha256，实测这两段占全流程一半以上
+ * （388MB / 2002 文件：扫描 608~896ms + 哈希 3137~4006ms，打包约 2900~4100ms）。
+ * 三段文案分开，用户才知道「它在动」而且知道动到哪一步 —— 之前只在打包时显示，
+ * 前面几十秒看起来像卡死。
+ *
+ * `progress === null`（点下去但第一个事件还没到）显示「正在准备…」：
+ * 首个事件通常在几毫秒内到，但按钮文字不变也会让人怀疑没点中。
+ */
+function exportLabel(t: (k: string) => string, progress: ExportProgress | null): string {
+  if (!progress) return t('cf.backup.exportPreparing')
+  if (progress.step === 'scan') {
+    // 扫描阶段 total 恒为 0（总数未知），只报计数，不画百分比
+    return fill(t('cf.backup.exportScanning'), { done: progress.done })
+  }
+  if (progress.step === 'hash') {
+    return fill(t('cf.backup.exportHashing'), { done: progress.done, total: progress.total })
+  }
+  /*
+   * `step === 'done'` 是主进程在**写完包之后**发的收尾事件（`backup-ipc.ts:103`，`1/1`）。
+   * 不能落到下面那句「正在打包 1/1…」——那一刻已经打完了，会闪一下错误文案。
+   * 这里回到按钮的常规文字：紧接着 `doExport` 就会把 `expPhase` 切到 `done` 并显示结果。
+   */
+  if (progress.step === 'done') return t('cf.backup.exportBtn')
+  return fill(t('cf.backup.exporting'), { done: progress.done, total: progress.total })
+}
+
 export function BackupPane(): React.JSX.Element {
   const { t } = useI18n()
 
   // 导出侧
   const [expPhase, setExpPhase] = useState<Phase>('idle')
   const [expMsg, setExpMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
-  const [expProgress, setExpProgress] = useState<{ done: number; total: number } | null>(null)
+  const [expProgress, setExpProgress] = useState<ExportProgress | null>(null)
 
   // 还原侧
   const [info, setInfo] = useState<InspectInfo | null>(null)
@@ -71,7 +101,7 @@ export function BackupPane(): React.JSX.Element {
   const [needConfirm, setNeedConfirm] = useState(false)
 
   useEffect(() => {
-    const off1 = window.deva.backup.onExportProgress((p) => setExpProgress({ done: p.done, total: p.total }))
+    const off1 = window.deva.backup.onExportProgress((p) => setExpProgress(p))
     const off2 = window.deva.backup.onRestoreProgress((p) =>
       setResProgress({ step: p.step, done: p.done, total: p.total })
     )
@@ -93,12 +123,7 @@ export function BackupPane(): React.JSX.Element {
         setExpPhase('done')
         setExpMsg({
           kind: 'ok',
-          text: fill(t('cf.backup.exportDone'), {
-            path: r.path,
-            files: r.files,
-            size: fmtBytes(r.bytes),
-            secrets: r.hasSecrets ? t('cf.backup.withSecrets') : t('cf.backup.withoutSecrets')
-          })
+          text: fill(t('cf.backup.exportDone'), { path: r.path })
         })
       } else if (r.code === 'cancel-discard') {
         setExpPhase('idle')
@@ -293,57 +318,56 @@ export function BackupPane(): React.JSX.Element {
   return (
     <div className="cf-backup">
       <h2 className="cf-pane__title">{t('cf.backup.title')}</h2>
-      <p className="cf-backup__intro">{t('cf.backup.intro')}</p>
+      <p className="cf-pane__desc">{t('cf.backup.intro')}</p>
 
-      {/* ───────── 导出 ───────── */}
-      <section className="cf-backup__card">
-        <h3 className="cf-backup__h3">
-          <Archive size={16} /> {t('cf.backup.exportTitle')}
-        </h3>
-        <p className="cf-backup__desc">{t('cf.backup.exportDesc')}</p>
-
-        {/*
-         * 密钥是**明文**放进包里的，所以这句警告不能省、也不能折叠。
-         *
-         * 删掉口令输入是一个明确的取舍（用户要求：不想记口令）。省下来的代价必须明说，
-         * 否则用户会把包丢进同步盘 / 发给别人 / 随手拷 U 盘 —— 那是明文密钥最常见的外泄路径，
-         * 而不是"有人来翻他电脑"。
-         */}
-        <div className="cf-backup__danger">
-          <AlertTriangle size={16} />
-          <p>{t('cf.backup.plainWarning')}</p>
+      <section className="cf-set">
+        {/* ───────── 导出 ───────── */}
+        <div className="cf-set__row">
+          <span className="cf-set__label">
+            {t('cf.backup.exportTitle')}
+            <span className="cf-set__hint">{t('cf.backup.exportDesc')}</span>
+          </span>
+          <span className="cf-backup__acts">
+            {/*
+             * 密钥明文：原来是整段警告框。用户确认改成一行提示 —— 常驻、不折叠，
+             * 信息量却只有「密钥明文」四个字，正是这条取舍需要让人记住的全部。
+             * 用 .cf-setrow__note--warn（11px 橙字）而不是 .cf-badge：后者 10.5px 带全圆边框，
+             * 和 30px 按钮并排会显碎；--warn 是设置行里既有的风险提示写法。
+             */}
+            <span className="cf-setrow__note cf-setrow__note--warn">{t('cf.backup.plainWarning')}</span>
+            <button
+              className="btn btn--primary"
+              onClick={() => void doExport()}
+              disabled={expPhase === 'running'}
+            >
+              {expPhase === 'running' ? <Loader2 size={14} className="cf-spin" /> : <Download size={14} />}
+              {expPhase === 'running' ? exportLabel(t, expProgress) : t('cf.backup.exportBtn')}
+            </button>
+          </span>
         </div>
 
-        <button
-          className="cf-btn is-primary"
-          onClick={() => void doExport()}
-          disabled={expPhase === 'running'}
-        >
-          {expPhase === 'running' ? <Loader2 size={14} className="cf-spin" /> : <Download size={14} />}
-          {expPhase === 'running' && expProgress
-            ? fill(t('cf.backup.exporting'), { done: expProgress.done, total: expProgress.total })
-            : t('cf.backup.exportBtn')}
-        </button>
-
         {expMsg && (
-          <p className={expMsg.kind === 'ok' ? 'cf-backup__ok' : 'cf-backup__err'}>{expMsg.text}</p>
+          <div className="cf-set__row">
+            <span className={expMsg.kind === 'ok' ? 'cf-backup__ok' : 'cf-backup__err'}>{expMsg.text}</span>
+          </div>
         )}
-      </section>
 
-      {/* ───────── 还原 ───────── */}
-      <section className="cf-backup__card">
-        <h3 className="cf-backup__h3">
-          <Upload size={16} /> {t('cf.backup.restoreTitle')}
-        </h3>
-        <p className="cf-backup__desc">{t('cf.backup.restoreDesc')}</p>
-
-        <button className="cf-btn" onClick={() => void doInspect()} disabled={resPhase === 'running'}>
-          {resPhase === 'inspecting' ? <Loader2 size={14} className="cf-spin" /> : <Upload size={14} />}
-          {t('cf.backup.chooseBtn')}
-        </button>
+        {/* ───────── 还原 ───────── */}
+        <div className="cf-set__row">
+          <span className="cf-set__label">
+            {t('cf.backup.restoreTitle')}
+            <span className="cf-set__hint">{t('cf.backup.restoreDesc')}</span>
+          </span>
+          <span className="cf-backup__acts">
+            <button className="btn" onClick={() => void doInspect()} disabled={resPhase === 'running'}>
+              {resPhase === 'inspecting' ? <Loader2 size={14} className="cf-spin" /> : <Upload size={14} />}
+              {t('cf.backup.chooseBtn')}
+            </button>
+          </span>
+        </div>
 
         {info && (
-          <div className="cf-backup__inspect">
+          <div className="cf-set__row cf-backup__inspect">
             <div className="cf-backup__kv">
               <span>{t('cf.backup.kvExportedAt')}</span>
               <b>{new Date(info.exportedAt).toLocaleString()}</b>
@@ -351,7 +375,9 @@ export function BackupPane(): React.JSX.Element {
             <div className="cf-backup__kv">
               <span>{t('cf.backup.kvFiles')}</span>
               <b>
-                {info.files} · {fmtBytes(info.bytes)}
+                {info.files}
+                {'，'}
+                {fmtBytes(info.bytes)}
               </b>
             </div>
             <div className="cf-backup__kv">
@@ -372,41 +398,47 @@ export function BackupPane(): React.JSX.Element {
           </div>
         )}
 
-        {info?.hasSecrets && <p className="cf-backup__hint">{t('cf.backup.containsSecrets')}</p>}
-
-        {needConfirm && (
-          <div className="cf-backup__danger">
-            <AlertTriangle size={16} />
-            <p>{t('cf.backup.overwriteWarn')}</p>
+        {info?.hasSecrets && (
+          <div className="cf-set__row">
+            <p className="cf-backup__hint">{t('cf.backup.containsSecrets')}</p>
           </div>
         )}
 
         {info && (
-          <button
-            className={needConfirm ? 'cf-btn is-danger' : 'cf-btn is-primary'}
-            onClick={() => void doRestore()}
-            disabled={resPhase === 'running'}
-          >
-            {resPhase === 'running' ? <Loader2 size={14} className="cf-spin" /> : <Upload size={14} />}
-            {resPhase === 'running' && resProgress
-              ? fill(t('cf.backup.restoring'), {
-                  step: resProgress.step,
-                  done: resProgress.done,
-                  total: resProgress.total
-                })
-              : needConfirm
-                ? t('cf.backup.overwriteConfirmBtn')
-                : t('cf.backup.restoreBtn')}
-          </button>
+          <div className="cf-set__row">
+            {needConfirm && (
+              <span className="cf-setrow__note cf-setrow__note--warn">{t('cf.backup.overwriteWarn')}</span>
+            )}
+            <span className="cf-backup__acts">
+              <button
+                className={needConfirm ? 'btn btn--danger btn--sm' : 'btn btn--primary'}
+                onClick={() => void doRestore()}
+                disabled={resPhase === 'running'}
+              >
+                {resPhase === 'running' ? <Loader2 size={14} className="cf-spin" /> : <Upload size={14} />}
+                {resPhase === 'running' && resProgress
+                  ? fill(t('cf.backup.restoring'), {
+                      step: resProgress.step,
+                      done: resProgress.done,
+                      total: resProgress.total
+                    })
+                  : needConfirm
+                    ? t('cf.backup.overwriteConfirmBtn')
+                    : t('cf.backup.restoreBtn')}
+              </button>
+            </span>
+          </div>
         )}
 
         {resMsg && (
-          <p className={resMsg.kind === 'ok' ? 'cf-backup__ok' : 'cf-backup__err'}>{resMsg.text}</p>
+          <div className="cf-set__row">
+            <span className={resMsg.kind === 'ok' ? 'cf-backup__ok' : 'cf-backup__err'}>{resMsg.text}</span>
+          </div>
         )}
         {resMsg?.notes?.map((n) => (
-          <p className="cf-backup__hint" key={n}>
-            {n}
-          </p>
+          <div className="cf-set__row" key={n}>
+            <p className="cf-backup__hint">{n}</p>
+          </div>
         ))}
       </section>
     </div>

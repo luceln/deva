@@ -6390,49 +6390,34 @@ body.cf-pop-open * {
   gap: var(--space-4);
   max-width: 720px;
 }
-.cf-backup__intro {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1.7;
-}
-.cf-backup__card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md, 8px);
-  background: var(--bg-subtle, transparent);
-}
-.cf-backup__h3 {
+.cf-backup__acts {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  margin-left: auto;
 }
-.cf-backup__desc {
-  margin: 0 0 var(--space-1);
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.7;
+/*
+ * 加载中图标旋转。`cf-spin` 以前在 BackupPane 里用了三次，但 CSS 全仓 0 处定义 ——
+ * 图标根本不转，用户看不出「还在跑」还是「卡住了」。这里补上定义（带降级）。
+ */
+.cf-spin {
+  animation: cf-spin-rotate 1s linear infinite;
 }
-.cf-backup__label {
-  font-size: 12px;
-  color: var(--text-secondary);
+@keyframes cf-spin-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-spin {
+    animation: none;
+  }
 }
 .cf-backup__hint {
   margin: 0;
   font-size: 12px;
   color: var(--text-tertiary, var(--text-secondary));
   line-height: 1.6;
-}
-.cf-backup__warn {
-  margin: 0;
-  font-size: 12px;
-  color: var(--warn, #d97706);
 }
 .cf-backup__ok {
   margin: 0;
@@ -6464,20 +6449,6 @@ body.cf-pop-open * {
 }
 .cf-backup__kv span {
   color: var(--text-secondary);
-}
-.cf-backup__danger {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid var(--danger, #dc2626);
-  border-radius: var(--radius-sm, 6px);
-  color: var(--danger, #dc2626);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.cf-backup__danger p {
-  margin: 0;
 }
 /* 危险按钮：还原会整目录覆盖，不能与普通主要按钮长得一样 */
 .cf-btn.is-danger {

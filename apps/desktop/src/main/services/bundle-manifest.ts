@@ -134,7 +134,7 @@ const LINK_TREE_MAX_FILES = 2000
  * 之前就先读了 600MB；而导出最该先知道的是「目标盘装不装得下」——装不下时前面那几分钟全白烧。
  * 所以 `scanHome` 只做 lstat（不读内容），容量检查通过后才调 `hashFiles` 补哈希。
  */
-export async function scanHome(homeDir: string): Promise<ScanResult> {
+export async function scanHome(homeDir: string, onTick?: () => void): Promise<ScanResult> {
   const files: ManifestFile[] = []
   const symlinks: SymlinkEntry[] = []
   const dirs: string[] = []
@@ -199,6 +199,7 @@ export async function scanHome(homeDir: string): Promise<ScanResult> {
         total += st.size
         count += 1
         kept = true
+        onTick?.()
       }
       if (!kept && relDir) tree.dirs.push(relDir)
       return kept
@@ -256,6 +257,7 @@ export async function scanHome(homeDir: string): Promise<ScanResult> {
       // sha256 先留空，由 hashFiles 阶段补上
       files.push({ path: rel, size: st.size, sha256: '' })
       bytes += st.size
+      onTick?.()
     }
   }
 
@@ -304,11 +306,47 @@ export async function scanHome(homeDir: string): Promise<ScanResult> {
   return { files, symlinks, dirs, links, excluded: summarizeExcluded(excludedRaw), bytes }
 }
 
-/** 给扫描到的文件补上 sha256（原地修改并返回同一个对象）。 */
-export async function hashFiles(homeDir: string, scan: ScanResult, onTick?: () => void): Promise<ScanResult> {
+/**
+ * 进度回调的节流间隔。
+ *
+ * 为什么要节流：`hashFiles` 每算完一个文件就回调一次，而一个真实 home 有几千个小文件
+ * （checkpoint / tool-results 各上千个）。每个 tick 都要跨 IPC 发一次进度，主进程会把
+ * 时间花在序列化和 `webContents.send` 上，小文件占多数时反而拖慢哈希阶段。
+ *
+ * 100ms 与 `backup-ipc.ts` 的 `PROGRESS_THROTTLE_MS` 一致：那边还会再节流一次，
+ * 这里先挡一道，避免把几千次调用堆进 IPC 队列。人眼也分辨不出 10Hz 以上的计数变化。
+ */
+const PROGRESS_TICK_MS = 100
+
+/**
+ * 给扫描到的文件补上 sha256（原地修改并返回同一个对象）。
+ *
+ * `onTick` 收的是 `(done, total)` 而不是无参回调：**节流会丢 tick，调用方不能靠自己累加**
+ * （否则界面会停在 31/2002 这种明显不对的收尾值上）。最后一个文件算完必定补发一次，
+ * 保证 `done === total`。
+ */
+export async function hashFiles(
+  homeDir: string,
+  scan: ScanResult,
+  onTick?: (done: number, total: number) => void
+): Promise<ScanResult> {
+  const total = scan.files.length + scan.links.reduce((n, t) => n + t.files.length, 0)
+  let done = 0
+  let lastAt = 0
+  const tick = (): void => {
+    done += 1
+    if (!onTick) return
+    const now = Date.now()
+    // 收尾那次必须发，否则界面停在 total-1 上，看起来像卡住了
+    if (done === total || now - lastAt >= PROGRESS_TICK_MS) {
+      lastAt = now
+      onTick(done, total)
+    }
+  }
+
   for (const f of scan.files) {
     f.sha256 = await hashFile(join(homeDir, f.path))
-    onTick?.()
+    tick()
   }
   /*
    * 链接目标内容也要算哈希：它在包里是普通文件条目，还原前照样逐条核对。
@@ -328,7 +366,7 @@ export async function hashFiles(homeDir: string, scan: ScanResult, onTick?: () =
     }
     for (const f of tree.files) {
       f.sha256 = await hashFile(join(targetAbs, f.path))
-      onTick?.()
+      tick()
     }
   }
   return scan
