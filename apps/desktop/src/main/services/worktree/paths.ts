@@ -210,6 +210,24 @@ export function worktreeRoot(): string {
 }
 
 /**
+ * 当前生效的根 + 默认根，**同一次调用算出**。
+ *
+ * 为什么不写成 `worktreeRoot()` 再单独调一次 `defaultWorktreeRoot()`：
+ * 如果两次调用之间 `DEVA_HOME` 或配置变了（迁移、外部改配置），界面就会显示
+ * 「当前 X、默认 Y」而 X 其实是按旧默认算出来的 —— 这种不一致只在竞态下出现，极难复现。
+ * 这里一次读完 `raw`，默认值和生效值都由同一个 `raw` 推出，两者必然自洽。
+ *
+ * 与 `worktreeRoot()` 完全同判据：缺键 / 空串 / 非字符串 → 默认根（需求 §6.2）。
+ */
+export function worktreeRootView(): { root: string; defaultRoot: string; isDefault: boolean } {
+  const raw = getConfig()[WORKTREE_ROOT_KEY]
+  const isDefault = !(typeof raw === 'string' && raw.trim() !== '')
+  const defaultRoot = normalizeWorktreePath(defaultWorktreeRoot()).path
+  const root = isDefault ? defaultRoot : normalizeWorktreePath(String(raw).trim()).path
+  return { root, defaultRoot, isDefault }
+}
+
+/**
  * `p` 是否在根内（含根自身）。**不得用 `startsWith`** —— 需求 §7.2 的四种形态：
  *
  * | 形态 | `startsWith` 的错 | compareKey 为什么对 |

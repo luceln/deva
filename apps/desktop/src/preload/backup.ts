@@ -5,7 +5,7 @@
  * 里已经稳定的那部分。
  */
 import { ipcRenderer } from 'electron'
-import type { RestoreProgress } from '../shared/bundle-format'
+import type { ExportProgress, RestoreProgress } from '../shared/bundle-format'
 
 /** 探包结果：界面据此展示「里面有什么」以及是否需要提示含密钥。 */
 export type InspectResult =
@@ -34,8 +34,8 @@ export const backupApi = {
   restore: (opts: { path: string; overwriteConfirmed?: boolean }): Promise<unknown> =>
     ipcRenderer.invoke('backup:restore', opts),
 
-  onExportProgress: (cb: (p: { step: string; done: number; total: number }) => void): (() => void) => {
-    const l = (_e: unknown, p: { step: string; done: number; total: number }): void => cb(p)
+  onExportProgress: (cb: (p: ExportProgress) => void): (() => void) => {
+    const l = (_e: unknown, p: ExportProgress): void => cb(p)
     ipcRenderer.on('backup:export-progress', l)
     return () => ipcRenderer.removeListener('backup:export-progress', l)
   },

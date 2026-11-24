@@ -18,7 +18,7 @@ import { DEFERRED_MEMBER_TOOLS, mainMemberTools, type MemberRef } from './member
 import {
   SUBAGENT_EXCLUDED
 } from './tool-catalog'
-import { loadProjectDoc, projectDocPromptSection } from './project-doc'
+import { loadProjectDocChain, projectDocPromptSection } from './project-doc'
 import { GENERAL_SUBAGENT, subagentSummaries, type SubagentDef } from './subagents'
 import {
   HANDOFF_TOOL
@@ -385,7 +385,7 @@ export function buildSubagentSystem(def: SubagentDef, dir: WorkDir): string {
   ]
   // 项目说明：子智能体同样在该项目里干活（Explore / Research / Plan 调研、通用子智能体动手），须知项目约定。
   // 派生时按当时的工作区读取（轮中挂载后派生的也能拿到），在子轮内定格。
-  const projectDoc = projectDocPromptSection(loadProjectDoc(dir.root))
+  const projectDoc = projectDocPromptSection(loadProjectDocChain(dir.root))
   if (projectDoc.length) lines.push(...projectDoc)
   const body = def.prompt.trim()
   if (body) lines.push('', '你的职责与专长如下：', body)

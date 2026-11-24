@@ -8,7 +8,7 @@
 合并上游 0.1.16 时，上游 `9daa64f`（「输入框新增模型面板」）把模型选择器整个重写成
 `ModelPanel.tsx` + `ModelMenu.tsx` + `context-usage.ts`。我们原来的 `ModelPicker`（246 行）
 里带着失效标红与批量替换，按「一次提交只做一件事」在合并时先摘掉，再由独立提交迁回。
-原文备份在 `.deva/qa/removed-ModelPicker.tsx.bak`，清单在 `.deva/pending-model-swap-ui.md`。
+原文备份在 `.deva/qa/removed-ModelPicker.tsx.bak`，清单在 `notes/implemented/2026-11-18-model-swap-ui-restore.md`。
 
 ## 怎么跑
 

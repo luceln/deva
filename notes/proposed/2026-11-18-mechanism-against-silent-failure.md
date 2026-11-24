@@ -1,5 +1,14 @@
 # 提速方案：用机制防住「静默失败」
 
+<!-- doclink:foreign -->
+<!-- 本文引用的 docs/*.md 属 magpie 仓库；那不是本仓路径，不按本仓判。 -->
+
+> **状态：proposed（部分落地）** —— 2026-11-23 归档时核实：
+> - **机制 1 已落地**：「静默失败」规则已进 `LESSONS.md`（`grep -l 静默失败 LESSONS.md` 命中）
+> - **机制 2 未落地**：`scripts/check-silent-failure.mjs` **不存在**，`scripts/` 目录也不存在
+> - 其余机制（反向证据、规则沉淀、错误码文案校验、写盘指纹）未逐项核实
+> - **因此是 proposed 不是 implemented**：不能因为「方案写了」就当已生效
+
 > 依据：本次导入功能（24 文件 / 1744 行）走四轮审查-修复循环的实际 bug 分类，
 > 加 yetone/magpie 的公开工程规则（8528 次提交 / 54 天，MIT）。
 > 每条规则都标了来源和它防住的具体 bug。
@@ -171,7 +180,8 @@ AI 一定看得到。放别处等于赌 AI 会去读。
 
 ### 机制 2：自检脚本（零依赖，进 build 流程）
 
-新建 `scripts/check-silent-failure.mjs`，扫 `apps/desktop/src/main/` 和 `shared/`，
+<!-- doclink:ignore-next-line -->
+新建 `scripts/check-silent-failure.mjs`（待建），扫 `apps/desktop/src/main/` 和 `shared/`，
 输出违规位置。**规则只查能用正则可靠识别的四种模式**：
 
 | # | 模式 | 检出什么 | 防住的 bug |

@@ -34,7 +34,7 @@ import { skillInvocationText } from './skill-invoke'
 import type { MemoryAccess, MemoryScope } from './memory'
 import { memoryPromptSection } from './memory-prompt'
 import { tidyPendingMemories } from './memory-tidy'
-import { loadProjectDoc, projectDocPromptSection } from './project-doc'
+import { loadProjectDocChain, projectDocPromptSection } from './project-doc'
 import { DEFAULT_PERSONA_ID, getPersona, resolvePersonaId } from './personas'
 import {
   resolveDefaultEffort,
@@ -712,11 +712,12 @@ export async function runTurn(
     )
     // 项目说明在轮开头快照进 system：本轮中途改 AGENTS.md 不改 system（提示缓存前缀稳定），下一轮生效。
     // 成员负责子文件夹时，项目根目录（主对话工作目录）的 AGENTS.md 也一并读入，近者在后。
+    // 每一份都按所在目录的整条链取（根 → 子目录），所以子目录里的说明现在会真的进提示词。
     const projectDoc = [
       ...(isMember && mainRoot && !sameRoot(mainRoot, effectiveRoot)
-        ? projectDocPromptSection(loadProjectDoc(mainRoot))
+        ? projectDocPromptSection(loadProjectDocChain(mainRoot))
         : []),
-      ...projectDocPromptSection(loadProjectDoc(effectiveRoot))
+      ...projectDocPromptSection(loadProjectDocChain(effectiveRoot))
     ]
 
     /*

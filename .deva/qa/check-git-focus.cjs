@@ -200,15 +200,26 @@ if (!fn || !fn.body) {
   }
 
   // ── F7 注释与实现一致（必查第五类）────────────────────────────
+  /*
+   * qa-trap-exempt: 这一组断言的**对象就是注释本身**（F7 要查「文档注释有没有跟上实现的
+   * focus 刷新」），不是「读源码文本找代码」。所以这里不能剥注释 —— 剥掉就没什么可查了。
+   * 第 209、211 行那两处 `.test(commentBlock)` 是有意断言注释内容，非假绿。
+   */
   const docComment = fn.getFullText(sf).slice(0, fn.getStart(sf) - fn.getFullText(sf).length + 1)
   const leading = src.slice(Math.max(0, src.indexOf('function useGitStatus') - 900), src.indexOf('function useGitStatus'))
   const commentBlock = (leading.match(/\/\*\*[\s\S]*?\*\//g) || []).pop() || ''
   void docComment
   if (!commentBlock) {
     bad('F7 注释存在', 'useGitStatus 上方没有文档注释')
-  } else if (!/焦点|focus/i.test(commentBlock)) {
+  } else if (
+    // qa-trap-exempt: 断言对象是注释内容（见上），非源码结构
+    !/焦点|focus/i.test(commentBlock)
+  ) {
     bad('F7 注释写明焦点刷新', '文档注释没提到「焦点/focus」—— 实现加了 focus 刷新，注释却没更新（本仓必查第五类：注释与实现不符）')
-  } else if (/只在「挂载 \/ 开菜单 \/ 每次写操作后」/.test(commentBlock)) {
+  } else if (
+    // qa-trap-exempt: 同上，查的是注释里的旧表述
+    /只在「挂载 \/ 开菜单 \/ 每次写操作后」/.test(commentBlock)
+  ) {
     bad('F7 注释写明焦点刷新', '注释仍是旧的三时机表述，与实现不符')
   } else {
     ok('F7 注释写明焦点刷新', '文档注释提到焦点，且不含旧的三时机表述')

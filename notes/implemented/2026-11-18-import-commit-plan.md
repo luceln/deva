@@ -1,5 +1,12 @@
 # 导入功能提交计划（按 magpie 小步原则）
 
+> **已实现（2026-11-23 归档时核实）** —— 计划中要新建的文件与改动均已落地：
+> - `apps/desktop/src/main/importer-source-dir.ts` ✅ 存在
+> - `apps/desktop/src/main/importer-target.ts` ✅ 存在
+> - `chat-store.ts` 的 `invalidateIndexOnly()` ✅ 存在（`:384` 有语义说明注释）
+> - `importer-assoc.ts` 的 `copyFileFresh` ✅ 存在（`:132`）
+> 因此本文件是**已完成的提交拆分记录**，不是待办；文件里的 `- [ ]` 勾选状态不再维护。
+
 > 依据：magpie 一天 220 次提交不崩，靠的是**每个改动很小、马上提交**。
 > 我们反过来攒了 36 个文件 2440 行，这是三轮变五轮的根本原因。
 > 目标：拆成 6 个可独立回退的提交，让下一次改动只面对一小片代码。

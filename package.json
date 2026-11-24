@@ -12,6 +12,8 @@
     "build": "pnpm --filter devaplus build",
     "start": "pnpm --filter devaplus start",
     "typecheck": "pnpm --filter devaplus typecheck",
+    "check:dup": "node .deva/qa/check-duplication.cjs",
+    "check:dup:update": "node .deva/qa/check-duplication.cjs --update-baseline",
     "package:win": "pnpm --filter devaplus build:win",
     "package:mac": "pnpm --filter devaplus build:mac",
     "package:linux": "pnpm --filter devaplus build:linux",
@@ -32,6 +34,7 @@
   },
   "devDependencies": {
     "esbuild": "0.21.5",
+    "jscpd": "5.4.3",
     "puppeteer": "^25.18.1"
   }
 }

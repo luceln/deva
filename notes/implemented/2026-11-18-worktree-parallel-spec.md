@@ -1,7 +1,17 @@
 # 多需求并行开发 · 实现规格（v1 定稿）
 
+> **取代关系（2026-11-23 归档时补记）**
+> 本文件是「多需求并行开发」这一主题的**最终版**，取代以下两份：
+> - `archived/2026-11-18-worktree-parallel-acceptance-v4.md`（原 `.deva/req-worktree-parallel.md`，验收清单 v4）
+> - `archived/2026-11-18-worktree-parallel-scope-v3.md`（原 `.deva/req-worktree-parallel-v3.md`，口径拍板记录 v3）
+>
+> 取代方式是「**合并进单一规格**」：三份原本分层（验收 / 口径 / 实现），实操中没人说得清哪份有效，
+> 已把验收与口径的有效内容并入本文件 §0.2 与各条断言。两份原文冻结在 `archived/` 仅作历史。
+> **已实现**：`apps/desktop/src/main/services/worktree/` 15 个文件 + `preload/worktree.ts` +
+> `WorktreePane.tsx` / `MergePanel.tsx`（见 `git log --oneline -- apps/desktop/src/main/services/worktree/`）。
+
 > 状态：已拍板，可直接派工。供求实现方与验收方共同遵守。
-> 上游：`.deva/req-worktree-parallel.md`（v2 的 34 条断言）+ `.deva/req-worktree-parallel-v3.md`（口径）+ `.deva/design/worktree-parallel.html`（界面原型，已校对）。
+> 上游：`archived/2026-11-18-worktree-parallel-acceptance-v4.md`（v2 的 34 条断言）+ `archived/2026-11-18-worktree-parallel-scope-v3.md`（口径）+ `.deva/design/worktree-parallel.html`（界面原型，不纳入版本管理）。
 > **本文件与 v2/v3 冲突时以本文件为准**（仅限本文件显式声明的覆盖项，见 §0.2）；与原型冲突时见 §11.2（四处，均已按原型修正）。
 > 阅读顺序：§0 → §1 → §3（实现主线）→ §4（合并）→ 其余按需。§10 是交付前自查清单，§11 是原型一致性核对。
 
@@ -453,7 +463,7 @@ skipped ──用户点「安装依赖」──────────▶ insta
 | 0.5 | `git check-ref-format --branch <branch>` 退出码 0 | `bad-branch` | B3 |
 | 0.6 | `git rev-parse --verify --quiet refs/heads/<branch>` → **成功 = 已存在** | `branch-exists`（A23：不得静默复用）+ 可用替代（§6.3 自动后缀） | A23 |
 | 0.7 | `existsSync(path)` | `path-exists`（A22：不得覆盖不得删） | A22 |
-| 0.8 | `normalizeWorktreePath(path).path.length < 180`，且路径在仓库外（§6.1），且在 worktree 根内（见 `.deva/req-worktree-root-custom.md`） | `path-too-long`（A46）/ `path-inside-repo` / `path-outside-root` | A46 |
+| 0.8 | `normalizeWorktreePath(path).path.length < 180`，且路径在仓库外（§6.1），且在 worktree 根内（见 `notes/implemented/2026-11-23-worktree-root-custom.md`） | `path-too-long`（A46）/ `path-inside-repo` / `path-outside-root` | A46 |
 | 0.9 | `git status --porcelain` in 主目录 → 行数 `dirtyCount` | `dirtyCount > 0 && !req.confirmedDirty` → `needs-confirm`（A17/A18） | A17-A21 |
 | 0.10 | `findRecordByRepo(repoRoot).length >= 5` | 返回 `softWarn: 'many-worktrees'`，**不阻断** | — |
 | 0.11 | `trustRoot(repoRoot)`；`trustRoot(dirname(path))` | — | 后续 git/fs IPC 的前提 |
@@ -1149,7 +1159,7 @@ export function gitLockHolder(path: string): { label: string; since: number } | 
 
 > **根可自定义**：上面的 `<DEVA_HOME>/worktrees` 只是**默认根**。用户可在设置里指定 `worktreeRoot`
 > （`config.json` 顶层键，缺键即用默认，`DEVA_HOME` 迁移时自动跟随）。创建必须落在根内、删除不删根外目录，
-> 以及存量记录的处理，见 **`.deva/req-worktree-root-custom.md`**。本节其余内容（repoKey 分桶、
+> 以及存量记录的处理，见 **`notes/implemented/2026-11-23-worktree-root-custom.md`**。本节其余内容（repoKey 分桶、
 > 仓库外硬约束）不受影响，仍然有效。
 
 - `<DEVA_HOME>` 由 `getDevaHome()`（`config.ts:27`）给出，支持 `DEVA_HOME` 环境变量覆盖 → 用户可整体挪盘，与数据一起备份/迁移。
@@ -1770,7 +1780,7 @@ export interface MergeCheck {
 
 ### 9.4 需要补的断言（本文件新增，v2 没有）
 
-A35~A55 —— 共 21 条，正文见 §0.3 与 §9.1/§9.4/§9.5。**这 21 条必须追加进 `.deva/req-worktree-parallel.md`**（验收方按那一份执行）。
+A35~A55 —— 共 21 条，正文见 §0.3 与 §9.1/§9.4/§9.5。**这 21 条必须追加进 `notes/archived/2026-11-18-worktree-parallel-acceptance-v4.md`**（验收方按那一份执行）。
 
 ### 9.5 原型校对后新增的断言（A50-A55）
 
@@ -1812,7 +1822,7 @@ A35~A55 —— 共 21 条，正文见 §0.3 与 §9.1/§9.4/§9.5。**这 21 条
 
 ---
 
-## 11. 原型（`.deva/design/worktree-parallel.html`）与规格的一致性
+## 11. 原型（`.deva/design/worktree-parallel.html`，不纳入版本管理）与规格的一致性
 
 ### 11.1 已对齐（规格覆盖原型画出的全部状态）
 

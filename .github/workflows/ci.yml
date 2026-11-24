@@ -26,6 +26,11 @@ jobs:
       ELECTRON_SKIP_BINARY_DOWNLOAD: 1
     steps:
       - uses: actions/checkout@v5
+        with:
+          # 下面「判据自身的假绿」用 `HEAD^` 当 push 场景的基线，浅克隆里 `HEAD^` 不存在，
+          # 脚本会退化成全量（全绿时无害，但「只拦新增」就形同虚设）。用 0 = 完整历史。
+          # 代价只是几十 MB 的 fetch；这条判据要能真正拦住新写的假绿，值得。
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
 
@@ -62,6 +67,60 @@ jobs:
           node .deva/qa/check-preload-shape.cjs
           node .deva/qa/check-i18n-keys.cjs
           node .deva/qa/check-brand-home.cjs
+
+      # 文档链接：`.md` 里引用的仓库内路径必须真的存在。
+      # 守着「陈旧指令比没有指令更糟」——文档指着不存在的地方让人去找，读者扑空还看不出谁错了。
+      # 刚发生过一次：决策记录换了个目录之后，
+      # `.deva/` 之外有 5 处引用（LESSONS.md ×4、MEMBERS.md ×1）没跟着改，悄悄悬空——
+      # 编译/类型/测试全无反应，只能靠这条守。
+      # 只认带目录的路径（`notes/x.md`、`docs/x.md`、`.deva/x.md`、`../y.md`）：裸文件名多数指运行期产物
+      # （`config.json` 是 <DEVA_HOME>/config.json），一律要求存在会把判据变成误报机。
+      - name: 文档链接
+        run: node .deva/qa/check-doc-links.cjs
+
+      # 判据自己的假绿：新写的 `.deva/qa/*.cjs` 若拿正则断言源码却不剥注释，或用了
+      # `||` 兜底正则 / 无锚点的超长跨行窗口，注释里提到的类名与函数名就能让它假绿。
+      # 这种失效在编译、类型、测试里全都看不出来——只能靠元判据守。
+      #
+      # **只拦新增**（`--base=$QA_TRAP_BASE`）：存量的 3 个老脚本还有缺陷，
+      # 全量接入会让第一次 PR 就全红、然后这条被人关掉（与重复代码基线同一个坑）。
+      # 因此这里只对「本次改动涉及」的脚本报 FAIL，其余只列 BASELINE 明细。
+      #
+      # base ref 的取法：PR 上取目标分支，push 上取「上一个提交」。
+      # 不能用 `origin/<当前分支>` —— PR 场景里它指向本次改动之前的同一分支，
+      # push 到 dev/main 时又不存在对应远端跟踪分支，两种情况都会退化成全量。
+      # 远端 ref 在 checkout 后是 `refs/remotes/origin/<name>` 形式，先 fetch 一次保险。
+      - name: 判据自身的假绿
+        env:
+          QA_TRAP_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'HEAD^' }}
+        run: |
+          # 目标分支的远端 ref 不一定在本地（PR 事件默认只 fetch 了 merge ref）
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}" || true
+          fi
+          node .deva/qa/check-qa-no-comment-trap.cjs --base="$QA_TRAP_BASE"
+
+      # 重复代码：**只拦新增**，存量 41 处（832 行 / 0.86%）不拦。
+      # 全量判「有重复就红」会让第一次跑就全红，然后所有人把这条关掉——jscpd 官方点名的坑。
+      # 用 `.jscpd-baseline.json` 记下已知重复的指纹，新出现的才报。
+      # 有意重复（比如 driver 与 CI 各自跑同一批脚本）用 /* jscpd:ignore-start|end */ 包住。
+      # 清理了存量之后用 pnpm check:dup:update 重写基线。
+      - name: 重复代码
+        run: pnpm check:dup
+
+      # AI 索引体系本身：这些判据守着「文档写了但内容漂了」这类失效——
+      # 能力表指向不存在的文件、注入链超预算、原型用了产品没有的类名。
+      # 全部只读源码与文档，不跑应用，几秒内跑完，所以放在同一组里。
+      #
+      # 为什么要进 CI：本轮之前这 4 条都只在本机手工跑过，等于「建了但不生效」。
+      # 索引的价值全在长期一致，不上 CI 就一定漂。
+      - name: AI 索引体系
+        run: |
+          node .deva/qa/check-agents-table.cjs
+          node .deva/qa/check-project-doc-chain.cjs
+          node .deva/qa/check-prototype-classes.cjs
+          node .deva/qa/check-worktree-root-ui.cjs
+          node .deva/qa/check-worktree-inside-root-ui.cjs
 
       # 导入功能的行为场景（esbuild 打包后逐个独立进程跑）。
       # Linux 上有 2 个场景的夹具不成立（full 要真实 ~/.deva、gate 要 powershell.exe），

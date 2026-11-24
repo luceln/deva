@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 实施门槛：把 `.deva/spec-worktree-parallel.md` §8 的任务表变成可跑的判据。
+ * 实施门槛：把 `notes/implemented/2026-11-18-worktree-parallel-spec.md` §8 的任务表变成可跑的判据。
  *
  * ## 为什么需要它
  *

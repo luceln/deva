@@ -55,6 +55,20 @@ const srcManifest = read(MANIFEST)
 const srcFormat = read(FORMAT)
 const srcIpc = read(IPC)
 
+/*
+ * 断言一律看**剥掉注释**的文本。
+ *
+ * 这个脚本查的正是「不许用某个 API」（`invalidateIndex()`、`new Zip(`），
+ * 而注释里天生会写「不能用 invalidateIndex()」。不剥注释时，真正的禁用被恢复也照样绿。
+ * 变量名保留 `code*` 前缀，和脚本里既有的 `codeImport` / `codeExport` 一致。
+ */
+const { stripComments, sliceBraced } = require('./lib/strip-comments.cjs')
+const codeImport = stripComments(srcImport)
+const codeExport = stripComments(srcExport)
+const codeIpc = stripComments(srcIpc)
+const codeManifest = stripComments(srcManifest)
+const codeFormat = stripComments(srcFormat)
+
 const need = (name, src, re, msg) => {
   const hits = src.match(re) || []
   if (hits.length === 0) {
@@ -157,12 +171,21 @@ need('B3e 记录符号链接', srcManifest, /symlinks\.push\(\{ path: rel, targe
 need('B4a 有路径安全判据', srcManifest, /export function isSafeEntryPath/, '缺 isSafeEntryPath')
 need('B4b 拒绝 .. 段', srcManifest, /s === '\.\.'/, '没拒绝 ..')
 need('B4c 拒绝绝对路径', srcManifest, /p\.startsWith\('\/'\)/, '没拒绝绝对路径')
-need(
-  'B4d 解压前校验全部条目名',
-  srcImport,
-  /for \(const name of names\)[\s\S]{0,200}isSafeEntryPath\(name\)/,
-  '没在写文件前校验条目名'
-)
+/*
+ * B4d：条目名校验必须在「写文件之前」。
+ *
+ * 原写法 `/for \(const name of names\)[\s\S]{0,200}isSafeEntryPath\(name\)/` 是 200 字符
+ * 长度窗口：窗口内只看「两个词挨得近」，既能跨到循环之后的代码（假绿），也会因为夹了
+ * 几行注释/日志而够不到（假红）。改为按花括号配平取出那个 for 循环体，只在体内找校验调用。
+ */
+{
+  const at = codeImport.indexOf('for (const name of names)')
+  const braceAt = at === -1 ? -1 : codeImport.indexOf('{', at)
+  const loopBody = braceAt === -1 ? null : sliceBraced(codeImport, braceAt)
+  if (loopBody !== null && /isSafeEntryPath\(name\)/.test(loopBody))
+    pass('B4d 解压前校验全部条目名', 'for 循环体内校验')
+  else fail('B4d 解压前校验全部条目名', '没在写文件前校验条目名（循环体内未见 isSafeEntryPath(name)）')
+}
 /*
  * B4e：条目名必须来自**中央目录**而非解压结果，否则「先验名再落盘」只是形式 ——
  * 流式解压时条目是一个个来的，验到危险条目时前面的字节已经写进磁盘了。
@@ -175,7 +198,20 @@ need(
 )
 
 // ── B5 finally 清理 ──
-const hasFinally = /finally \{[\s\S]{0,400}rm\(staging/.test(srcImport)
+/*
+ * 原写法 `/finally \{[\s\S]{0,400}rm\(staging/` 是 400 字符长度窗口：能从**别的**
+ * finally 一路吞到随便哪处 `rm(staging`（假绿），也会因为 finally 里多几行日志而够不到（假红）。
+ * 改为取所有 `finally` 块的块体，只要有一个块体内同时出现两者即可。
+ */
+const hasFinally = (() => {
+  for (let i = codeImport.indexOf('finally'); i !== -1; i = codeImport.indexOf('finally', i + 1)) {
+    const braceAt = codeImport.indexOf('{', i)
+    if (braceAt === -1) continue
+    const body = sliceBraced(codeImport, braceAt)
+    if (body !== null && /rm\(\s*staging/.test(body)) return true
+  }
+  return false
+})()
 if (!hasFinally) fail('B5 临时目录在 finally 清理', 'staging 清理不在 finally 里')
 else pass('B5 临时目录在 finally 清理')
 
@@ -202,13 +238,8 @@ need('B8a 用 invalidateIndexOnly', srcImport, /invalidateIndexOnly\(\)/, '没�
 /**
  * 去掉注释再判：注释里常常**提及**被禁止的写法（「不能用 invalidateIndex()」正是如此），
  * 直接正则匹配会把"提醒不要用"误判成"用了"。这是源码形状护栏的常见假阳性来源。
+ * 剥注释与 `codeImport` / `codeExport` 的定义已在文件前部统一做过。
  */
-function stripComments(src) {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1')
-}
-
-const codeImport = stripComments(srcImport)
-const codeExport = stripComments(srcExport)
 
 forbid(
   'B8b 不得用 invalidateIndex',

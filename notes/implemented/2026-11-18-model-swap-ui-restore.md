@@ -1,5 +1,18 @@
 # 合并上游 0.1.16 时摘掉的界面功能：待恢复清单
 
+> **已实现（2026-11-23 归档时核实）** —— 本清单要求的迁移已全部完成，留作决策记录。
+> 落盘证据：
+> - `renderer/src/redesign/ModelPanel.tsx:13-22` 文件头写明「失效标红 + 批量替换」已接入
+> - `:113-120` 失效态贴片换成红色/警示色、点击直接开批量替换
+> - `:48-49` `swapTarget = { mainId, fromRef }` 引用快照（打开时不随 broken 消失）
+> - `:36,138` `ModelSwapDialog` 已挂载
+> - 六类 kind 齐备：`model-availability.ts:154` `model-disabled`、`:169` `keyunreadable`、
+>   `:135` `missing`(provider)、`:152` `missing`(model)；`messages.ts` 六条中英文案（含 `keyunreadable` 与 `nokey` 分开）
+> - `Composer.tsx` 里 `ModelPicker` 已不存在（`grep -n ModelPicker` 无命中）
+>
+> **本文件因此是「已完成的决策记录」**，不是待办。**剩余未做的一项**：清单「验证要求」第 1 条
+> （`.deva/qa/spec-gate.cjs` 模型切换断言仍绿）需在交付前实跑确认，本文件不记录其结论。
+
 ## 为什么有这个文件
 
 合并 `upstream/main` @ `718908e`（0.1.16）时，上游 `9daa64f`（「输入框新增模型面板」）把模型选择器

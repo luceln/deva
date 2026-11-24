@@ -15,6 +15,7 @@ import { useI18n } from '../i18n/i18n'
 import { useToast } from '../components/ToastProvider'
 import { useDialog } from '../components/DialogProvider'
 import { MergePanel } from './MergePanel'
+import { WorktreeRootSetting } from './WorktreeRootSetting'
 import { useWorktree } from '../store/worktree'
 import type {
   MergeBlocker,
@@ -181,6 +182,9 @@ export function WorktreePane(): React.JSX.Element {
           {t('cf.wt.refresh')}
         </button>
       </div>
+
+      {/* 根目录设置：放标题之后、列表之前 —— 它决定「列表里的目录在哪」，先于列表出现才对 */}
+      <WorktreeRootSetting />
 
       {error && (
         <div className="cf-wt__err" role="alert">
@@ -415,6 +419,13 @@ function WorktreeCard({ view }: { view: WorktreeListItem }): React.JSX.Element {
         {/* state 与「无关联会话」两枚 badge 并列，互不覆盖（§2.5 / A54） */}
         {badState && <span className="cf-wt__badge is-bad">{stateText}</span>}
         {noSession && <span className="cf-wt__badge">{t('cf.wt.noSession')}</span>}
+        {/*
+          A11 / A28：是否在**当前**工作区根内（`§10.1b` / `§11.2` / `§10.2`）。
+          主进程按当前生效根算、恒给布尔值（老记录也算得出），所以这里判 `=== false` 即可。
+          仍然显式写 `=== false` 而不是 `!view.insideRoot`：字段恒有值，两种写法等价，
+          但显式比较不会因为将来把字段改回可选而静默变成「全部标红」。
+        */}
+        {view.insideRoot === false && <span className="cf-wt__badge">{t('cf.wt.rootOutsideBadge')}</span>}
         {view.deps !== 'ready' && view.deps !== 'skipped' && (
           <span className={`cf-wt__badge${view.deps === 'failed' ? ' is-bad' : ''}`}>{t(DEPS_KEY[view.deps])}</span>
         )}
@@ -482,6 +493,14 @@ function WorktreeCard({ view }: { view: WorktreeListItem }): React.JSX.Element {
             {t('cf.wt.deps.retry')}
           </button>
         </div>
+      )}
+
+      {/*
+        A28 引导句（`§10.1b` 末段）：根外记录说清楚「这里不能新建」，以及「想用这里当根该怎么改」。
+        措辞刻意避开「非法 / 无效」—— 这个目录本身完全正常，只是不在当前根的辖区内。
+      */}
+      {view.insideRoot === false && (
+        <div className="cf-wt__note">{t('cf.wt.rootOutsideNote')}</div>
       )}
 
       {/*
